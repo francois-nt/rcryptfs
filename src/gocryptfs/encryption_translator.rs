@@ -189,11 +189,11 @@ impl<T: Backend> EncryptionTranslator for GoCryptFs<T> {
     }
     /// Generates a cipher header for the file.
     fn generate_cipher_header(&self) -> Vec<u8> {
-        // Header layout: version, reserved byte, then random file ID.
+        // Header layout: reserved byte, version, then random file ID.
         let mut header = vec![0u8; Self::HEADER_LEN];
-        header[0] = 0; // version
-        header[1] = 2; // reserved
-        rand::rng().fill_bytes(&mut header[2..18]);
+        header[0] = 0; // reserved
+        header[1] = 2; // version
+        rand::rng().fill_bytes(&mut header[Self::HEADER_LEN - Self::FILEID_LEN..Self::HEADER_LEN]);
 
         header
     }
