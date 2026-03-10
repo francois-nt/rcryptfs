@@ -2,6 +2,7 @@
 name = "rcryptfs"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.91"
 
 [dependencies]
 aes = "0.8.4"

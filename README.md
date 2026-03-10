@@ -81,7 +81,25 @@ The exact direction will depend on implementation complexity, reliability, and m
 - production-grade Windows mounting today
 - concurrent multi-process access to the same encrypted backend
 
-## Build
+## Security Notice
 
-```sh
-cargo build --release
+`rcryptfs` is experimental software and has not been audited.
+
+It may be suitable for development, interoperability testing, and experimentation,
+but it should not yet be relied upon for protecting high-value or production data.
+
+Compatibility with `gocryptfs` is still incomplete, and some repository layouts or options
+may be unsupported or only partially tested.
+
+## Contributing
+
+Contributions are welcome, especially in the following areas:
+
+- compatibility testing against real `gocryptfs` repositories and options
+- integration and regression tests
+- FUSE behavior and edge-case handling on Unix
+- Windows support exploration (`WebDAV`, `WinFSP`, platform abstractions)
+- performance and memory profiling
+- CLI ergonomics and documentation
+
+See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for development setup and contribution guidelines.
