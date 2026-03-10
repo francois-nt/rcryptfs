@@ -103,3 +103,18 @@ Contributions are welcome, especially in the following areas:
 - CLI ergonomics and documentation
 
 See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for development setup and contribution guidelines.
+
+## Getting Started
+
+### Build
+```sh
+cargo build --release
+```
+### Mount an existing gocryptfs repository
+```sh
+./target/release/rcryptfs /path/to/encrypted /path/to/mountpoint
+```
+### See available commands
+```sh
+./target/release/rcryptfs -h
+```
