@@ -114,7 +114,7 @@ cargo build --release
 ```sh
 ./target/release/rcryptfs /path/to/encrypted /path/to/mountpoint
 ```
-### See available commands
+### See available arguments
 ```sh
 ./target/release/rcryptfs -h
 ```
