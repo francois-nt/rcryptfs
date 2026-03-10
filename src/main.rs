@@ -110,6 +110,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let folder_path = Utf8Path::new(&args.folder_path);
     let is_background_child = std::env::var_os(BG_ENV).is_some();
+    #[cfg(windows)]
     if stdin_is_piped() && args.cli_mode {
         // CLI mode needs stdin for interactive commands, so password piping is rejected here.
         anyhow::bail!("stdin cant be piped in cli mode!");
