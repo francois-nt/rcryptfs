@@ -23,13 +23,9 @@ pub fn run_cli_shell<C: OpenCache>(handler: &FileSystemHandler<C>) -> Result<()>
                     break;
                 }
             }
-            Err(ReadlineError::Eof) => {
+            Err(ReadlineError::Eof) | Err(ReadlineError::Interrupted) => {
                 println!();
-                break; // Ctrl+D
-            }
-            Err(ReadlineError::Interrupted) => {
-                println!();
-                continue; // Ctrl+C
+                break; // Ctrl+D or Ctrl+C
             }
             Err(err) => return Err(err).context("CLI input failed"),
         }
