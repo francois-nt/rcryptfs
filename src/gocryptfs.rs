@@ -278,22 +278,31 @@ impl GoCryptFs<FsBackend> {
         if !dir_is_empty(root_path)? {
             bail!("Directory {} must be empty!", root_path);
         }
+        // Best effort rollback in case of error
+        let rollback = |_: &std::io::Error| {
+            let _ = std::fs::remove_file(root_path.join("gocryptfs.conf"));
+            let _ = std::fs::remove_file(root_path.join("gocryptfs.diriv"));
+        };
         let (config, master_key) = GoCryptfsConfig::try_new(password)?;
-        let mut file = std::fs::OpenOptions::new()
+        std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
-            .open(root_path.join("gocryptfs.conf"))?;
-        let json_config = serde_json::to_vec_pretty(&config)?;
-        file.write_all(&json_config)?;
+            .open(root_path.join("gocryptfs.conf"))
+            .and_then(|mut file| {
+                let json_config = serde_json::to_vec_pretty(&config)?;
+                file.write_all(&json_config)
+            })
+            .inspect_err(rollback)?;
 
         // The root directory uses its own DirIV file just like any other directory.
         let mut root_dir_iv = [0u8; 16];
         rand::fill(&mut root_dir_iv);
-        let mut file = std::fs::OpenOptions::new()
+        std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
-            .open(root_path.join("gocryptfs.diriv"))?;
-        file.write_all(&root_dir_iv)?;
+            .open(root_path.join("gocryptfs.diriv"))
+            .and_then(|mut file| file.write_all(&root_dir_iv))
+            .inspect_err(rollback)?;
 
         Ok(master_key)
     }
