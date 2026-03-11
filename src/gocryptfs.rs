@@ -72,7 +72,7 @@ fn derive_keys<T: Backend>(
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "PascalCase")]
-/// Scrypt parameters stored in `gocryptfs.conf`.
+/// Scrypt parameters stored in gocryptfs.conf.
 struct ScryptObject {
     salt: String,
     n: u32,
@@ -108,7 +108,7 @@ struct GoCryptfsConfig {
 }
 
 impl GoCryptfsConfig {
-    /// Creates a fresh `gocryptfs.conf` payload and returns the generated master key.
+    /// Creates a fresh gocryptfs.conf payload and returns the generated master key.
     fn try_new(password: &str) -> Result<(Self, Vec<u8>)> {
         let creator = format!("rcryptfs {}", env!("CARGO_PKG_VERSION"));
         let scrypt_object = ScryptObject::default();
