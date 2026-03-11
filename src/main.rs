@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use camino::Utf8Path;
 use clap::{Parser, ValueEnum};
 use rcryptfs::{
-    FileCache, FileSystemBuilder, FileSystemFactory, FileSystemHandler, FsBackend, GoCryptFs,
+    FileSystemBuilder, FileSystemFactory, FileSystemHandler, FsBackend, GoCryptFs, NoCache,
 };
 #[cfg(not(windows))]
 use std::ffi::OsStr;
@@ -232,7 +232,7 @@ fn main() -> Result<()> {
 
         Command::Mount(mount_args) => {
             let password = read_password(false)?;
-            let cryptfs = FileSystemFactory::build(folder_path, &password, FileCache::default())?;
+            let cryptfs = FileSystemFactory::build(folder_path, &password, NoCache)?;
 
             let is_background_child = std::env::var_os(BG_ENV).is_some();
             // Validate the password before respawning so errors are still reported in the foreground process.
@@ -269,7 +269,7 @@ fn main() -> Result<()> {
         }
         Command::Cli(_) => {
             let password = read_password(true)?;
-            let cryptfs = FileSystemFactory::build(folder_path, &password, FileCache::default())?;
+            let cryptfs = FileSystemFactory::build(folder_path, &password, NoCache)?;
             let handler: FileSystemHandler<rcryptfs::CacheLock> = cryptfs.into();
             // CLI mode reuses stdin after password entry, so the platform layer restores an interactive input when needed.
             platform::prepare_cli_stdin(stdin_is_piped())?;

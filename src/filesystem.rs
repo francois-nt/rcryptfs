@@ -42,7 +42,7 @@ impl FileCachePolicy for FileCache {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct NoCache;
 impl FileCachePolicy for NoCache {
     fn cache_write(&self) -> bool {
@@ -76,32 +76,24 @@ impl<T, C: FileCachePolicy> Clone for EncryptedFileTranslator<T, C> {
     }
 }
 
-trait CryptFsFileCreator<T> {
-    fn try_open<C: FileCachePolicy>(
-        path: &Utf8Path,
-        backend: Arc<T>,
-        options: GenericOpenOptions,
-        cache_policy: C,
-    ) -> std::io::Result<Box<dyn ReadWrite>>;
-}
-
-struct CryptFsFactory;
-impl<T: EncryptionTranslator + Send + Sync + 'static> CryptFsFileCreator<T> for CryptFsFactory {
-    fn try_open<C: FileCachePolicy>(
-        path: &Utf8Path,
-        backend: Arc<T>,
-        options: GenericOpenOptions,
-        cache_policy: C,
-    ) -> std::io::Result<Box<dyn ReadWrite>> {
-        if cache_policy.cache_write() {
-            Ok(Box::new(BufferedFile::from(CryptFsFile::<T>::try_open(
-                path, backend, options,
-            )?)))
-        } else {
-            Ok(Box::new(CryptFsFile::<T>::try_open(
-                path, backend, options,
-            )?))
-        }
+/// Opens an encrypted file and wraps it with the requested cache policy.
+fn try_open_crypt_file<T, C: FileCachePolicy>(
+    path: &Utf8Path,
+    backend: Arc<T>,
+    options: GenericOpenOptions,
+    cache_policy: C,
+) -> std::io::Result<Box<dyn ReadWrite>>
+where
+    T: EncryptionTranslator + Send + Sync + 'static,
+{
+    if cache_policy.cache_write() {
+        Ok(Box::new(BufferedFile::from(CryptFsFile::<T>::try_open(
+            path, backend, options,
+        )?)))
+    } else {
+        Ok(Box::new(CryptFsFile::<T>::try_open(
+            path, backend, options,
+        )?))
     }
 }
 
@@ -113,7 +105,7 @@ where
         let cipher_path = self.fs.plain_path_to_cipher(path.into()).or_invalid()?;
         let mut options = GenericOpenOptions::default();
         options.read(true);
-        CryptFsFactory::try_open(&cipher_path, self.fs.clone(), options, self.cache_policy)
+        try_open_crypt_file(&cipher_path, self.fs.clone(), options, self.cache_policy)
     }
     fn metadata(&self, path: &str) -> std::io::Result<Metadata> {
         let cipher_path = self.fs.plain_path_to_cipher(path.into()).or_invalid()?;
@@ -210,7 +202,7 @@ where
         options: GenericOpenOptions,
     ) -> std::io::Result<Box<dyn ReadWrite>> {
         let cipher_path = self.fs.plain_path_to_cipher(path.into()).or_invalid()?;
-        CryptFsFactory::try_open(&cipher_path, self.fs.clone(), options, self.cache_policy)
+        try_open_crypt_file(&cipher_path, self.fs.clone(), options, self.cache_policy)
     }
     /// Creates a new directory with given permissions.
     fn mkdir(&self, path: &str, permissions: Permissions) -> std::io::Result<Metadata> {
@@ -370,20 +362,20 @@ where
 }
 
 pub trait FileSystemBuilder {
-    fn build(
+    fn build<Cache: FileCachePolicy>(
         root_path: &Utf8Path,
         password: &str,
-        cache_policy: impl FileCachePolicy,
+        cache_policy: Cache,
     ) -> Result<Box<dyn FileSystem>>;
 }
 
 pub struct FileSystemFactory;
 
 impl FileSystemBuilder for FileSystemFactory {
-    fn build(
+    fn build<Cache: FileCachePolicy>(
         root_path: &Utf8Path,
         password: &str,
-        cache_policy: impl FileCachePolicy,
+        cache_policy: Cache,
     ) -> Result<Box<dyn FileSystem>> {
         let cryptfs: EncryptedFileTranslator<GoCryptFs<FsBackend>, _> = (
             GoCryptFs::<FsBackend>::try_new(root_path, password)?,
