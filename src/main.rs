@@ -69,12 +69,11 @@ enum Command {
 
 #[derive(Parser)]
 struct InitArgs {
+    /// Initialize encrypted directory
+    #[arg(value_enum, value_name = "CRYPTFS_TYPE")]
+    init_mode: InitMode,
     /// local encrypted folder
     folder_path: String,
-
-    /// Initialize encrypted directory
-    #[arg(value_enum)]
-    init_mode: InitMode,
 }
 
 #[derive(Parser)]
@@ -102,40 +101,6 @@ struct MountArgs {
 struct CliArgs {
     /// local encrypted folder
     folder_path: String,
-}
-
-#[derive(Parser)]
-#[command(long_about = None)]
-struct Args0 {
-    /// local encrypted folder
-    folder_path: String,
-
-    /// set the number of background threads - use AUTO for default parallelism
-    #[arg(short, long, value_name = "AUTO|number_of_threads")]
-    num_threads: Option<String>,
-    /// foreground operation
-    #[arg(long, short)]
-    foreground: bool,
-
-    /// Initialize encrypted directory
-    #[arg(long, conflicts_with = "mount_point", value_name = "CRYPTFS_TYPE")]
-    init: Option<InitMode>,
-
-    /// pass options to fuse backend
-    #[arg(short = 'o', action = clap::ArgAction::Append)]
-    fuse_opts: Vec<String>,
-
-    /// CLI mode (no mount point)
-    #[arg(long = "cli", conflicts_with_all = ["mount_point", "init"])]
-    cli_mode: bool,
-
-    /// mount point (ex: /mnt/data)
-    #[arg(
-        value_name = "MOUNT_POINT",
-        required_unless_present = "cli_mode",
-        required_unless_present = "init"
-    )]
-    mount_point: Option<String>,
 }
 
 fn input_password(prompt: &str) -> Result<String> {
@@ -254,11 +219,12 @@ fn main() -> Result<()> {
                     println!("paper and store it in a drawer. This message is only printed once.");
                     println!("The gocryptfs filesystem has been created successfully.");
                     println!(
-                        "You can now mount it using: rcryptfs {} MOUNTPOINT",
+                        "You can now mount it using: rcryptfs mount {} MOUNTPOINT",
                         folder_path
                     );
                 }
                 _ => {
+                    todo!("not implemented");
                     // do nothing for the moment
                 }
             };
@@ -289,7 +255,7 @@ fn main() -> Result<()> {
                     .and_then(|v| parse_number_of_threads(v))
                     .unwrap_or_default(); // default is 0
 
-                println!("num threads is {num_threads}");
+                log::debug!("num threads is {num_threads}");
                 let mut fuse_args = Vec::with_capacity(mount_args.fuse_opts.len() * 2 + 2);
                 fuse_args.push(OsStr::new("-o"));
                 fuse_args.push(OsStr::new("fsname=rcryptfs"));
