@@ -72,7 +72,6 @@ fn derive_keys<T: Backend>(
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "PascalCase")]
-/// Scrypt parameters stored in gocryptfs.conf.
 struct ScryptObject {
     salt: String,
     n: u32,
@@ -318,5 +317,119 @@ impl GoCryptFs<FsBackend> {
             master_key.as_slice().try_into()?,
             &config.feature_flags,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{EncryptionTranslator, MemoryBackend};
+    use tempfile::tempdir;
+
+    /// Creates a deterministic backend instance for pure crypto tests.
+    fn test_backend() -> GoCryptFs<MemoryBackend> {
+        let master_key = [7u8; 32];
+        let feature_flags = vec![
+            "HKDF".to_string(),
+            "GCMIV128".to_string(),
+            "DirIV".to_string(),
+            "EMENames".to_string(),
+            "LongNames".to_string(),
+            "Raw64".to_string(),
+        ];
+        derive_keys(MemoryBackend, &master_key, &feature_flags).unwrap()
+    }
+
+    #[test]
+    fn filename_roundtrip_preserves_plain_name() {
+        let backend = test_backend();
+        let parent_iv = [3u8; 16];
+        let plain_name = "hello-é_file.txt";
+
+        let cipher_name = backend
+            .plain_name_to_cipher(&parent_iv, plain_name)
+            .unwrap();
+        let decrypted_name = backend
+            .cipher_name_to_plain(&parent_iv, &cipher_name)
+            .unwrap();
+
+        assert_eq!(decrypted_name, plain_name);
+    }
+
+    #[test]
+    fn block_roundtrip_preserves_plain_data() {
+        let backend = test_backend();
+        let header = backend.generate_cipher_header();
+        let plain_data = b"hello encrypted world";
+
+        let cipher_data = backend
+            .plain_block_to_cipher(&header, 0, plain_data)
+            .unwrap();
+        let decrypted_data = backend
+            .cipher_block_to_plain(&header, 0, &cipher_data)
+            .unwrap();
+
+        assert_eq!(decrypted_data, plain_data);
+    }
+
+    #[test]
+    fn metavalue_roundtrip_preserves_plain_data() {
+        let backend = test_backend();
+        let plain_value = b"/some/symlink/target";
+
+        let cipher_value = backend.plain_metavalue_to_cipher(plain_value).unwrap();
+        let decrypted_value = backend.cipher_metavalue_to_plain(&cipher_value).unwrap();
+
+        assert_eq!(decrypted_value, plain_value);
+    }
+
+    #[test]
+    fn plain_and_cipher_sizes_roundtrip() {
+        let backend = test_backend();
+
+        for plain_size in [0, 1, 15, 128, 4095, 4096, 4097, 8192, 8209] {
+            let cipher_size = backend.plain_size_to_cipher(plain_size);
+            let recovered_plain_size = backend.cipher_size_to_plain(cipher_size).unwrap();
+            assert_eq!(recovered_plain_size, plain_size);
+        }
+    }
+
+    #[test]
+    fn init_creates_config_and_root_diriv() {
+        let temp_dir = tempdir().unwrap();
+        let root = Utf8Path::from_path(temp_dir.path()).unwrap();
+
+        let master_key =
+            GoCryptFs::<FsBackend>::init_with_default_params(root, "password").unwrap();
+
+        assert_eq!(master_key.len(), 32);
+        assert!(root.join("gocryptfs.conf").exists());
+        assert!(root.join("gocryptfs.diriv").exists());
+    }
+
+    #[test]
+    fn init_rejects_non_empty_directory() {
+        let temp_dir = tempdir().unwrap();
+        let root = Utf8Path::from_path(temp_dir.path()).unwrap();
+        std::fs::write(root.join("already-there"), b"x").unwrap();
+
+        let err = GoCryptFs::<FsBackend>::init_with_default_params(root, "password").unwrap_err();
+
+        assert!(err.to_string().contains("must be empty"));
+    }
+
+    #[test]
+    fn try_new_after_init_accepts_same_password() {
+        let temp_dir = tempdir().unwrap();
+        let root = Utf8Path::from_path(temp_dir.path()).unwrap();
+
+        GoCryptFs::<FsBackend>::init_with_default_params(root, "password").unwrap();
+        let reopened = GoCryptFs::<FsBackend>::try_new(root, "password").unwrap();
+
+        let header = reopened.generate_cipher_header();
+        let plain = b"roundtrip after init";
+        let cipher = reopened.plain_block_to_cipher(&header, 0, plain).unwrap();
+        let decrypted = reopened.cipher_block_to_plain(&header, 0, &cipher).unwrap();
+        assert_eq!(decrypted, plain);
     }
 }

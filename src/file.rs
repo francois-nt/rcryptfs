@@ -400,3 +400,115 @@ impl<T: EncryptionTranslator> SetLen for CryptFsFile<T> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{FsBackend, GoCryptFs};
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    /// Creates a test file backed by a freshly initialized GoCryptFS repository.
+    fn open_test_file() -> (tempfile::TempDir, CryptFsFile<GoCryptFs<FsBackend>>) {
+        let temp_dir = tempdir().unwrap();
+        let root = Utf8Path::from_path(temp_dir.path()).unwrap();
+        GoCryptFs::<FsBackend>::init_with_default_params(root, "password").unwrap();
+        let backend = Arc::new(GoCryptFs::<FsBackend>::try_new(root, "password").unwrap());
+
+        let mut options = GenericOpenOptions::default();
+        options.read(true).write(true).create(true);
+        let file = CryptFsFile::try_open(&root.join("cipher.bin"), backend, options).unwrap();
+
+        (temp_dir, file)
+    }
+
+    /// Builds deterministic test data of the requested size.
+    fn sample_data(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
+
+    #[test]
+    fn write_then_read_aligned_block() {
+        let (_temp_dir, file) = open_test_file();
+        let plain = sample_data(4096);
+
+        file.write_all_at(0, &plain).unwrap();
+
+        let mut read_back = vec![0u8; plain.len()];
+        let bytes_read = file.read_at(0, &mut read_back).unwrap();
+
+        assert_eq!(bytes_read, plain.len());
+        assert_eq!(read_back, plain);
+    }
+
+    #[test]
+    fn write_then_read_unaligned_range() {
+        let (_temp_dir, file) = open_test_file();
+        let offset = 37;
+        let plain = sample_data(900);
+
+        file.write_all_at(offset, &plain).unwrap();
+
+        let mut read_back = vec![0u8; plain.len()];
+        let bytes_read = file.read_at(offset, &mut read_back).unwrap();
+
+        assert_eq!(bytes_read, plain.len());
+        assert_eq!(read_back, plain);
+    }
+
+    #[test]
+    fn read_unaligned_range_across_blocks() {
+        let (_temp_dir, file) = open_test_file();
+        let full = sample_data(9000);
+        let offset = 123;
+        let expected = &full[offset..offset + 5000];
+
+        file.write_all_at(0, &full).unwrap();
+
+        let mut read_back = vec![0u8; expected.len()];
+        let bytes_read = file.read_at(offset as u64, &mut read_back).unwrap();
+
+        assert_eq!(bytes_read, expected.len());
+        assert_eq!(read_back, expected);
+    }
+
+    #[test]
+    fn write_and_read_handle_boundary_offsets_and_gaps() {
+        for offset in [1u64, 4095, 4096, 4097] {
+            let (_temp_dir, file) = open_test_file();
+            let plain = sample_data(128);
+
+            file.write_all_at(offset, &plain).unwrap();
+
+            let mut gap_and_data = vec![0u8; offset as usize + plain.len()];
+            let bytes_read = file.read_at(0, &mut gap_and_data).unwrap();
+
+            assert_eq!(bytes_read, gap_and_data.len(), "offset {offset}");
+            assert!(
+                gap_and_data[..offset as usize].iter().all(|&b| b == 0),
+                "offset {offset}"
+            );
+            assert_eq!(
+                &gap_and_data[offset as usize..],
+                plain.as_slice(),
+                "offset {offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn truncate_preserves_prefix() {
+        let (_temp_dir, file) = open_test_file();
+        let full = sample_data(6000);
+        let truncated_len = 3000;
+
+        file.write_all_at(0, &full).unwrap();
+        file.set_len(truncated_len as u64).unwrap();
+
+        let mut read_back = vec![0u8; 4000];
+        let bytes_read = file.read_at(0, &mut read_back).unwrap();
+
+        assert_eq!(bytes_read, truncated_len);
+        assert_eq!(&read_back[..truncated_len], &full[..truncated_len]);
+    }
+}
