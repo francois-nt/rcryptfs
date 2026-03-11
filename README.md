@@ -18,7 +18,7 @@ What currently works:
 Current limitations:
 - compatibility is not complete for every `gocryptfs` feature or configuration
 - Windows support is incomplete
-- multi-process access to the same encrypted backend is undefined behavior
+- multi-process access to the same encrypted backend is unsupported
 - the project still needs more testing and hardening
 
 ## Project Direction
