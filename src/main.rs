@@ -224,18 +224,14 @@ fn main() -> Result<()> {
                     );
                 }
                 _ => {
-                    todo!("not implemented");
                     // do nothing for the moment
+                    bail!("other init_mode is not implemented yet");
                 }
             };
         }
 
         Command::Mount(mount_args) => {
-            let password = if stdin_is_piped() {
-                read_password_from_stdin()?
-            } else {
-                input_password("Enter password: ")?
-            };
+            let password = read_password(false)?;
             let cryptfs = FileSystemFactory::build(folder_path, &password, FileCache::default())?;
 
             let is_background_child = std::env::var_os(BG_ENV).is_some();
@@ -272,14 +268,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Cli(_) => {
-            let password = if stdin_is_piped() {
-                #[cfg(windows)]
-                anyhow::bail!("stdin cant be piped in cli mode!");
-                #[cfg(not(windows))]
-                read_password_from_stdin()?
-            } else {
-                input_password("Enter password: ")?
-            };
+            let password = read_password(true)?;
             let cryptfs = FileSystemFactory::build(folder_path, &password, FileCache::default())?;
             let handler: FileSystemHandler<rcryptfs::CacheLock> = cryptfs.into();
             // CLI mode reuses stdin after password entry, so the platform layer restores an interactive input when needed.
@@ -294,4 +283,24 @@ fn main() -> Result<()> {
 /// Detects whether stdin comes from a pipe or from an interactive terminal.
 fn stdin_is_piped() -> bool {
     !std::io::stdin().is_terminal()
+}
+
+/// Reads the repository password from stdin or from an interactive prompt, with CLI-specific piping rules.
+fn read_password(cli_mode: bool) -> Result<String> {
+    if stdin_is_piped() {
+        if cli_mode {
+            #[cfg(windows)]
+            {
+                bail!("stdin cant be piped in cli mode!");
+            }
+            #[cfg(not(windows))]
+            {
+                read_password_from_stdin()
+            }
+        } else {
+            read_password_from_stdin()
+        }
+    } else {
+        input_password("Enter password: ")
+    }
 }
