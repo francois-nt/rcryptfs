@@ -11,6 +11,7 @@ use hkdf::Hkdf;
 use scrypt::{Params as ScryptParams, scrypt};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::io::Write;
 
 mod encryption_translator;
 mod path_translator;
@@ -80,15 +81,89 @@ struct ScryptObject {
     key_len: u8,
 }
 
+impl Default for ScryptObject {
+    /// Builds the default scrypt parameters used when initializing a new backend.
+    fn default() -> Self {
+        let mut salt = [0u8; 32];
+        rand::fill(&mut salt);
+        let salt = B64.encode(salt);
+        Self {
+            salt,
+            n: 65536,
+            r: 8,
+            p: 1,
+            key_len: 32,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
-/// Parsed `gocryptfs.conf` file.
 struct GoCryptfsConfig {
     creator: String,
     encrypted_key: String,
     scrypt_object: ScryptObject,
     version: u64,
     feature_flags: Vec<String>,
+}
+
+impl GoCryptfsConfig {
+    /// Creates a fresh `gocryptfs.conf` payload and returns the generated master key.
+    fn try_new(password: &str) -> Result<(Self, Vec<u8>)> {
+        let creator = format!("rcryptfs {}", env!("CARGO_PKG_VERSION"));
+        let scrypt_object = ScryptObject::default();
+        let version = 2;
+        let feature_flags = vec![
+            "HKDF",
+            "GCMIV128",
+            "DirIV",
+            "EMENames",
+            "LongNames",
+            "Raw64",
+        ];
+        let feature_flags: Vec<String> = feature_flags.into_iter().map(String::from).collect();
+        let salt = B64.decode(&scrypt_object.salt)?;
+        let log_n = scrypt_object.n.trailing_zeros() as u8;
+        let params = ScryptParams::new(log_n, scrypt_object.r.into(), scrypt_object.p.into(), 32)?;
+        let mut kek = [0u8; 32];
+        scrypt(password.as_bytes(), salt.as_slice(), &params, &mut kek)?;
+        let mut gcm_key = [0u8; 32];
+        let hk = Hkdf::<Sha256>::new(None, &kek);
+        hk.expand(b"AES-GCM file content encryption", &mut gcm_key)
+            .map_err(|_| anyhow!("hkdf expand failed"))?;
+
+        let aad = [0u8; 8];
+        let mut nonce = [0u8; 16];
+        rand::fill(&mut nonce);
+        let mut master_key = vec![0u8; 32];
+        rand::fill(master_key.as_mut_slice());
+        type Aes256GcmIv128 = AesGcm<Aes256, typenum::U16>;
+        let cipher = Aes256GcmIv128::new(GenericArray::from_slice(&gcm_key));
+        let raw_encrypted_key = cipher
+            .encrypt(
+                GenericArray::from_slice(&nonce),
+                aead::Payload {
+                    msg: &master_key,
+                    aad: &aad,
+                },
+            )
+            .map_err(|e| anyhow!("can't encrypt master_key {e}"))?;
+        // The final EncryptedKey field is 'nonce||ciphertext||tag', encoded in base64.
+        let mut encrypted_key = Vec::with_capacity(nonce.len() + raw_encrypted_key.len());
+        encrypted_key.extend_from_slice(&nonce);
+        encrypted_key.extend_from_slice(&raw_encrypted_key);
+        let encrypted_key = B64.encode(encrypted_key);
+        Ok((
+            Self {
+                creator,
+                encrypted_key,
+                scrypt_object,
+                version,
+                feature_flags,
+            },
+            master_key,
+        ))
+    }
 }
 
 /// Derives the master key from password and configuration.
@@ -192,7 +267,36 @@ impl<T: Backend> GoCryptFs<T> {
     const PLAIN_BLOCK_LEN: u64 = 4096;
     const CIPHER_BLOCK_LEN: u64 = Self::PLAIN_BLOCK_LEN + (Self::TAG_LEN + Self::NONCE_LEN) as u64;
 }
+
+fn dir_is_empty(path: &Utf8Path) -> std::io::Result<bool> {
+    Ok(std::fs::read_dir(path)?.next().is_none())
+}
+
 impl GoCryptFs<FsBackend> {
+    /// Initializes a new GoCryptFS-compatible backend with default parameters.
+    pub fn init_with_default_params(root_path: &Utf8Path, password: &str) -> Result<Vec<u8>> {
+        if !dir_is_empty(root_path)? {
+            bail!("Directory {} must be empty!", root_path);
+        }
+        let (config, master_key) = GoCryptfsConfig::try_new(password)?;
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(root_path.join("gocryptfs.conf"))?;
+        let json_config = serde_json::to_vec_pretty(&config)?;
+        file.write_all(&json_config)?;
+
+        // The root directory uses its own DirIV file just like any other directory.
+        let mut root_dir_iv = [0u8; 16];
+        rand::fill(&mut root_dir_iv);
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(root_path.join("gocryptfs.diriv"))?;
+        file.write_all(&root_dir_iv)?;
+
+        Ok(master_key)
+    }
     /// Creates a new GoCryptFs instance from a cipher root path and password.
     pub fn try_new(root_path: &Utf8Path, password: &str) -> Result<Self> {
         let file_path = root_path.join("gocryptfs.conf");

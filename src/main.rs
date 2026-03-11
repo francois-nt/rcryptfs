@@ -1,7 +1,9 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use camino::Utf8Path;
-use clap::Parser;
-use rcryptfs::{FileCache, FileSystemBuilder, FileSystemFactory, FileSystemHandler};
+use clap::{Parser, ValueEnum};
+use rcryptfs::{
+    FileCache, FileSystemBuilder, FileSystemFactory, FileSystemHandler, FsBackend, GoCryptFs,
+};
 #[cfg(not(windows))]
 use std::ffi::OsStr;
 use std::io::{IsTerminal, Write};
@@ -29,6 +31,14 @@ impl log::Log for ConsoleLogger {
 struct ConsoleLogger;
 static LOGGER: ConsoleLogger = ConsoleLogger;
 
+#[derive(Copy, Clone, Debug, ValueEnum)]
+/// Supported backend formats for repository initialization.
+enum InitMode {
+    #[value(name = "gocryptfs")]
+    GoCryptFS,
+    Other,
+}
+
 #[derive(Parser)]
 #[command(long_about = None)]
 struct Args {
@@ -42,16 +52,24 @@ struct Args {
     #[arg(long, short)]
     foreground: bool,
 
+    /// Initialize encrypted directory
+    #[arg(long, conflicts_with = "mount_point", value_name = "CRYPTFS_TYPE")]
+    init: Option<InitMode>,
+
     /// pass options to fuse backend
     #[arg(short = 'o', action = clap::ArgAction::Append)]
     fuse_opts: Vec<String>,
 
     /// CLI mode (no mount point)
-    #[arg(long = "cli", conflicts_with = "mount_point")]
+    #[arg(long = "cli", conflicts_with_all = ["mount_point", "init"])]
     cli_mode: bool,
 
     /// mount point (ex: /mnt/data)
-    #[arg(value_name = "MOUNT_POINT", required_unless_present = "cli_mode")]
+    #[arg(
+        value_name = "MOUNT_POINT",
+        required_unless_present = "cli_mode",
+        required_unless_present = "init"
+    )]
     mount_point: Option<String>,
 }
 
@@ -106,9 +124,82 @@ fn read_password_from_stdin() -> Result<String> {
     Ok(password.trim_end_matches(&['\r', '\n'][..]).to_string())
 }
 
+/// Formats a 32-byte master key as two grouped hex lines for terminal display.
+fn format_32_bytes(data: &[u8]) -> (String, String) {
+    assert_eq!(data.len(), 32);
+
+    let first = data[..16]
+        .chunks(4)
+        .map(|chunk| {
+            chunk
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("-");
+
+    let second = data[16..]
+        .chunks(4)
+        .map(|chunk| {
+            chunk
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("-");
+
+    (first, second)
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let folder_path = Utf8Path::new(&args.folder_path);
+
+    if let Some(init) = args.init {
+        // Initialization needs a new password, so ask twice unless it is piped in.
+        let password = if stdin_is_piped() {
+            read_password_from_stdin()?
+        } else {
+            let password = platform::prompt_password(
+                "Choose a password for protecting your files.\nPassword: ",
+            )?;
+            let repeated_password = platform::prompt_password("Repeat: ")?;
+            if password != repeated_password {
+                bail!("not the same password!");
+            }
+            password
+        };
+        match init {
+            InitMode::GoCryptFS => {
+                // Print the generated master key once so it can be stored offline for recovery.
+                let master_key =
+                    GoCryptFs::<FsBackend>::init_with_default_params(folder_path, &password)?;
+                println!("\nYour master key is:\n");
+                let (first, second) = format_32_bytes(&master_key);
+                println!("    {first}-\n    {second}\n");
+                println!(
+                    "If the gocryptfs.conf file becomes corrupted or you ever forget your password,"
+                );
+                println!(
+                    "there is only one hope for recovery: The master key. Print it to a piece of"
+                );
+                println!("paper and store it in a drawer. This message is only printed once.");
+                println!("The gocryptfs filesystem has been created successfully.");
+                println!(
+                    "You can now mount it using: rcryptfs {} MOUNTPOINT",
+                    args.folder_path
+                );
+            }
+            _ => {
+                // do nothing for the moment
+            }
+        };
+
+        return Ok(());
+    }
+
     let is_background_child = std::env::var_os(BG_ENV).is_some();
     #[cfg(windows)]
     if stdin_is_piped() && args.cli_mode {
@@ -161,12 +252,14 @@ fn main() -> Result<()> {
             )?;
         }
     } else {
+        // CLI mode reuses stdin after password entry, so the platform layer restores an interactive input when needed.
         platform::prepare_cli_stdin(stdin_is_piped())?;
         cli::run_cli_shell(&handler)?;
     }
     Ok(())
 }
 
+/// Detects whether stdin comes from a pipe or from an interactive terminal.
 fn stdin_is_piped() -> bool {
     !std::io::stdin().is_terminal()
 }
