@@ -1,3 +1,7 @@
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
 use anyhow::{Context, Result, bail};
 use camino::Utf8Path;
 use clap::{Parser, ValueEnum};
@@ -220,7 +224,7 @@ fn main() -> Result<()> {
     let handler: FileSystemHandler<rcryptfs::CacheLock> = cryptfs.into();
 
     if let Some(mount_point) = args.mount_point {
-        log::set_logger(&LOGGER).unwrap();
+        log::set_logger(&LOGGER).map_err(|e| anyhow::anyhow!("{e}"))?;
         log::set_max_level(log::LevelFilter::Error);
 
         #[cfg(windows)]

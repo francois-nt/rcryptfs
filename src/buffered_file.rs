@@ -1,4 +1,4 @@
-use crate::{ReadAt, ReadWrite, SetLen, SetSync, WriteAt, file::ModifiedTime};
+use crate::{OrIoError, ReadAt, ReadWrite, SetLen, SetSync, WriteAt, file::ModifiedTime};
 use parking_lot::Mutex;
 
 const BLOCK_LEN: usize = 4096;
@@ -110,7 +110,7 @@ impl<W: WriteAt + ModifiedTime> WriteAt for BufferedFile<W> {
         let mut done = 0usize;
 
         while !data.is_empty() {
-            let cursor = state.sequential_end.unwrap();
+            let cursor = state.sequential_end.or_invalid()?;
 
             if state.buffer_len == 0
                 && cursor.is_multiple_of(BLOCK_LEN as u64)
@@ -155,7 +155,7 @@ impl<W: WriteAt + ModifiedTime> WriteAt for BufferedFile<W> {
             done += take;
             state.sequential_end = Some(cursor + take as u64);
 
-            if state.sequential_end.unwrap() == end_block {
+            if state.sequential_end.or_invalid()? == end_block {
                 // Flush a completed staging block as soon as it becomes full.
                 if let Err(e) = self
                     .inner

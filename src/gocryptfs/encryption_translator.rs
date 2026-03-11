@@ -17,7 +17,7 @@ fn pkcs7_unpad16(mut buf: Vec<u8>) -> Result<Vec<u8>> {
     if buf.is_empty() || !buf.len().is_multiple_of(16) {
         bail!("bad padded length");
     }
-    let pad = *buf.last().unwrap() as usize;
+    let pad = *buf.last().unwrap_or(&0) as usize;
     if pad == 0 || pad > 16 || pad > buf.len() {
         bail!("bad pkcs7 pad len");
     }
