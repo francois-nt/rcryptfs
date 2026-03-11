@@ -112,9 +112,9 @@ cargo build --release
 ```
 ### Mount an existing gocryptfs repository
 ```sh
-./target/release/rcryptfs /path/to/encrypted /path/to/mountpoint
+./target/release/rcryptfs mount /path/to/encrypted /path/to/mountpoint
 ```
-### See available arguments
+### See available commands
 ```sh
 ./target/release/rcryptfs -h
 ```
