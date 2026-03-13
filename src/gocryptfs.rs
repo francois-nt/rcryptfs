@@ -37,7 +37,6 @@ fn derive_keys<T: Backend>(
     let has = |flag: &str| feature_flags.iter().any(|f| f == flag);
 
     let has_hkdf = has("HKDF");
-    //let gcm_nonce_len = if has("GCMIV128") { 16 } else { 12 };
     if !has("GCMIV128") {
         bail!("Only GCMIV128 is supported");
     }
@@ -169,17 +168,9 @@ impl GoCryptfsConfig {
 fn get_master_key(input: &str, config: &GoCryptfsConfig) -> Result<Vec<u8>> {
     let has_hkdf = config.feature_flags.iter().any(|f| f.as_str() == "HKDF");
 
-    // --- Parse EncryptedKey (base64) ---
-    //let enc_key_b64 = json.get_str("EncryptedKey")?;
-
     let enc_key = B64
         .decode(&config.encrypted_key)
         .context("EncryptedKey base64 decode failed")?;
-
-    // --- Parse ScryptObject ---
-    // let scrypt_obj = json
-    //     .get("ScryptObject")
-    //     .context("missing or invalid ScryptObject")?;
 
     let scrypt_obj = &config.scrypt_object;
     let salt = B64.decode(&scrypt_obj.salt)?;
@@ -213,25 +204,26 @@ fn get_master_key(input: &str, config: &GoCryptfsConfig) -> Result<Vec<u8>> {
         gcm_key.copy_from_slice(&kek);
     }
 
-    // --- Determine nonce length for EncryptedKey decryption ---
+    // Determine nonce length for EncryptedKey decryption
     // In gocryptfs config code: 96-bit for old (no HKDF), 128-bit when HKDF is on.
-    let nonce_len = if has_hkdf { 16 } else { 12 };
+    let master_key_nonce_len = if has_hkdf { 16 } else { 12 };
 
-    if enc_key.len() < nonce_len + 16 {
+    if enc_key.len() < master_key_nonce_len + 16 {
+        // 16 is the tag len
         bail!(
             "EncryptedKey too short: {} bytes (need at least {})",
             enc_key.len(),
-            nonce_len + 16
+            master_key_nonce_len + 16
         );
     }
 
-    let (nonce, ct_and_tag) = enc_key.split_at(nonce_len);
+    let (nonce, ct_and_tag) = enc_key.split_at(master_key_nonce_len);
 
     // AAD for config masterkey decrypt is blockNo=0, fileID=nil => 8 bytes big-endian zero
     let aad = [0u8; 8];
 
-    // --- AES-256-GCM decrypt ---
-    let pt_res = if has_hkdf {
+    // AES-256-GCM decrypt
+    let pt_res = if master_key_nonce_len == 16 {
         // 128-bit nonce
         type Aes256GcmIv128 = AesGcm<Aes256, typenum::U16>;
         let cipher = Aes256GcmIv128::new(GenericArray::from_slice(&gcm_key));
@@ -267,15 +259,15 @@ impl<T: Backend> GoCryptFs<T> {
     const CIPHER_BLOCK_LEN: u64 = Self::PLAIN_BLOCK_LEN + (Self::TAG_LEN + Self::NONCE_LEN) as u64;
 }
 
-fn dir_is_empty(path: &Utf8Path) -> std::io::Result<bool> {
+fn is_dir_empty(path: &Utf8Path) -> std::io::Result<bool> {
     Ok(std::fs::read_dir(path)?.next().is_none())
 }
 
 impl GoCryptFs<FsBackend> {
     /// Initializes a new GoCryptFS-compatible backend with default parameters.
     pub fn init_with_default_params(root_path: &Utf8Path, password: &str) -> Result<Vec<u8>> {
-        if !dir_is_empty(root_path)? {
-            bail!("Directory {} must be empty!", root_path);
+        if !is_dir_empty(root_path)? {
+            bail!("Directory {root_path} must be empty!");
         }
         // Best effort rollback in case of error
         let rollback = |_: &std::io::Error| {
