@@ -509,8 +509,8 @@ impl<C: OpenCache + 'static> FilesystemMT for FileSystemHandler<C> {
     ) -> fuse_mt::ResultEntry {
         getattr(self, req, path)
     }
-    fn access(&self, _req: fuse_mt::RequestInfo, path: &Path, mask: u32) -> fuse_mt::ResultEmpty {
-        access(self, path, mask)
+    fn access(&self, req: fuse_mt::RequestInfo, path: &Path, mask: u32) -> fuse_mt::ResultEmpty {
+        access(self, req, path, mask)
     }
 }
 
@@ -570,16 +570,62 @@ fn getattr<T: ReadOnlyFileSystem + ?Sized>(
     Ok(attr)
 }
 
+fn check_access(
+    req_uid: u32,
+    req_gid: u32,
+    file_uid: Option<u32>,
+    file_gid: Option<u32>,
+    mode: u16,
+    mask: u32,
+) -> Result<(), i32> {
+    if mask == libc::F_OK as u32 {
+        return Ok(());
+    }
+    if req_uid == 0 {
+        if mask & libc::X_OK as u32 != 0 && mode & 0o111 == 0 {
+            return Err(libc::EACCES);
+        }
+        return Ok(());
+    }
+    let perm_bits = if file_uid == Some(req_uid) {
+        (mode >> 6) & 0o7
+    } else if file_gid == Some(req_gid) {
+        (mode >> 3) & 0o7
+    } else {
+        mode & 0o7
+    };
+
+    if mask & libc::R_OK as u32 != 0 && perm_bits & 0o4 == 0 {
+        return Err(libc::EACCES);
+    }
+    if mask & libc::W_OK as u32 != 0 && perm_bits & 0o2 == 0 {
+        return Err(libc::EACCES);
+    }
+    if mask & libc::X_OK as u32 != 0 && perm_bits & 0o1 == 0 {
+        return Err(libc::EACCES);
+    }
+
+    Ok(())
+}
+
 fn access<T: ReadOnlyFileSystem + ?Sized>(
     fs: impl AsRef<T>,
+    req: fuse_mt::RequestInfo,
     path: &Path,
     mask: u32,
 ) -> fuse_mt::ResultEmpty {
     debug!("access on {:?} with mask {mask}", path);
     let path = path.sanitize()?;
-    let _ = fs.as_ref().metadata(path).libc_err()?;
-    debug!("access ok for path {:?}", path);
-    Ok(())
+    let metadata = fs.as_ref().metadata(path).libc_err()?;
+    check_access(
+        req.uid,
+        req.gid,
+        metadata.uid,
+        metadata.gid,
+        metadata.permissions.into(),
+        mask,
+    )
+    .inspect(|_| debug!("access ok for path {:?}", path))
 }
 
 fn read<C: OpenCache + 'static>(
