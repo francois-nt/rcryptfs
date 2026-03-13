@@ -35,7 +35,7 @@ typenum = "1.19.0"
 vfs = "0.12.2"
 
 
-[target.'cfg(not(windows))'.dependencies]
+[target.'cfg(unix)'.dependencies]
 fuse_mt = "0.6.2"
 xattr = "1.6.1"
 

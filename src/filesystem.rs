@@ -135,7 +135,7 @@ where
         String::from_utf8(plain_value).or_invalid()
     }
     fn get_xattr(&self, path: &str, name: &str) -> std::io::Result<Vec<u8>> {
-        #[cfg(windows)]
+        #[cfg(not(unix))]
         {
             let _ = (path, name);
             return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
@@ -153,7 +153,7 @@ where
         }
     }
     fn list_xattr(&self, path: &str) -> std::io::Result<Box<dyn Iterator<Item = String> + '_>> {
-        #[cfg(windows)]
+        #[cfg(not(unix))]
         {
             let _ = path;
             return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
@@ -309,7 +309,7 @@ where
             let cipher_path = self.fs.plain_path_to_cipher(path.into()).or_invalid()?;
             std::os::unix::fs::chown(cipher_path, uid, gid)
         }
-        #[cfg(windows)]
+        #[cfg(not(unix))]
         {
             let _ = (path, uid, gid);
             Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
@@ -324,7 +324,7 @@ where
 
         #[cfg(unix)]
         std::os::unix::fs::symlink(cipher_target, &cipher_path)?;
-        #[cfg(windows)]
+        #[cfg(not(unix))]
         std::os::windows::fs::symlink_file(cipher_target, &cipher_path)?;
 
         let metadata: Metadata = std::fs::symlink_metadata(cipher_path)?.into();
@@ -332,7 +332,7 @@ where
     }
 
     fn remove_xattr(&self, path: &str, name: &str) -> std::io::Result<()> {
-        #[cfg(windows)]
+        #[cfg(not(unix))]
         {
             let _ = (path, name);
             return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
@@ -346,7 +346,7 @@ where
         }
     }
     fn set_xattr(&self, path: &str, name: &str, value: &[u8]) -> std::io::Result<()> {
-        #[cfg(windows)]
+        #[cfg(not(unix))]
         {
             let _ = (path, name, value);
             return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));

@@ -1,5 +1,5 @@
 use super::Utf8Path;
-use crate::{Backend, FsBackend, Result};
+use crate::{Backend, FsBackend, Result, is_dir_empty};
 use aes::{Aes256, cipher::generic_array::GenericArray};
 use aes_gcm::{
     Aes256Gcm, AesGcm, KeyInit,
@@ -257,10 +257,6 @@ impl<T: Backend> GoCryptFs<T> {
     const TAG_LEN: usize = 16;
     const PLAIN_BLOCK_LEN: u64 = 4096;
     const CIPHER_BLOCK_LEN: u64 = Self::PLAIN_BLOCK_LEN + (Self::TAG_LEN + Self::NONCE_LEN) as u64;
-}
-
-fn is_dir_empty(path: &Utf8Path) -> std::io::Result<bool> {
-    Ok(std::fs::read_dir(path)?.next().is_none())
 }
 
 impl GoCryptFs<FsBackend> {

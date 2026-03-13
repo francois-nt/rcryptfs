@@ -4,7 +4,7 @@ use crate::{
 };
 use fuse_mt::{FileAttr, FilesystemMT};
 use log::debug;
-use std::{ffi::OsString, path::Path, time::Duration};
+use std::{ffi::OsString, io::Write, path::Path, time::Duration};
 
 impl TryFrom<FileType> for fuse_mt::FileType {
     type Error = i32;
@@ -129,6 +129,12 @@ impl<C: OpenCache + 'static> FilesystemMT for FileSystemHandler<C> {
             "trying to init! unique {} uid {} gid {} pid {}",
             req.unique, req.uid, req.gid, req.pid
         );
+        if self.is_background_child() {
+            println!("READY");
+            let _ = std::io::stdout().flush();
+        } else {
+            println!("Filesystem mounted and ready.");
+        }
         // let _ = config.add_capabilities(fuse_mt::consts::FUSE_WRITEBACK_CACHE);
 
         Ok(())

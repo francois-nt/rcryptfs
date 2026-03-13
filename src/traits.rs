@@ -287,29 +287,47 @@ pub trait FileSystem: ReadOnlyFileSystem {
 }
 
 /// Wrapper for filesystem with caching.
-pub struct FileSystemHandler<C: OpenCache = UnsafeCache>(Box<dyn FileSystem>, C);
+pub struct FileSystemHandler<C: OpenCache = UnsafeCache> {
+    fs: Box<dyn FileSystem>,
+    cache: C,
+    is_background_child: bool,
+}
 
 impl<C: OpenCache> FileSystemHandler<C> {
     pub fn as_cache(&self) -> &C {
-        &self.1
+        &self.cache
+    }
+    pub fn set_as_background_child(&mut self) {
+        self.is_background_child = true;
+    }
+    pub fn is_background_child(&self) -> bool {
+        self.is_background_child
     }
 }
 
 impl<T: FileSystem, C: OpenCache> From<T> for FileSystemHandler<C> {
     fn from(value: T) -> Self {
-        Self(Box::new(value), C::default())
+        Self {
+            fs: Box::new(value),
+            cache: C::default(),
+            is_background_child: false,
+        }
     }
 }
 
 impl<C: OpenCache> From<Box<dyn FileSystem>> for FileSystemHandler<C> {
     fn from(value: Box<dyn FileSystem>) -> Self {
-        Self(value, C::default())
+        Self {
+            fs: value,
+            cache: C::default(),
+            is_background_child: false,
+        }
     }
 }
 
 impl<C: OpenCache> AsRef<dyn FileSystem> for FileSystemHandler<C> {
     fn as_ref(&self) -> &dyn FileSystem {
-        self.0.as_ref()
+        self.fs.as_ref()
     }
 }
 

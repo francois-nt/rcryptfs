@@ -20,5 +20,9 @@ pub use gocryptfs::GoCryptFs;
 pub use traits::*;
 pub use types::*;
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 mod fuse_impl;
+
+pub fn is_dir_empty(path: &Utf8Path) -> std::io::Result<bool> {
+    Ok(std::fs::read_dir(path)?.next().is_none())
+}

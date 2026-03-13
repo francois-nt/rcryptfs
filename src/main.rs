@@ -3,14 +3,14 @@
     deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
 use anyhow::{Context, Result, bail};
-use camino::Utf8Path;
 use clap::{Parser, ValueEnum};
 use rcryptfs::{
     FileSystemBuilder, FileSystemFactory, FileSystemHandler, FsBackend, GoCryptFs, NoCache,
+    is_dir_empty,
 };
-#[cfg(not(windows))]
+#[cfg(unix)]
 use std::ffi::OsStr;
-use std::io::{IsTerminal, Write};
+use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::process::Stdio;
 
 mod cli;
@@ -25,7 +25,7 @@ impl log::Log for ConsoleLogger {
     }
 
     fn log(&self, record: &log::Record<'_>) {
-        println!("{}: {}: {}", record.target(), record.level(), record.args());
+        eprintln!("{}: {}: {}", record.target(), record.level(), record.args());
     }
 
     fn flush(&self) {}
@@ -48,16 +48,6 @@ enum InitMode {
 struct Args {
     #[command(subcommand)]
     command: Command,
-}
-
-impl Args {
-    fn folder_path(&self) -> &str {
-        match &self.command {
-            Command::Init(args) => &args.folder_path,
-            Command::Cli(args) => &args.folder_path,
-            Command::Mount(args) => &args.folder_path,
-        }
-    }
 }
 
 #[derive(clap::Subcommand)]
@@ -107,7 +97,7 @@ fn input_password(prompt: &str) -> Result<String> {
     platform::prompt_password(prompt)
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 /// Parses thread count from CLI and supports AUTO.
 fn parse_number_of_threads(value: &str) -> Option<usize> {
     if value.eq_ignore_ascii_case("auto") {
@@ -135,22 +125,39 @@ fn respawn_in_background(password: &str) -> std::io::Result<()> {
     cmd.env(BG_ENV, "1");
 
     cmd.stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null());
     platform::configure_background_command(&mut cmd)?;
     let mut child = cmd.spawn()?;
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(password.as_bytes())?;
     }
-    std::process::exit(0);
+    if let Some(stdout) = child.stdout.take() {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        let line = line.trim_end();
+        if line == "READY" {
+            println!("Filesystem mounted and ready.");
+            std::process::exit(0);
+        } else {
+            eprintln!("Error: {}", line.strip_prefix("KO ").unwrap_or(line));
+            std::process::exit(1);
+        }
+    } else {
+        std::process::exit(1);
+    }
 }
 
 /// Reads the background password from stdin once at process startup.
-fn read_password_from_stdin() -> Result<String> {
+fn read_password_from_stdin(is_background_child: bool) -> Result<String> {
     let mut password = String::new();
     std::io::stdin()
         .read_line(&mut password)
         .context("Failed to read password from stdin")?;
+    if !is_background_child {
+        println!("Reading Password from stdin")
+    }
     Ok(password.trim_end_matches(&['\r', '\n'][..]).to_string())
 }
 
@@ -185,12 +192,11 @@ fn format_32_bytes(data: &[u8]) -> (String, String) {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let folder_path = Utf8Path::new(args.folder_path());
 
     match &args.command {
         Command::Init(init_args) => {
             let password = if stdin_is_piped() {
-                read_password_from_stdin()?
+                read_password_from_stdin(false)?
             } else {
                 let password = platform::prompt_password(
                     "Choose a password for protecting your files.\nPassword: ",
@@ -204,6 +210,7 @@ fn main() -> Result<()> {
 
             match init_args.init_mode {
                 InitMode::GoCryptFS => {
+                    let folder_path = init_args.folder_path.as_str().into();
                     // Print the generated master key once so it can be stored offline for recovery.
                     let master_key =
                         GoCryptFs::<FsBackend>::init_with_default_params(folder_path, &password)?;
@@ -231,45 +238,18 @@ fn main() -> Result<()> {
         }
 
         Command::Mount(mount_args) => {
-            let password = read_password(false)?;
-            let cryptfs = FileSystemFactory::build(folder_path, &password, NoCache)?;
-
             let is_background_child = std::env::var_os(BG_ENV).is_some();
-            // Validate the password before respawning so errors are still reported in the foreground process.
-            if !mount_args.foreground && !is_background_child {
-                respawn_in_background(&password)?;
-            }
-            let handler: FileSystemHandler<rcryptfs::CacheLock> = cryptfs.into();
-            log::set_logger(&LOGGER).map_err(|e| anyhow::anyhow!("{e}"))?;
-            log::set_max_level(log::LevelFilter::Error);
-
-            #[cfg(not(windows))]
-            {
-                let num_threads = mount_args
-                    .num_threads
-                    .as_ref()
-                    .and_then(|v| parse_number_of_threads(v))
-                    .unwrap_or_default(); // default is 0
-
-                log::debug!("num threads is {num_threads}");
-                let mut fuse_args = Vec::with_capacity(mount_args.fuse_opts.len() * 2 + 2);
-                fuse_args.push(OsStr::new("-o"));
-                fuse_args.push(OsStr::new("fsname=rcryptfs"));
-                for o in &mount_args.fuse_opts {
-                    fuse_args.push(OsStr::new("-o"));
-                    fuse_args.push(OsStr::new(o));
+            run_mount(mount_args, is_background_child).inspect_err(|e| {
+                if is_background_child {
+                    // background child displays its status
+                    println!("KO {e}");
                 }
-
-                fuse_mt::mount(
-                    fuse_mt::FuseMT::new(handler, num_threads),
-                    &mount_args.mount_point,
-                    &fuse_args,
-                )?;
-            }
+            })?;
         }
-        Command::Cli(_) => {
-            let password = read_password(true)?;
-            let cryptfs = FileSystemFactory::build(folder_path, &password, NoCache)?;
+        Command::Cli(cli_args) => {
+            let password = read_password(true, false)?;
+            let cryptfs =
+                FileSystemFactory::build(cli_args.folder_path.as_str().into(), &password, NoCache)?;
             let handler: FileSystemHandler<rcryptfs::CacheLock> = cryptfs.into();
             // CLI mode reuses stdin after password entry, so the platform layer restores an interactive input when needed.
             platform::prepare_cli_stdin(stdin_is_piped())?;
@@ -286,21 +266,74 @@ fn stdin_is_piped() -> bool {
 }
 
 /// Reads the repository password from stdin or from an interactive prompt, with CLI-specific piping rules.
-fn read_password(cli_mode: bool) -> Result<String> {
+fn read_password(cli_mode: bool, is_background_child: bool) -> Result<String> {
     if stdin_is_piped() {
         if cli_mode {
-            #[cfg(windows)]
+            #[cfg(not(unix))]
             {
                 bail!("stdin cant be piped in cli mode!");
             }
-            #[cfg(not(windows))]
+            #[cfg(unix)]
             {
-                read_password_from_stdin()
+                read_password_from_stdin(is_background_child)
             }
         } else {
-            read_password_from_stdin()
+            read_password_from_stdin(is_background_child)
         }
     } else {
         input_password("Enter password: ")
     }
+}
+
+fn run_mount(mount_args: &MountArgs, is_background_child: bool) -> Result<()> {
+    if !is_dir_empty(mount_args.mount_point.as_str().into())? {
+        bail!(
+            "Invalid mountpoint: directory {} not empty",
+            mount_args.mount_point
+        );
+    }
+    let password = read_password(false, is_background_child)?;
+    let cryptfs =
+        FileSystemFactory::build(mount_args.folder_path.as_str().into(), &password, NoCache)?;
+    if !is_background_child {
+        println!("Decrypting master key");
+    }
+
+    // Validate the password before respawning so errors are still reported in the foreground process.
+    if !mount_args.foreground && !is_background_child {
+        respawn_in_background(&password)?;
+    }
+
+    let mut handler: FileSystemHandler<rcryptfs::CacheLock> = cryptfs.into();
+    if !is_background_child {
+        log::set_logger(&LOGGER).map_err(|e| anyhow::anyhow!("{e}"))?;
+        log::set_max_level(log::LevelFilter::Error);
+    } else {
+        handler.set_as_background_child();
+    }
+
+    #[cfg(unix)]
+    {
+        let num_threads = mount_args
+            .num_threads
+            .as_ref()
+            .and_then(|v| parse_number_of_threads(v))
+            .unwrap_or_default(); // default is 0
+
+        log::debug!("num threads is {num_threads}");
+        let mut fuse_args = Vec::with_capacity(mount_args.fuse_opts.len() * 2 + 2);
+        fuse_args.push(OsStr::new("-o"));
+        fuse_args.push(OsStr::new("fsname=rcryptfs"));
+        for o in &mount_args.fuse_opts {
+            fuse_args.push(OsStr::new("-o"));
+            fuse_args.push(OsStr::new(o));
+        }
+
+        fuse_mt::mount(
+            fuse_mt::FuseMT::new(handler, num_threads),
+            &mount_args.mount_point,
+            &fuse_args,
+        )?;
+    }
+    Ok(())
 }
