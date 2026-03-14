@@ -1,13 +1,15 @@
 #![cfg(unix)]
 
 use anyhow::Result;
+use rcryptfs::{SetBackgroundChild, is_dir_empty, wait_child_mounted};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use tempfile::tempdir;
 
 struct MountedFs {
     mount_point: PathBuf,
+    child: Child,
 }
 
 impl MountedFs {
@@ -18,7 +20,8 @@ impl MountedFs {
 
 impl Drop for MountedFs {
     fn drop(&mut self) {
-        let _ = try_unmount(&self.mount_point);
+        let _ = try_unmount(&self.mount_point).or_else(|_| self.child.kill());
+        let _ = self.child.wait();
     }
 }
 
@@ -28,6 +31,7 @@ fn try_unmount(mount_point: &Path) -> std::io::Result<()> {
         if let Ok(status) = status
             && status.success()
         {
+            println!("unmounted {:?}", mount_point);
             return Ok(());
         }
     }
@@ -42,29 +46,28 @@ fn mount_test_fs(cipher_root: &Path, mount_point: &Path, password: &str) -> Resu
         .unwrap_or_else(|_| PathBuf::from("./target/debug/rcryptfs"));
 
     let mut child = Command::new(exe)
+        .set_as_background_child()
         .arg("mount")
         .arg(cipher_root)
         .arg(mount_point)
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        writeln!(stdin, "{password}")?;
-    }
-    let exit_status = child.wait()?;
-    if !exit_status.success() {
-        anyhow::bail!("mount failed, see stderr")
-    }
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(stdin, "{password}")?;
+
+    let stdout = child.stdout.take().unwrap();
+    wait_child_mounted(stdout)?;
 
     Ok(MountedFs {
         mount_point: mount_point.to_path_buf(),
+        child,
     })
 }
 
 #[test]
-#[ignore]
 fn mount_allows_basic_file_roundtrip() {
     let cipher_dir = tempdir().unwrap();
     let mount_dir = tempdir().unwrap();
@@ -84,5 +87,8 @@ fn mount_allows_basic_file_roundtrip() {
     std::fs::write(&file_path, payload).unwrap();
     let read_back = std::fs::read(&file_path).unwrap();
 
+    drop(mounted);
+
     assert_eq!(read_back, payload);
+    assert!(is_dir_empty(mount_dir.path().try_into().unwrap()).unwrap());
 }

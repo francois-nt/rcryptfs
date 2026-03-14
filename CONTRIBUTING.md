@@ -72,8 +72,19 @@ cargo build --release
 ```
 
 ## Run tests
+To run all tests:
 ```sh
 cargo test
+```
+
+To run only unit tests:
+```sh
+cargo test --lib
+```
+
+To run only integration tests in the tests/ directory:
+```sh
+cargo test --test '*'
 ```
 
 ## Formatting
@@ -86,5 +97,5 @@ cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-Before opening a pull request, please make sure the code builds, is formatted,
-and passes tests locally.
+Before opening a pull request, please make sure the code builds, is formatted, passes Clippy without warnings,
+and passes all tests locally.

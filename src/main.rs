@@ -6,15 +6,13 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use rcryptfs::{
     FileSystemBuilder, FileSystemFactory, FileSystemHandler, FsBackend, GoCryptFs, NoCache,
-    is_dir_empty,
+    is_background_child, is_dir_empty, platform, respawn_in_background,
 };
 #[cfg(unix)]
 use std::ffi::OsStr;
-use std::io::{BufRead, BufReader, IsTerminal, Write};
-use std::process::Stdio;
+use std::io::IsTerminal;
 
 mod cli;
-mod platform;
 
 extern crate log;
 
@@ -114,41 +112,6 @@ fn parse_number_of_threads(value: &str) -> Option<usize> {
     }
 }
 
-const BG_ENV: &str = "RCRYPTFS_BACKGROUND_CHILD";
-
-/// Restarts the current process in background and sends the password over stdin.
-fn respawn_in_background(password: &str) -> std::io::Result<()> {
-    let exe = std::env::current_exe()?;
-
-    let mut cmd = std::process::Command::new(exe);
-    cmd.args(std::env::args_os().skip(1));
-    cmd.env(BG_ENV, "1");
-
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    platform::configure_background_command(&mut cmd)?;
-    let mut child = cmd.spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(password.as_bytes())?;
-    }
-    if let Some(stdout) = child.stdout.take() {
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        reader.read_line(&mut line)?;
-        let line = line.trim_end();
-        if line == "READY" {
-            println!("Filesystem mounted and ready.");
-            std::process::exit(0);
-        } else {
-            eprintln!("Error: {}", line.strip_prefix("KO ").unwrap_or(line));
-            std::process::exit(1);
-        }
-    } else {
-        std::process::exit(1);
-    }
-}
-
 /// Reads the background password from stdin once at process startup.
 fn read_password_from_stdin(is_background_child: bool) -> Result<String> {
     let mut password = String::new();
@@ -238,7 +201,7 @@ fn main() -> Result<()> {
         }
 
         Command::Mount(mount_args) => {
-            let is_background_child = std::env::var_os(BG_ENV).is_some();
+            let is_background_child = is_background_child();
             run_mount(mount_args, is_background_child).inspect_err(|e| {
                 if is_background_child {
                     // background child displays its status

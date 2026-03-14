@@ -5,13 +5,18 @@
 use anyhow::Result;
 mod buffered_file;
 mod cache;
+mod daemonize;
 mod file;
 mod filesystem;
 mod gocryptfs;
+pub mod platform;
 mod traits;
 mod types;
 pub use buffered_file::BufferedFile;
 pub use cache::{CacheLock, UnsafeCache};
+pub use daemonize::{
+    SetBackgroundChild, is_background_child, respawn_in_background, wait_child_mounted,
+};
 pub use file::CryptFsFile;
 pub use filesystem::{
     EncryptedFileTranslator, FileCache, FileSystemBuilder, FileSystemFactory, NoCache,
