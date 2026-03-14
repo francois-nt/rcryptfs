@@ -5,10 +5,12 @@ use std::process::{ChildStdout, Stdio};
 
 const BACKGROUND_ENV: &str = "RCRYPTFS_BACKGROUND_CHILD";
 
+/// Returns whether the current process is the respawned background child.
 pub fn is_background_child() -> bool {
     std::env::var_os(BACKGROUND_ENV).is_some()
 }
 
+/// Marks a command so the spawned process runs as the background child.
 pub trait SetBackgroundChild {
     fn set_as_background_child(&mut self) -> &mut Self;
 }
@@ -19,6 +21,7 @@ impl SetBackgroundChild for std::process::Command {
     }
 }
 
+/// Waits for the child process to report READY or KO on stdout.
 pub fn wait_child_mounted(stdout: ChildStdout) -> Result<()> {
     let mut reader = BufReader::new(stdout);
     let mut line = String::new();

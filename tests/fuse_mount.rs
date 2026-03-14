@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use tempfile::tempdir;
 
+/// Owns a mounted test filesystem and tears it down on drop.
 struct MountedFs {
     mount_point: PathBuf,
     child: Child,
@@ -25,6 +26,7 @@ impl Drop for MountedFs {
     }
 }
 
+/// Tries to unmount a FUSE mountpoint with the available fusermount helper.
 fn try_unmount(mount_point: &Path) -> std::io::Result<()> {
     for tool in ["fusermount3", "fusermount"] {
         let status = Command::new(tool).arg("-u").arg(mount_point).status();
@@ -40,6 +42,7 @@ fn try_unmount(mount_point: &Path) -> std::io::Result<()> {
     ))
 }
 
+/// Spawns rcryptfs mount and waits for the READY handshake.
 fn mount_test_fs(cipher_root: &Path, mount_point: &Path, password: &str) -> Result<MountedFs> {
     let exe = std::env::var("CARGO_BIN_EXE_rcryptfs")
         .map(PathBuf::from)
@@ -67,6 +70,7 @@ fn mount_test_fs(cipher_root: &Path, mount_point: &Path, password: &str) -> Resu
     })
 }
 
+/// Verifies a basic file roundtrip through the mounted FUSE filesystem.
 #[test]
 fn mount_allows_basic_file_roundtrip() {
     let cipher_dir = tempdir().unwrap();
