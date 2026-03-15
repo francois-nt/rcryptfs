@@ -48,21 +48,20 @@ pub fn respawn_in_background(password: &str) -> std::io::Result<()> {
         .stderr(Stdio::null());
     platform::configure_background_command(&mut cmd)?;
     let mut child = cmd.spawn()?;
-    let mut stdin = child.stdin.take().or_invalid()?;
-    stdin.write_all(password.as_bytes())?;
-
-    if let Some(stdout) = child.stdout.take() {
-        match wait_child_mounted(stdout) {
-            Ok(_) => {
-                println!("Filesystem mounted and ready.");
-                std::process::exit(0);
-            }
-            Err(e) => {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
-            }
+    match child.stdin.take().or_invalid() {
+        // stdin needs to be closed so that the parent process can read the line correctly
+        Ok(mut stdin) => stdin.write_all(password.as_bytes())?,
+        Err(e) => Err(e)?,
+    };
+    let stdout = child.stdout.take().or_invalid()?;
+    match wait_child_mounted(stdout) {
+        Ok(_) => {
+            println!("Filesystem mounted and ready.");
+            std::process::exit(0);
         }
-    } else {
-        std::process::exit(1);
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
     }
 }

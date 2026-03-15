@@ -10,7 +10,7 @@ use rcryptfs::{
 };
 #[cfg(unix)]
 use std::ffi::OsStr;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 
 mod cli;
 
@@ -206,6 +206,7 @@ fn main() -> Result<()> {
                 if is_background_child {
                     // background child displays its status
                     println!("KO {e}");
+                    let _ = std::io::stdout().flush();
                 }
             })?;
         }
