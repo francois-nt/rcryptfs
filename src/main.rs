@@ -58,7 +58,7 @@ enum Command {
 #[derive(Parser)]
 struct InitArgs {
     /// Initialize encrypted directory
-    #[arg(value_enum, value_name = "CRYPTFS_TYPE")]
+    #[arg(long = "type", value_enum, value_name = "CRYPTFS_TYPE", default_value_t = InitMode::GoCryptFS)]
     init_mode: InitMode,
     /// local encrypted folder
     folder_path: String,

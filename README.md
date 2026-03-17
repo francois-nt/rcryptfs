@@ -113,7 +113,7 @@ cargo build --release
 
 ### Initialize a new encrypted repository
 ```sh
-./target/release/rcryptfs init gocryptfs /path/to/encrypted
+./target/release/rcryptfs init /path/to/encrypted
 ```
 
 This creates a new gocryptfs-compatible encrypted directory.
