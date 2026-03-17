@@ -110,11 +110,48 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for development setup and contributio
 ```sh
 cargo build --release
 ```
-### Mount an existing gocryptfs repository
+
+### Initialize a new encrypted repository
+```sh
+./target/release/rcryptfs init gocryptfs /path/to/encrypted
+```
+
+This creates a new gocryptfs-compatible encrypted directory.
+You will be prompted for a passphrase (or you can pipe it via stdin).
+
+### Mount an existing encrypted repository
 ```sh
 ./target/release/rcryptfs mount /path/to/encrypted /path/to/mountpoint
 ```
-### See available commands
+
+The passphrase can be entered interactively or piped via stdin:
+```sh
+echo "mypassphrase" | ./target/release/rcryptfs mount /path/to/encrypted /path/to/mountpoint
+```
+
+By default, rcryptfs mounts in background. Use `-f` to run in foreground:
+```sh
+./target/release/rcryptfs mount -f /path/to/encrypted /path/to/mountpoint
+```
+
+### Unmount
+```sh
+fusermount3 /path/to/mountpoint
+```
+
+### Multi-threading
+
+By default, rcryptfs runs single-threaded. You can configure the number of background threads:
+```sh
+# Use default parallelism (auto-detected)
+./target/release/rcryptfs mount -n AUTO /path/to/encrypted /path/to/mountpoint
+
+# Use a specific number of threads
+./target/release/rcryptfs mount -n 4 /path/to/encrypted /path/to/mountpoint
+```
+
+Note: single-thread mode is recommended for workloads with many small files.
+
+### All commands
 ```sh
 ./target/release/rcryptfs -h
-```
