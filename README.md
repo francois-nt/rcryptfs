@@ -1,5 +1,7 @@
 # rcryptfs
 
+![CI](https://github.com/francois-nt/rcryptfs/actions/workflows/ci.yml/badge.svg)
+
 `rcryptfs` is an experimental encrypted filesystem project written in Rust.
 
 Today, it can read and write encrypted repositories using common `gocryptfs` settings.
