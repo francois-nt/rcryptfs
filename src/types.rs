@@ -217,10 +217,16 @@ impl From<GenericOpenOptions> for OpenOptions {
 pub struct Permissions(u16);
 
 impl Default for Permissions {
+    #[cfg(unix)]
     fn default() -> Self {
         Self(0o666)
     }
+    #[cfg(not(unix))]
+    fn default() -> Self {
+        Self(0)
+    }
 }
+
 impl Permissions {
     /// Checks if permissions are read-only.
     pub fn readonly(&self) -> bool {

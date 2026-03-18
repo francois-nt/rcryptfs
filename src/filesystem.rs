@@ -263,7 +263,7 @@ where
         let new_mode: u16 = permissions.into();
 
         #[cfg(not(unix))]
-        file_permissions.set_readonly(file_permissions.readonly());
+        file_permissions.set_readonly(permissions.readonly());
         #[cfg(unix)]
         std::os::unix::fs::PermissionsExt::set_mode(&mut file_permissions, new_mode as u32);
 
