@@ -5,6 +5,7 @@
 use anyhow::Result;
 mod buffered_file;
 mod cache;
+mod cryptomator;
 mod daemonize;
 mod file;
 mod filesystem;
@@ -14,6 +15,7 @@ mod traits;
 mod types;
 pub use buffered_file::BufferedFile;
 pub use cache::{CacheLock, UnsafeCache};
+pub use cryptomator::CryptoMator;
 pub use daemonize::{
     SetBackgroundChild, is_background_child, respawn_in_background, wait_child_mounted,
 };

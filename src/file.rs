@@ -86,14 +86,14 @@ impl<T: EncryptionTranslator> CryptFsFile<T> {
         let plain_data = self
             .backend
             .cipher_block_to_plain(header, block_no, &cipher_buffer[0..bytes_read])
-            .or_invalid()
-            .inspect_err(|_| {
+            .inspect_err(|e| {
                 error!(
-                    "error in reading block {block_no} with len {} header is {:?}!",
+                    "error {e} : in reading block {block_no} with len {} header is {:?}!",
                     plain_buffer.len(),
                     header
                 )
-            })?;
+            })
+            .or_invalid()?;
 
         let bytes_read = plain_data.len();
         if bytes_read > buffer_len {

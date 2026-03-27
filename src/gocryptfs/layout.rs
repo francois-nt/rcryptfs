@@ -1,39 +1,20 @@
 use super::GoCryptFs;
 use crate::{
-    EncryptionTranslator, FsBackend, FsDirEntry, PathTranslator, Result, Utf8Path, Utf8PathBuf,
+    CacheAccess, CipherPathLayout, DefaultFs, EncryptionLayout, EncryptionTranslator, FsBackend,
+    FsDirEntry, Result, Utf8Path, Utf8PathBuf,
 };
 use anyhow::{Context, anyhow};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::Digest;
 use std::fs::DirEntry;
 
-impl PathTranslator for GoCryptFs<FsBackend> {
-    /// Converts a cipher path to its plain text equivalent.
-    fn cipher_path_to_plain(&self, cipher_path: &Utf8Path) -> Result<Utf8PathBuf> {
-        let relative_path = cipher_path.strip_prefix(&self.backend.cipher_root)?;
-        let mut absolute_path = self.backend.cipher_root.clone();
-        let mut result = Utf8PathBuf::default();
-        for cipher_part in relative_path.iter() {
-            let dir_iv = read_diriv(&absolute_path)?;
-            let plain_part = self.cipher_name_to_plain(&dir_iv, cipher_part)?;
-            result.push(plain_part);
-
-            absolute_path.push(cipher_part);
-        }
-        Ok(result)
+impl CipherPathLayout for GoCryptFs<FsBackend> {
+    type LowerFs = DefaultFs;
+    fn lower_fs(&self) -> &Self::LowerFs {
+        &DefaultFs
     }
-
     fn remove_cached_plain_path(&self, plain_path: &str) {
-        self.backend.access(|cache| {
-            cache.remove(plain_path);
-            // Remove cached descendants in one range operation.
-            let prefix = format!("{plain_path}/");
-            let end = format!("{plain_path}0"); // b'0' == b'/' + 1
-            let mut tail = cache.split_off(&prefix); // >= prefix
-            let mut after = tail.split_off(&end); // >= end, so tail contains [prefix, end[
-
-            cache.append(&mut after); // [prefix, end[ was removed.
-        });
+        crate::default_remove_cached_plain_path(&self.backend, plain_path);
     }
 
     /// Converts a plain path to its cipher text equivalent.
@@ -102,7 +83,12 @@ impl PathTranslator for GoCryptFs<FsBackend> {
         }
         result
     }
+    fn get_dir_iv_file(&self, cipher_folder_path: &Utf8Path) -> Utf8PathBuf {
+        cipher_folder_path.join("gocryptfs.diriv")
+    }
+}
 
+impl EncryptionLayout for GoCryptFs<FsBackend> {
     /// Lists directory entries with plain names.
     fn list_dir_plain_names(
         &self,
@@ -119,10 +105,6 @@ impl PathTranslator for GoCryptFs<FsBackend> {
                 Err(e) => Some(Err(e)),
             }
         }))
-    }
-
-    fn get_dir_iv_file(&self, cipher_folder_path: &Utf8Path) -> Utf8PathBuf {
-        cipher_folder_path.join("gocryptfs.diriv")
     }
 }
 
@@ -148,7 +130,7 @@ fn is_special_entry(name: &str) -> bool {
 
 /// Maps a cipher directory entry to its plain equivalent.
 fn map_dir_entry(
-    this: &impl PathTranslator,
+    this: &impl EncryptionLayout,
     cipher_path: &Utf8Path,
     dir_iv: &[u8],
     entry: Result<DirEntry, std::io::Error>,

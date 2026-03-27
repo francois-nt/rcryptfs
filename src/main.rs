@@ -212,6 +212,8 @@ fn main() -> Result<()> {
         }
         Command::Cli(cli_args) => {
             let password = read_password(true, false)?;
+            log::set_logger(&LOGGER).map_err(|e| anyhow::anyhow!("{e}"))?;
+            log::set_max_level(log::LevelFilter::Error);
             let cryptfs =
                 FileSystemFactory::build(cli_args.folder_path.as_str().into(), &password, NoCache)?;
             let handler: FileSystemHandler<rcryptfs::CacheLock> = cryptfs.into();
@@ -271,7 +273,7 @@ fn run_mount(mount_args: &MountArgs, is_background_child: bool) -> Result<()> {
     let mut handler: FileSystemHandler<rcryptfs::CacheLock> = cryptfs.into();
     if !is_background_child {
         log::set_logger(&LOGGER).map_err(|e| anyhow::anyhow!("{e}"))?;
-        log::set_max_level(log::LevelFilter::Error);
+        log::set_max_level(log::LevelFilter::Debug);
     } else {
         handler.set_as_background_child();
     }

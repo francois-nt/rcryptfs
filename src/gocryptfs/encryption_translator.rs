@@ -198,8 +198,8 @@ impl<T: Backend> EncryptionTranslator for GoCryptFs<T> {
         header
     }
     /// Generates a random initialization vector for directories.
-    fn generate_diriv(&self) -> [u8; 16] {
-        let mut iv = [0u8; 16];
+    fn generate_diriv(&self) -> Vec<u8> {
+        let mut iv = vec![0u8; 16];
         rand::rng().fill_bytes(&mut iv);
         iv
     }

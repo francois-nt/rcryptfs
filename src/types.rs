@@ -1,4 +1,4 @@
-use crate::Backend;
+use crate::{Backend, CacheAccess, MinimalFs, OrIoError, WriteAt};
 pub use camino::{Utf8Path, Utf8PathBuf};
 use chrono::{DateTime, Utc};
 use derive_more::derive::{From, Into};
@@ -6,16 +6,16 @@ use parking_lot::Mutex;
 use std::{collections::BTreeMap, fmt::Display, fs::OpenOptions, time::SystemTime};
 use strum_macros::Display;
 
-type FsCacheEntry = (Vec<u8>, Utf8PathBuf);
+pub type FsCacheEntry = (Vec<u8>, Utf8PathBuf);
 /// Backend configuration with cipher root path.
 pub struct FsBackend {
     pub cipher_root: Utf8PathBuf,
     cache: Mutex<BTreeMap<String, FsCacheEntry>>,
 }
 
-impl FsBackend {
+impl CacheAccess for FsBackend {
     /// Gives temporary mutable access to the plain-to-cipher path cache.
-    pub fn access<Res, F: FnOnce(&mut BTreeMap<String, FsCacheEntry>) -> Res>(&self, f: F) -> Res {
+    fn access<Res, F: FnOnce(&mut BTreeMap<String, FsCacheEntry>) -> Res>(&self, f: F) -> Res {
         f(&mut self.cache.lock())
     }
 }
@@ -38,13 +38,140 @@ impl From<&Utf8Path> for FsBackend {
     }
 }
 
+pub struct DefaultFs;
+
+impl MinimalFs for DefaultFs {
+    fn metadata(&self, path: &Utf8Path) -> std::io::Result<Metadata> {
+        Ok(std::fs::symlink_metadata(path)?.into())
+    }
+    fn exists(&self, path: &Utf8Path) -> std::io::Result<bool> {
+        std::fs::exists(path)
+    }
+    fn mkdir(&self, path: &Utf8Path) -> std::io::Result<()> {
+        std::fs::create_dir(path)
+    }
+    fn mknode(&self, path: &Utf8Path) -> std::io::Result<()> {
+        std::fs::File::create_new(path)?;
+        Ok(())
+    }
+    fn rename(&self, old_path: &Utf8Path, new_path: &Utf8Path) -> std::io::Result<()> {
+        std::fs::rename(old_path, new_path)
+    }
+    fn remove_file(&self, path: &Utf8Path) -> std::io::Result<()> {
+        std::fs::remove_file(path)
+    }
+    fn remove_dir(&self, path: &Utf8Path, all: bool) -> std::io::Result<()> {
+        if all {
+            std::fs::remove_dir_all(path)
+        } else {
+            std::fs::remove_dir(path)
+        }
+    }
+    fn put(&self, path: &Utf8Path, data: &[u8]) -> std::io::Result<()> {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .create(true)
+            .open(path)?
+            .write_all_at(0, data)
+    }
+    fn set_permissions(
+        &self,
+        path: &Utf8Path,
+        permissions: Permissions,
+    ) -> std::io::Result<Metadata> {
+        let metadata = std::fs::symlink_metadata(path)?;
+        log::debug!("metadata {:?}", metadata);
+        let mut file_permissions = metadata.permissions();
+        let new_mode: u16 = permissions.into();
+
+        #[cfg(not(unix))]
+        file_permissions.set_readonly(permissions.readonly());
+        #[cfg(unix)]
+        std::os::unix::fs::PermissionsExt::set_mode(&mut file_permissions, new_mode as u32);
+
+        log::debug!("setting permissions {:?}", file_permissions);
+        std::fs::set_permissions(path, file_permissions)?;
+        let mut metadata: Metadata = metadata.into();
+        metadata.permissions = new_mode.into();
+        log::debug!("metadata are {metadata}");
+        Ok(metadata)
+    }
+    fn get_xattr(&self, path: &str, name: &str) -> std::io::Result<Vec<u8>> {
+        #[cfg(not(unix))]
+        {
+            let _ = (path, name);
+            return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
+        }
+        #[cfg(unix)]
+        {
+            xattr::get(path, name)?.or_io_error(libc::ENODATA)
+        }
+    }
+    fn list_xattr(&self, path: &str) -> std::io::Result<Vec<String>> {
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
+        }
+        #[cfg(unix)]
+        {
+            Ok(xattr::list(path)?
+                .flat_map(move |s| s.to_str().map(|s| s.to_string()))
+                .collect())
+        }
+    }
+    fn remove_xattr(&self, path: &str, name: &str) -> std::io::Result<()> {
+        #[cfg(not(unix))]
+        {
+            let _ = (path, name);
+            return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
+        }
+        #[cfg(unix)]
+        {
+            xattr::remove(path, name)
+        }
+    }
+    fn set_xattr(&self, path: &str, name: &str, value: &[u8]) -> std::io::Result<()> {
+        #[cfg(not(unix))]
+        {
+            let _ = (path, name, value);
+            return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
+        }
+        #[cfg(unix)]
+        {
+            xattr::set(path, name, value)
+        }
+    }
+    fn read_symlink(&self, path: &str) -> std::io::Result<Utf8PathBuf> {
+        std::fs::read_link(path)?.try_into().or_invalid()
+    }
+    fn create_symlink(&self, path: &str, target_path: &str) -> std::io::Result<Metadata> {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target_path, path)?;
+        #[cfg(not(unix))]
+        std::os::windows::fs::symlink_file(target_path, path)?;
+
+        let metadata: Metadata = std::fs::symlink_metadata(path)?.into();
+        Ok(metadata)
+    }
+}
+
 /// In-memory backend for testing.
 pub struct MemoryBackend;
-impl Backend for FsBackend {}
-impl Backend for MemoryBackend {}
+impl Backend for FsBackend {
+    fn get_fs(&self) -> impl MinimalFs {
+        DefaultFs
+    }
+}
+impl Backend for MemoryBackend {
+    fn get_fs(&self) -> impl MinimalFs {
+        DefaultFs
+    }
+}
 
 /// File type enumeration.
-#[derive(Display, PartialEq, Eq)]
+#[derive(Display, PartialEq, Eq, Clone, Copy)]
 pub enum FileType {
     File,
     Directory,
@@ -325,6 +452,7 @@ impl From<std::fs::Metadata> for Metadata {
 
         Self {
             len: value.len(),
+            blocks: value.len() / 4096 + 1,
             file_type: value.file_type().into(),
             created,
             modified,
@@ -339,6 +467,7 @@ impl From<std::fs::Metadata> for Metadata {
 /// File metadata.
 pub struct Metadata {
     pub len: u64,
+    pub blocks: u64,
     pub file_type: FileType,
     pub created: SystemTime,
     pub modified: SystemTime,
@@ -363,6 +492,7 @@ fn display_system_time(
 impl Display for Metadata {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "\tsize: {}", self.len)?;
+        write!(f, "\t{}", self.file_type)?;
         display_system_time(f, "\tcreation_time:", self.created)?;
         display_system_time(f, "\taccess_time:", self.accessed)?;
         display_system_time(f, "\tmodification_time:", self.modified)?;

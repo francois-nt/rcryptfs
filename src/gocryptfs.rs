@@ -14,7 +14,7 @@ use sha2::Sha256;
 use std::io::Write;
 
 mod encryption_translator;
-mod path_translator;
+mod layout;
 mod xattr_translator;
 
 /// GoCryptFS backend with derived content and filename encryption keys.

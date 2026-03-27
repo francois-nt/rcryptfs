@@ -3,82 +3,13 @@ pub use camino::{Utf8Path, Utf8PathBuf};
 use log::error;
 use std::{fmt::Display, time::SystemTime};
 
-/// Marker trait for backend implementations.
-pub trait Backend {}
-
-/// Trait for encryption and decryption operations.
-pub trait EncryptionTranslator {
-    const CIPHER_BLOCK_LEN: u64;
-    const PLAIN_BLOCK_LEN: u64;
-    const HEADER_LEN: usize;
-    /// Decrypts a cipher filename to plain text.
-    fn cipher_name_to_plain(&self, parent_iv: &[u8], cipher_name: &str) -> Result<String>;
-    /// Encrypts a plain filename to cipher text.
-    fn plain_name_to_cipher(&self, parent_iv: &[u8], plain_name: &str) -> Result<String>;
-
-    /// Converts plain file size to cipher file size.
-    fn plain_size_to_cipher(&self, plain_size: u64) -> u64;
-    /// Converts cipher file size to plain file size.
-    fn cipher_size_to_plain(&self, cipher_size: u64) -> Result<u64>;
-
-    /// Generates a cipher header for the file.
-    fn generate_cipher_header(&self) -> Vec<u8>;
-    /// Generates a random initialization vector for directories.
-    fn generate_diriv(&self) -> [u8; 16];
-
-    /// Decrypts a cipher block to plain data.
-    fn cipher_block_to_plain(
-        &self,
-        header: &[u8],
-        block_no: u64,
-        cipher_data: &[u8],
-    ) -> Result<Vec<u8>>;
-    /// Encrypts a plain block to cipher data.
-    fn plain_block_to_cipher(
-        &self,
-        header: &[u8],
-        block_no: u64,
-        plain_data: &[u8],
-    ) -> Result<Vec<u8>>;
-
-    /// Encrypts a plain metavalue (e.g., symlink target) to cipher string.
-    fn plain_metavalue_to_cipher(&self, plain_metavalue: &[u8]) -> Result<String>;
-    /// Decrypts a cipher metavalue to plain bytes.
-    fn cipher_metavalue_to_plain(&self, cipher_metavalue: &str) -> Result<Vec<u8>>;
-}
-
-/// Trait for extended attribute name and value translation.
-pub trait XattrTranslator: EncryptionTranslator {
-    /// Converts a plain extended attribute name to cipher text.
-    fn plain_xattr_name_to_cipher(&self, plain_xattr_name: &str) -> Result<String>;
-    /// Converts a cipher extended attribute name to plain text.
-    fn cipher_xattr_name_to_plain(&self, cipher_xattr_name: &str) -> Result<String>;
-    /// Encrypts a plain extended attribute value.
-    fn plain_xattr_value_to_cipher(&self, plain_xattr_value: &[u8]) -> Result<Vec<u8>>;
-    /// Decrypts a cipher extended attribute value.
-    fn cipher_xattr_value_to_plain(&self, cipher_xattr_value: &[u8]) -> Result<Vec<u8>>;
-}
-
-/// Trait for path translation between plain and cipher.
-pub trait PathTranslator: EncryptionTranslator {
-    /// Creates a temporary name for a given path.
-    fn create_temp_name(&self, path: &str, is_dir_iv: bool) -> Utf8PathBuf;
-    /// Converts a cipher path to its plain text equivalent.
-    fn cipher_path_to_plain(&self, cipher_path: &Utf8Path) -> Result<Utf8PathBuf>;
-    /// Converts a plain path to its cipher text equivalent.
-    fn plain_path_to_cipher(&self, plain_path: &Utf8Path) -> Result<Utf8PathBuf>;
-    /// Lists directory entries with plain names.
-    fn list_dir_plain_names(
-        &self,
-        plain_path: &Utf8Path,
-    ) -> Result<impl Iterator<Item = Result<(FsDirEntry, Utf8PathBuf)>> + '_>;
-
-    /// Invalidates one cached plain path and its cached descendants.
-    fn remove_cached_plain_path(&self, plain_path: &str);
-
-    /// Returns the path of the per-directory IV file for a cipher directory.
-    fn get_dir_iv_file(&self, cipher_folder_path: &Utf8Path) -> Utf8PathBuf;
-}
+mod helpers;
+use helpers::{
+    default_create_symlink, default_metadata, default_mkdir, default_mknode, default_read_symlink,
+    default_remove, default_remove_dir, default_rename,
+};
+mod crypto_backend;
+pub use crypto_backend::*;
 
 /// Provides positioned reads without changing a shared file cursor.
 pub trait ReadAt {

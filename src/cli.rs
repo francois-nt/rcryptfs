@@ -43,7 +43,6 @@ fn handle_cli_command<C: OpenCache>(
     if input == "quit" || input == "exit" {
         return false;
     }
-
     let mut parts = input.split_whitespace();
     let cmd = parts.next().unwrap_or_default();
 

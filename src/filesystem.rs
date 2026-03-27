@@ -1,10 +1,10 @@
 use crate::{
-    BufferedFile, CryptFsFile, EncryptionTranslator, FileSystem, FileType, FsBackend, FsDirEntry,
-    GenericOpenOptions, GoCryptFs, Metadata, OrIoError, PathTranslator, Permissions,
-    ReadOnlyFileSystem, ReadWrite, Result, Utf8Path, WriteAt, XattrTranslator,
+    BufferedFile, CryptFsFile, CryptoMator, EncryptionLayout, EncryptionTranslator, FileSystem,
+    FsBackend, FsDirEntry, GenericOpenOptions, GoCryptFs, Metadata, MinimalFs, OrIoError,
+    Permissions, ReadOnlyFileSystem, ReadWrite, Result, Utf8Path, XattrTranslator,
 };
 use filetime::set_symlink_file_times;
-use log::{debug, error};
+use log::debug;
 use std::sync::Arc;
 
 pub trait FileCachePolicy: Send + Sync + 'static + Copy {
@@ -99,7 +99,7 @@ where
 
 impl<T, C: FileCachePolicy> ReadOnlyFileSystem for EncryptedFileTranslator<T, C>
 where
-    T: EncryptionTranslator + PathTranslator + XattrTranslator + Send + Sync + 'static,
+    T: EncryptionTranslator + EncryptionLayout + XattrTranslator + Send + Sync + 'static,
 {
     fn open_readonly(&self, path: &str) -> std::io::Result<Box<dyn ReadWrite>> {
         let cipher_path = self.fs.plain_path_to_cipher(path.into()).or_invalid()?;
@@ -108,12 +108,7 @@ where
         try_open_crypt_file(&cipher_path, self.fs.clone(), options, self.cache_policy)
     }
     fn metadata(&self, path: &str) -> std::io::Result<Metadata> {
-        let cipher_path = self.fs.plain_path_to_cipher(path.into()).or_invalid()?;
-        let mut res: Metadata = std::fs::symlink_metadata(cipher_path)?.into();
-        if res.file_type == FileType::File {
-            res.len = self.fs.cipher_size_to_plain(res.len).or_invalid()?;
-        }
-        Ok(res)
+        self.fs.metadata(path)
     }
     fn read_dir(&self, path: &str) -> std::io::Result<Box<dyn Iterator<Item = FsDirEntry> + '_>> {
         let it = self
@@ -124,15 +119,7 @@ where
         Ok(Box::new(it))
     }
     fn read_symlink(&self, path: &str) -> std::io::Result<String> {
-        let cipher_path = self.fs.plain_path_to_cipher(path.into()).or_invalid()?;
-        let cipher_target = std::fs::read_link(cipher_path)?;
-        let cipher_target = cipher_target.to_str().or_invalid()?;
-        let plain_value = self
-            .fs
-            .cipher_metavalue_to_plain(cipher_target)
-            .or_invalid()?;
-
-        String::from_utf8(plain_value).or_invalid()
+        self.fs.read_symlink(path)
     }
     fn get_xattr(&self, path: &str, name: &str) -> std::io::Result<Vec<u8>> {
         #[cfg(not(unix))]
@@ -169,31 +156,9 @@ where
     }
 }
 
-/// Creates a directory with an initialization vector file.
-fn create_diriv(
-    path: impl AsRef<Utf8Path>,
-    diriv_path: impl AsRef<Utf8Path>,
-    iv: &[u8],
-) -> std::io::Result<()> {
-    // Temporary paths are owned exclusively by the current process. Reusing the
-    // same backend concurrently from multiple rcryptfs processes is undefined behavior.
-    if std::fs::exists(path.as_ref())? {
-        std::fs::remove_dir_all(path.as_ref())?;
-    }
-    std::fs::create_dir(path.as_ref())?;
-
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .create(true)
-        .open(diriv_path.as_ref())?;
-
-    file.write_all_at(0, iv)
-}
-
 impl<T, C: FileCachePolicy> FileSystem for EncryptedFileTranslator<T, C>
 where
-    T: EncryptionTranslator + PathTranslator + XattrTranslator + Send + Sync + 'static,
+    T: EncryptionTranslator + EncryptionLayout + XattrTranslator + Send + Sync + 'static,
 {
     /// Opens a file with the specified options.
     fn open_file_with(
@@ -206,73 +171,27 @@ where
     }
     /// Creates a new directory with given permissions.
     fn mkdir(&self, path: &str, permissions: Permissions) -> std::io::Result<Metadata> {
-        let cipher_path = self.fs.plain_path_to_cipher(path.into()).or_invalid()?;
-        let temp_path = self.fs.create_temp_name(cipher_path.as_str(), false);
-        let dir_iv_path = self.fs.get_dir_iv_file(&temp_path);
-
-        let iv = self.fs.generate_diriv();
-
-        // Create into a temporary location first so the directory and diriv appear atomically.
-        create_diriv(&temp_path, &dir_iv_path, &iv)?;
-        std::fs::rename(&temp_path, &cipher_path)?;
-        self.set_permissions(path, permissions)
+        self.fs.mkdir(path, permissions)
     }
     fn mknode(&self, path: &str, permissions: Permissions) -> std::io::Result<Metadata> {
-        let cipher_path = self.fs.plain_path_to_cipher(path.into()).or_invalid()?;
-        std::fs::File::create_new(&cipher_path)?;
-        self.set_permissions(path, permissions)
+        self.fs.mknode(path, permissions)
     }
     fn remove(&self, path: &str) -> std::io::Result<()> {
         let cipher_path = self.fs.plain_path_to_cipher(path.into()).or_invalid()?;
-        std::fs::remove_file(cipher_path)
+        self.fs.lower_fs().remove_file(&cipher_path)
     }
     fn remove_dir(&self, path: &str) -> std::io::Result<()> {
-        let cipher_path = self.fs.plain_path_to_cipher(path.into()).or_invalid()?;
-        let iv_path = self.fs.get_dir_iv_file(&cipher_path);
-        let temp_path = self.fs.create_temp_name(iv_path.as_str(), true);
-
-        // Move the diriv out of the way first so a failed rmdir can be rolled back cleanly.
-        std::fs::rename(&iv_path, &temp_path)
-            .inspect_err(|e| error!("cant rename {iv_path} to {temp_path} - {e}"))?;
-        if let Err(e) = std::fs::remove_dir(&cipher_path) {
-            debug!("rmdir error {e} {:?}", e.raw_os_error());
-            std::fs::rename(&temp_path, &iv_path)
-                .inspect_err(|e| error!("cant rename back {temp_path} to {iv_path} - {e}"))?;
-            Err(e)
-        } else {
-            let _ = std::fs::remove_file(&temp_path);
-            self.fs.remove_cached_plain_path(path);
-            Ok(())
-        }
+        self.fs.remove_dir(path)
     }
     fn rename(&self, old_path: &str, new_path: &str) -> std::io::Result<()> {
-        let old_cipher_path = self.fs.plain_path_to_cipher(old_path.into()).or_invalid()?;
-        let new_cipher_path = self.fs.plain_path_to_cipher(new_path.into()).or_invalid()?;
-        std::fs::rename(&old_cipher_path, &new_cipher_path)?;
-        self.fs.remove_cached_plain_path(old_path);
-        self.fs.remove_cached_plain_path(new_path);
-        Ok(())
+        self.fs.rename(old_path, new_path)
     }
     fn set_permissions(&self, path: &str, permissions: Permissions) -> std::io::Result<Metadata> {
         debug!("set permissions on {path} {permissions}");
         let path = self.fs.plain_path_to_cipher(path.into()).or_invalid()?;
-        debug!("cipher_path is {path}");
-        let metadata = std::fs::symlink_metadata(&path)?;
-        debug!("metadata {:?}", metadata);
-        let mut file_permissions = metadata.permissions();
-        let new_mode: u16 = permissions.into();
-
-        #[cfg(not(unix))]
-        file_permissions.set_readonly(permissions.readonly());
-        #[cfg(unix)]
-        std::os::unix::fs::PermissionsExt::set_mode(&mut file_permissions, new_mode as u32);
-
-        debug!("setting permissions {:?}", file_permissions);
-        std::fs::set_permissions(&path, file_permissions)?;
-        debug!("trying to convert metadata");
-        let mut metadata: Metadata = metadata.into();
-        metadata.permissions = new_mode.into();
+        let metadata = self.fs.lower_fs().set_permissions(&path, permissions)?;
         debug!("metadata are {metadata}");
+
         Ok(metadata)
     }
     fn set_time(
@@ -288,9 +207,9 @@ where
         if let Some((atime, mtime)) = atime.zip(mtime) {
             set_symlink_file_times(path, atime.into(), mtime.into())
         } else {
-            let meta = std::fs::symlink_metadata(&path)?;
-            let atime = atime.unwrap_or_else(|| meta.accessed().unwrap_or(std::time::UNIX_EPOCH));
-            let mtime = mtime.unwrap_or_else(|| meta.modified().unwrap_or(std::time::UNIX_EPOCH));
+            let meta = self.fs.lower_fs().metadata(&path)?;
+            let atime = atime.unwrap_or(meta.accessed);
+            let mtime = mtime.unwrap_or(meta.modified);
             set_symlink_file_times(path, atime.into(), mtime.into())
         }
     }
@@ -316,19 +235,7 @@ where
         }
     }
     fn create_symlink(&self, path: &str, target_path: &str) -> std::io::Result<Metadata> {
-        let cipher_path = self.fs.plain_path_to_cipher(path.into()).or_invalid()?;
-        let cipher_target = self
-            .fs
-            .plain_metavalue_to_cipher(target_path.as_bytes())
-            .or_invalid()?;
-
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(cipher_target, &cipher_path)?;
-        #[cfg(not(unix))]
-        std::os::windows::fs::symlink_file(cipher_target, &cipher_path)?;
-
-        let metadata: Metadata = std::fs::symlink_metadata(cipher_path)?.into();
-        Ok(metadata)
+        self.fs.create_symlink(path, target_path)
     }
 
     fn remove_xattr(&self, path: &str, name: &str) -> std::io::Result<()> {
@@ -377,11 +284,22 @@ impl FileSystemBuilder for FileSystemFactory {
         password: &str,
         cache_policy: Cache,
     ) -> Result<Box<dyn FileSystem>> {
-        let cryptfs: EncryptedFileTranslator<GoCryptFs<FsBackend>, _> = (
-            GoCryptFs::<FsBackend>::try_new(root_path, password)?,
-            cache_policy,
-        )
-            .into();
-        Ok(Box::new(cryptfs))
+        if std::fs::exists(root_path.join("gocryptfs.conf")).unwrap_or(false) {
+            let cryptfs: EncryptedFileTranslator<GoCryptFs<FsBackend>, _> = (
+                GoCryptFs::<FsBackend>::try_new(root_path, password)?,
+                cache_policy,
+            )
+                .into();
+            Ok(Box::new(cryptfs))
+        } else if std::fs::exists(root_path.join("vault.cryptomator")).unwrap_or(false) {
+            let cryptfs: EncryptedFileTranslator<CryptoMator<FsBackend>, _> = (
+                CryptoMator::<FsBackend>::try_new(root_path, password)?,
+                cache_policy,
+            )
+                .into();
+            Ok(Box::new(cryptfs))
+        } else {
+            anyhow::bail!("unknown filesystem");
+        }
     }
 }

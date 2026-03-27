@@ -24,7 +24,7 @@ impl TryFrom<Metadata> for fuse_mt::FileAttr {
         Ok(Self {
             size: value.len,
             // Report allocation with the crypto block granularity used internally.
-            blocks: 1 + value.len / 4096,
+            blocks: value.blocks,
             atime: value.accessed,
             mtime: value.modified,
             ctime: value.created,
