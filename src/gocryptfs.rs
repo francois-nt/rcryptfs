@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn block_roundtrip_preserves_plain_data() {
         let backend = test_backend();
-        let header = backend.generate_cipher_header();
+        let header = backend.generate_cipher_header().unwrap();
         let plain_data = b"hello encrypted world";
 
         let cipher_data = backend
@@ -414,7 +414,7 @@ mod tests {
         GoCryptFs::<FsBackend>::init_with_default_params(root, "password").unwrap();
         let reopened = GoCryptFs::<FsBackend>::try_new(root, "password").unwrap();
 
-        let header = reopened.generate_cipher_header();
+        let header = reopened.generate_cipher_header().unwrap();
         let plain = b"roundtrip after init";
         let cipher = reopened.plain_block_to_cipher(&header, 0, plain).unwrap();
         let decrypted = reopened.cipher_block_to_plain(&header, 0, &cipher).unwrap();

@@ -1,8 +1,8 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::SystemTime};
 
 use super::{
     default_create_symlink, default_metadata, default_mkdir, default_mknode, default_read_symlink,
-    default_remove, default_remove_dir, default_rename,
+    default_remove, default_remove_dir, default_rename, default_set_permissions, default_set_time,
 };
 use crate::{FsCacheEntry, FsDirEntry, Metadata, Permissions, Result, Utf8Path, Utf8PathBuf};
 /// Marker trait for backend implementations.
@@ -29,7 +29,7 @@ pub trait EncryptionTranslator {
     fn cipher_size_to_plain(&self, cipher_size: u64) -> Result<u64>;
 
     /// Generates a cipher header for the file.
-    fn generate_cipher_header(&self) -> Vec<u8>;
+    fn generate_cipher_header(&self) -> Result<Vec<u8>>;
     /// Generates a random initialization vector for directories.
     fn generate_diriv(&self) -> Vec<u8>;
 
@@ -124,6 +124,18 @@ pub trait EncryptionLayout: CipherPathLayout {
     }
     fn rename(&self, old_path: &str, new_path: &str) -> std::io::Result<()> {
         default_rename(self, old_path, new_path)
+    }
+    fn set_permissions(&self, path: &str, permissions: Permissions) -> std::io::Result<Metadata> {
+        default_set_permissions(self, path, permissions)
+    }
+    /// Sets access and modification times.
+    fn set_time(
+        &self,
+        path: &str,
+        atime: Option<SystemTime>,
+        mtime: Option<SystemTime>,
+    ) -> std::io::Result<()> {
+        default_set_time(self, path, atime, mtime)
     }
 }
 

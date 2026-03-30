@@ -54,7 +54,10 @@ impl<T: EncryptionTranslator> CryptFsFile<T> {
     }
     /// Creates and persists a fresh header for a newly materialized cipher file.
     fn create_header(&self) -> std::io::Result<()> {
-        let header = self.backend.generate_cipher_header();
+        let header = self
+            .backend
+            .generate_cipher_header()
+            .or_io_error(libc::EIO)?;
         self.cipher_file.write_all_at(0, &header)?;
         *self.header.write() = header;
         Ok(())

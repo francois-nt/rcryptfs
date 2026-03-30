@@ -15,6 +15,7 @@ use aes_siv::siv::Aes256Siv;
 use anyhow::{Context, anyhow, bail};
 use base64::Engine;
 use data_encoding::BASE32_NOPAD;
+use rand::RngCore;
 use scrypt::{Params as ScryptParams, scrypt};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
@@ -162,6 +163,14 @@ impl CryptoMator<FsBackend> {
         })
     }
 
+    fn mkdir_storage_path(&self, dir_id: &str) -> Result<()> {
+        let full_path = self.dir_id_to_storage_path(dir_id)?;
+        self.lower_fs()
+            .mkdir(full_path.parent().unwrap_or_else(|| "".into()))?;
+        self.lower_fs().mkdir(&full_path)?;
+        Ok(())
+    }
+
     fn dir_id_to_storage_path(&self, dir_id: &str) -> Result<Utf8PathBuf> {
         // Key material for AES-SIV-512 (RFC 5297): 64 bytes split into two halves.
         // We concatenate mac_master_key || master_key.
@@ -187,8 +196,11 @@ impl CryptoMator<FsBackend> {
     }
 }
 
+const HEADER_NONCE_LEN: usize = 12;
+const NONCE_LEN: usize = 12;
+
 impl<T: Backend> CryptoMator<T> {
-    const HEADER_NONCE_LEN: usize = 12;
+    //const HEADER_NONCE_LEN: usize = 12;
     //const GCM_TAG_LEN: usize = 16;
     //const HEADER_CT_LEN: usize = 40;
     fn master_key(&self) -> &[u8] {
@@ -293,6 +305,11 @@ impl<T: Backend> EncryptionTranslator for CryptoMator<T> {
         block_no: u64,
         cipher_data: &[u8],
     ) -> Result<Vec<u8>> {
+        // if data is empty, then return empty vec
+        if cipher_data.is_empty() {
+            return Ok(Vec::default());
+        }
+
         // 1) parse header -> contentKey + headerNonce
         let (content_key, header_nonce) = self.decrypt_content_key_from_header(header)?;
 
@@ -304,7 +321,7 @@ impl<T: Backend> EncryptionTranslator for CryptoMator<T> {
                 Self::CIPHER_BLOCK_LEN - Self::PLAIN_BLOCK_LEN
             );
         }
-        let (chunk_nonce_bytes, ct_and_tag) = cipher_data.split_at(Self::HEADER_NONCE_LEN);
+        let (chunk_nonce_bytes, ct_and_tag) = cipher_data.split_at(HEADER_NONCE_LEN);
 
         // 3) build AAD = be64(block_no) || headerNonce
         let mut aad = [0u8; 8 + 12];
@@ -334,19 +351,82 @@ impl<T: Backend> EncryptionTranslator for CryptoMator<T> {
     fn cipher_metavalue_to_plain(&self, _cipher_metavalue: &str) -> Result<Vec<u8>> {
         todo!()
     }
-    fn generate_cipher_header(&self) -> Vec<u8> {
-        todo!()
+    fn generate_cipher_header(&self) -> Result<Vec<u8>> {
+        const MARKER_LEN: usize = 8;
+        const CONTENT_KEY_LEN: usize = 32;
+
+        // 1) headerNonce aléatoire
+        let mut header_nonce = [0u8; HEADER_NONCE_LEN];
+        rand::rng().fill_bytes(&mut header_nonce);
+
+        // 2) contentKey aléatoire (clé par fichier)
+        let mut content_key = [0u8; CONTENT_KEY_LEN];
+        rand::rng().fill_bytes(&mut content_key);
+
+        // 3) plaintext header payload = 8 * 0xFF || contentKey
+        let mut payload_pt = [0u8; MARKER_LEN + CONTENT_KEY_LEN];
+        payload_pt[..MARKER_LEN].fill(0xFF);
+        payload_pt[MARKER_LEN..].copy_from_slice(&content_key);
+
+        // 4) AES-256-GCM encrypt avec master_key, AAD vide
+        let cipher =
+            Aes256Gcm::new_from_slice(self.master_key()).context("master_key must be 32 bytes")?;
+        let nonce = aes_gcm::Nonce::from_slice(&header_nonce);
+
+        // encrypt() renvoie ciphertext||tag (tag=16)
+        let ct_and_tag = cipher
+            .encrypt(
+                nonce,
+                Payload {
+                    msg: &payload_pt,
+                    aad: &[],
+                },
+            )
+            .map_err(|e| anyhow!("{e} - header encryption failed"))?;
+
+        // 5) header final: nonce || ct || tag
+        let mut out = Vec::with_capacity(HEADER_NONCE_LEN + ct_and_tag.len());
+        out.extend_from_slice(&header_nonce);
+        out.extend_from_slice(&ct_and_tag);
+
+        debug_assert_eq!(out.len(), 68, "Cryptomator header must be 68 bytes");
+        Ok(out)
     }
     fn generate_diriv(&self) -> Vec<u8> {
         uuid::Uuid::new_v4().to_string().into()
     }
     fn plain_block_to_cipher(
         &self,
-        _header: &[u8],
-        _block_no: u64,
-        _plain_data: &[u8],
+        header: &[u8],
+        block_no: u64,
+        plain_data: &[u8],
     ) -> Result<Vec<u8>> {
-        todo!()
+        let (content_key, header_nonce) = self.decrypt_content_key_from_header(header)?;
+
+        let mut aad = [0u8; 8 + 12];
+        aad[0..8].copy_from_slice(&block_no.to_be_bytes());
+        aad[8..20].copy_from_slice(&header_nonce);
+
+        let mut chunk_nonce = [0u8; NONCE_LEN];
+        rand::rng().fill_bytes(&mut chunk_nonce);
+
+        let cipher = Aes256Gcm::new_from_slice(&content_key)
+            .map_err(|e| anyhow!("AES-GCM init failed: {e}"))?;
+
+        let ct_and_tag = cipher
+            .encrypt(
+                aes_gcm::Nonce::from_slice(&chunk_nonce),
+                Payload {
+                    msg: plain_data,
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| anyhow!("chunk encrypt failed"))?;
+
+        let mut out = Vec::with_capacity(NONCE_LEN + ct_and_tag.len());
+        out.extend_from_slice(&chunk_nonce);
+        out.extend_from_slice(&ct_and_tag);
+        Ok(out)
     }
     fn plain_metavalue_to_cipher(&self, _plain_metavalue: &[u8]) -> Result<String> {
         todo!()
@@ -384,25 +464,18 @@ impl<T: Backend> EncryptionTranslator for CryptoMator<T> {
     }
 }
 
-fn plain_path_to_cipher_and_dirid(
+fn folder_path_to_cipher_and_dirid(
     this: &CryptoMator<FsBackend>,
     plain_path: &Utf8Path,
-) -> Result<(Utf8PathBuf, Option<Vec<u8>>)> {
+) -> Result<(Utf8PathBuf, Vec<u8>)> {
     this.backend.access(|cache| {
         if let Some((dir_id, cipher_path)) = cache.get(plain_path.as_str()) {
-            Ok((cipher_path.to_owned(), Some(dir_id.clone())))
+            Ok((cipher_path.to_owned(), dir_id.clone()))
         } else {
-            let parent_path = plain_path.parent().map(|p| p.as_str()).unwrap_or_default();
-            let name = plain_path.file_name().unwrap_or_default();
-
-            if parent_path.is_empty() && name.is_empty() {
+            if plain_path.as_str().is_empty() {
                 let cipher_path = this.dir_id_to_storage_path(&String::default())?;
-                cache.insert(
-                    plain_path.as_str().into(),
-                    (Vec::default(), cipher_path.clone()),
-                );
-
-                return Ok((cipher_path, Some(Vec::default())));
+                cache.insert(String::default(), (Vec::default(), cipher_path.clone()));
+                return Ok((cipher_path, Vec::default()));
             }
 
             let mut partial_plain_path = Utf8PathBuf::from("");
@@ -414,24 +487,34 @@ fn plain_path_to_cipher_and_dirid(
                     absolute_path = cipher_parent.join(cipher_part);
                 } else {
                     let dir_id = if is_root {
-                        is_root = false;
                         String::default()
                     } else {
                         read_dirid(&absolute_path)?
                     };
 
-                    let cipher_part = this.plain_name_to_cipher(dir_id.as_bytes(), plain_part)?;
                     absolute_path = this.dir_id_to_storage_path(&dir_id)?;
                     cache.insert(
                         partial_plain_path.as_str().into(),
                         (dir_id.as_bytes().into(), absolute_path.clone()),
                     );
+                    let cipher_part = this.plain_name_to_cipher(dir_id.as_bytes(), plain_part)?;
                     absolute_path.push(cipher_part);
                 }
                 partial_plain_path.push(plain_part);
+                if is_root {
+                    is_root = false
+                }
             }
 
-            Ok((absolute_path, None))
+            let dir_id = read_dirid(&absolute_path)?;
+            absolute_path = this.dir_id_to_storage_path(&dir_id)?;
+
+            cache.insert(
+                partial_plain_path.as_str().into(),
+                (dir_id.as_bytes().into(), absolute_path.clone()),
+            );
+
+            Ok((absolute_path, dir_id.as_bytes().into()))
         }
     })
 }
@@ -442,7 +525,15 @@ impl CipherPathLayout for CryptoMator<FsBackend> {
         &DefaultFs
     }
     fn plain_path_to_cipher(&self, plain_path: &Utf8Path) -> Result<Utf8PathBuf> {
-        Ok(plain_path_to_cipher_and_dirid(self, plain_path)?.0)
+        if plain_path.as_str().is_empty() {
+            return Ok(folder_path_to_cipher_and_dirid(self, plain_path)?.0);
+        }
+
+        let parent = plain_path.parent().unwrap_or_else(|| "".into());
+        let name = plain_path.file_name().or_invalid()?;
+        let (cipher_parent_path, dir_id) = folder_path_to_cipher_and_dirid(self, parent)?;
+        let cipher_name = self.plain_name_to_cipher(&dir_id, name)?;
+        Ok(cipher_parent_path.join(cipher_name))
     }
     fn create_temp_name(&self, _path: &str, _is_dir_iv: bool) -> Utf8PathBuf {
         todo!()
@@ -460,17 +551,18 @@ impl EncryptionLayout for CryptoMator<FsBackend> {
         &self,
         plain_path: &Utf8Path,
     ) -> Result<impl Iterator<Item = Result<(crate::FsDirEntry, Utf8PathBuf)>> + '_> {
-        let plain_path: Utf8PathBuf = plain_path.into();
-        let cipher_path = self.plain_path_to_cipher(&plain_path)?;
-        let dir_id = if plain_path == "" {
-            "".into()
-        } else {
-            read_dirid(&cipher_path)?
-        };
-        let cipher_path = self.dir_id_to_storage_path(&dir_id)?;
+        let (cipher_path, dir_id) = folder_path_to_cipher_and_dirid(self, plain_path)?;
+        // let plain_path: Utf8PathBuf = plain_path.into();
+        // let cipher_path = self.plain_path_to_cipher(&plain_path)?;
+        // let dir_id = if plain_path == "" {
+        //     "".into()
+        // } else {
+        //     read_dirid(&cipher_path)?
+        // };
+        // let cipher_path = self.dir_id_to_storage_path(&dir_id)?;
         log::debug!("read_dir on {}", &cipher_path);
         Ok(std::fs::read_dir(&cipher_path)?.filter_map(move |entry| {
-            match map_dir_entry(self, &cipher_path, dir_id.as_bytes(), entry) {
+            match map_dir_entry(self, &cipher_path, &dir_id, entry) {
                 Ok(Some((plain_name, cipher_path))) => Some(Ok((plain_name, cipher_path))),
                 Ok(None) => None,
                 Err(e) => Some(Err(e)),
@@ -493,38 +585,46 @@ impl EncryptionLayout for CryptoMator<FsBackend> {
         plain_path: &str,
         permissions: crate::Permissions,
     ) -> std::io::Result<Metadata> {
+        log::debug!("mkdir on {plain_path}");
         let plain_path: &Utf8Path = plain_path.into();
         let parent = plain_path.parent().unwrap_or_else(|| "".into());
         let name = plain_path.file_name().or_invalid()?;
 
+        log::debug!("parent {parent} - name {name}");
+
         let (parent_dir_id, cipher_parent_path) = self.backend.access(|cache| {
             if let Some((parent_dir_id, cipher_parent_path)) = cache.get(parent.as_str()) {
+                log::debug!("found {parent} in cache! {cipher_parent_path}");
                 Ok::<_, std::io::Error>((
                     str::from_utf8(parent_dir_id).unwrap_or_default().into(),
                     cipher_parent_path.clone(),
                 ))
             } else {
                 let cipher_parent_path = self.plain_path_to_cipher(parent).or_invalid()?;
+                log::debug!("computed cipher_parent_path for {parent} - {cipher_parent_path}");
                 let parent_dir_id = read_dirid(&cipher_parent_path).or_invalid()?;
                 Ok((parent_dir_id, cipher_parent_path))
             }
         })?;
+        log::debug!("cipher parent path is {cipher_parent_path}");
         //let cipher_parent_path = self.plain_path_to_cipher(parent).or_invalid()?;
         //let parent_dir_id = read_dirid(&cipher_parent_path).or_invalid()?;
         let cipher_name = self
             .plain_name_to_cipher(parent_dir_id.as_bytes(), name)
             .or_invalid()?;
+        log::debug!("cipher_name is {cipher_name}");
         let new_dir_iv = self.generate_diriv();
         let cipher_path = cipher_parent_path.join(cipher_name);
+        log::debug!("cipher_path is {cipher_path}");
         self.lower_fs().mkdir(&cipher_path)?;
         let new_dir_iv_file = self.get_dir_iv_file(&cipher_path);
+        log::debug!("new_dir_iv_file is {new_dir_iv_file}");
         self.lower_fs()
             .put(&new_dir_iv_file, &new_dir_iv)
             .or_invalid()?;
-        let new_dir = self
-            .dir_id_to_storage_path(str::from_utf8(&new_dir_iv).unwrap_or_default())
+
+        self.mkdir_storage_path(str::from_utf8(&new_dir_iv).unwrap_or_default())
             .or_invalid()?;
-        self.lower_fs().mkdir(&new_dir)?;
         self.lower_fs().set_permissions(&cipher_path, permissions)
     }
 
@@ -578,6 +678,7 @@ impl AdujstMetadata for Metadata {
                     let symlink = path.join("symlink.c9r");
                     if std::fs::exists(&symlink)? {
                         self.file_type = FileType::SymLink;
+                        self.permissions = 0o777_u16.into();
                     } else {
                         self.file_type = FileType::Other;
                     }

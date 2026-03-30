@@ -188,14 +188,14 @@ impl<T: Backend> EncryptionTranslator for GoCryptFs<T> {
         Ok(div * Self::PLAIN_BLOCK_LEN + remain)
     }
     /// Generates a cipher header for the file.
-    fn generate_cipher_header(&self) -> Vec<u8> {
+    fn generate_cipher_header(&self) -> Result<Vec<u8>> {
         // Header layout: reserved byte, version, then random file ID.
         let mut header = vec![0u8; Self::HEADER_LEN];
         header[0] = 0; // reserved
         header[1] = 2; // version
         rand::rng().fill_bytes(&mut header[Self::HEADER_LEN - Self::FILEID_LEN..Self::HEADER_LEN]);
 
-        header
+        Ok(header)
     }
     /// Generates a random initialization vector for directories.
     fn generate_diriv(&self) -> Vec<u8> {

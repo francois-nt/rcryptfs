@@ -6,7 +6,7 @@ use std::{fmt::Display, time::SystemTime};
 mod helpers;
 use helpers::{
     default_create_symlink, default_metadata, default_mkdir, default_mknode, default_read_symlink,
-    default_remove, default_remove_dir, default_rename,
+    default_remove, default_remove_dir, default_rename, default_set_permissions, default_set_time,
 };
 mod crypto_backend;
 pub use crypto_backend::*;

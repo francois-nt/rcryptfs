@@ -1,3 +1,7 @@
+use std::time::SystemTime;
+
+use filetime::set_symlink_file_times;
+
 use super::{EncryptionLayout, MinimalFs, OrIoError};
 use crate::{FileType, Metadata, Permissions, Utf8Path};
 
@@ -125,4 +129,35 @@ pub(super) fn default_rename<T: EncryptionLayout + ?Sized>(
     this.remove_cached_plain_path(old_path);
     this.remove_cached_plain_path(new_path);
     Ok(())
+}
+
+pub(super) fn default_set_permissions<T: EncryptionLayout + ?Sized>(
+    this: &T,
+    plain_path: &str,
+    permissions: Permissions,
+) -> std::io::Result<Metadata> {
+    let path = this.plain_path_to_cipher(plain_path.into()).or_invalid()?;
+    let metadata = this.lower_fs().set_permissions(&path, permissions)?;
+
+    Ok(metadata)
+}
+/// Sets access and modification times.
+pub(super) fn default_set_time<T: EncryptionLayout + ?Sized>(
+    this: &T,
+    path: &str,
+    atime: Option<SystemTime>,
+    mtime: Option<SystemTime>,
+) -> std::io::Result<()> {
+    let path = this.plain_path_to_cipher(path.into()).or_invalid()?;
+    if atime.is_none() && mtime.is_none() {
+        return Ok(());
+    }
+    if let Some((atime, mtime)) = atime.zip(mtime) {
+        set_symlink_file_times(path, atime.into(), mtime.into())
+    } else {
+        let meta = this.lower_fs().metadata(&path)?;
+        let atime = atime.unwrap_or(meta.accessed);
+        let mtime = mtime.unwrap_or(meta.modified);
+        set_symlink_file_times(path, atime.into(), mtime.into())
+    }
 }

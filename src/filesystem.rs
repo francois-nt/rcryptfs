@@ -1,10 +1,9 @@
 use crate::{
     BufferedFile, CryptFsFile, CryptoMator, EncryptionLayout, EncryptionTranslator, FileSystem,
-    FsBackend, FsDirEntry, GenericOpenOptions, GoCryptFs, Metadata, MinimalFs, OrIoError,
-    Permissions, ReadOnlyFileSystem, ReadWrite, Result, Utf8Path, XattrTranslator,
+    FsBackend, FsDirEntry, GenericOpenOptions, GoCryptFs, Metadata, OrIoError, Permissions,
+    ReadOnlyFileSystem, ReadWrite, Result, Utf8Path, XattrTranslator,
 };
-use filetime::set_symlink_file_times;
-use log::debug;
+
 use std::sync::Arc;
 
 pub trait FileCachePolicy: Send + Sync + 'static + Copy {
@@ -177,8 +176,7 @@ where
         self.fs.mknode(path, permissions)
     }
     fn remove(&self, path: &str) -> std::io::Result<()> {
-        let cipher_path = self.fs.plain_path_to_cipher(path.into()).or_invalid()?;
-        self.fs.lower_fs().remove_file(&cipher_path)
+        self.fs.remove(path)
     }
     fn remove_dir(&self, path: &str) -> std::io::Result<()> {
         self.fs.remove_dir(path)
@@ -187,12 +185,7 @@ where
         self.fs.rename(old_path, new_path)
     }
     fn set_permissions(&self, path: &str, permissions: Permissions) -> std::io::Result<Metadata> {
-        debug!("set permissions on {path} {permissions}");
-        let path = self.fs.plain_path_to_cipher(path.into()).or_invalid()?;
-        let metadata = self.fs.lower_fs().set_permissions(&path, permissions)?;
-        debug!("metadata are {metadata}");
-
-        Ok(metadata)
+        self.fs.set_permissions(path, permissions)
     }
     fn set_time(
         &self,
@@ -200,18 +193,7 @@ where
         atime: Option<std::time::SystemTime>,
         mtime: Option<std::time::SystemTime>,
     ) -> std::io::Result<()> {
-        let path = self.fs.plain_path_to_cipher(path.into()).or_invalid()?;
-        if atime.is_none() && mtime.is_none() {
-            return Ok(());
-        }
-        if let Some((atime, mtime)) = atime.zip(mtime) {
-            set_symlink_file_times(path, atime.into(), mtime.into())
-        } else {
-            let meta = self.fs.lower_fs().metadata(&path)?;
-            let atime = atime.unwrap_or(meta.accessed);
-            let mtime = mtime.unwrap_or(meta.modified);
-            set_symlink_file_times(path, atime.into(), mtime.into())
-        }
+        self.fs.set_time(path, atime, mtime)
     }
     fn truncate(&self, path: &str, new_size: u64) -> std::io::Result<()> {
         let mut options = GenericOpenOptions::default();
