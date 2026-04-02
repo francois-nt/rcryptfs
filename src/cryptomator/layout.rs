@@ -28,11 +28,7 @@ fn folder_path_to_cipher_and_dirid(
                     let cipher_part = this.plain_name_to_cipher(dir_id, plain_part)?;
                     absolute_path = cipher_parent.join(cipher_part);
                 } else {
-                    let dir_id = if is_root {
-                        String::default()
-                    } else {
-                        read_dirid(&absolute_path)?
-                    };
+                    let dir_id = read_dirid(&absolute_path, is_root)?;
 
                     absolute_path = this.dir_id_to_storage_path(&dir_id)?;
                     cache.insert(
@@ -48,7 +44,7 @@ fn folder_path_to_cipher_and_dirid(
                 }
             }
 
-            let dir_id = read_dirid(&absolute_path)?;
+            let dir_id = read_dirid(&absolute_path, is_root)?;
             absolute_path = this.dir_id_to_storage_path(&dir_id)?;
 
             cache.insert(
@@ -104,6 +100,7 @@ impl EncryptionLayout for CryptoMator<FsBackend> {
         // let cipher_path = self.dir_id_to_storage_path(&dir_id)?;
         log::debug!("read_dir on {}", &cipher_path);
         Ok(std::fs::read_dir(&cipher_path)?.filter_map(move |entry| {
+            log::debug!("> entry {:?}", entry);
             match map_dir_entry(self, &cipher_path, &dir_id, entry) {
                 Ok(Some((plain_name, cipher_path))) => Some(Ok((plain_name, cipher_path))),
                 Ok(None) => None,
@@ -118,7 +115,7 @@ impl EncryptionLayout for CryptoMator<FsBackend> {
         let mut metadata = self.lower_fs().metadata(&cipher_path)?;
         metadata
             .adjust(self, &cipher_path, plain_path.is_empty())
-            .or_invalid()?;
+            .or_io_error(libc::EBADF)?;
         Ok(metadata)
     }
 
@@ -134,23 +131,30 @@ impl EncryptionLayout for CryptoMator<FsBackend> {
 
         log::debug!("parent {parent} - name {name}");
 
-        let (parent_dir_id, cipher_parent_path) = self.backend.access(|cache| {
+        let cached = self.backend.access(|cache| {
             if let Some((parent_dir_id, cipher_parent_path)) = cache.get(parent.as_str()) {
                 log::debug!("found {parent} in cache! {cipher_parent_path}");
-                Ok::<_, std::io::Error>((
+                Some((
                     str::from_utf8(parent_dir_id).unwrap_or_default().into(),
                     cipher_parent_path.clone(),
                 ))
             } else {
+                None
+            }
+        });
+        let (parent_dir_id, cipher_parent_path) = match cached {
+            Some((parent_dir_id, cipher_parent_path)) => (parent_dir_id, cipher_parent_path),
+            None => {
+                let is_root = parent.as_str().is_empty();
                 let cipher_parent_path = self.plain_path_to_cipher(parent).or_invalid()?;
                 log::debug!("computed cipher_parent_path for {parent} - {cipher_parent_path}");
-                let parent_dir_id = read_dirid(&cipher_parent_path).or_invalid()?;
-                Ok((parent_dir_id, cipher_parent_path))
+                let parent_dir_id = read_dirid(&cipher_parent_path, is_root).or_invalid()?;
+                (parent_dir_id, cipher_parent_path)
             }
-        })?;
+        };
+
         log::debug!("cipher parent path is {cipher_parent_path}");
-        //let cipher_parent_path = self.plain_path_to_cipher(parent).or_invalid()?;
-        //let parent_dir_id = read_dirid(&cipher_parent_path).or_invalid()?;
+
         let cipher_name = self
             .plain_name_to_cipher(parent_dir_id.as_bytes(), name)
             .or_invalid()?;
@@ -182,7 +186,8 @@ impl EncryptionLayout for CryptoMator<FsBackend> {
     }
     fn remove_dir(&self, plain_path: &str) -> std::io::Result<()> {
         let cipher_path = self.plain_path_to_cipher(plain_path.into()).or_invalid()?;
-        let dir_id = read_dirid(&cipher_path).or_invalid()?;
+        let is_root = plain_path.is_empty();
+        let dir_id = read_dirid(&cipher_path, is_root).or_invalid()?;
 
         let children_path = self.dir_id_to_storage_path(&dir_id).or_invalid()?;
         self.lower_fs()
@@ -247,7 +252,7 @@ impl AdujstMetadata for Metadata {
         is_root: bool,
     ) -> Result<()> {
         if self.file_type == FileType::File {
-            self.len = this.cipher_size_to_plain(self.len).or_invalid()?;
+            self.len = this.cipher_size_to_plain(self.len)?;
             self.blocks = 1 + self.len / T::PLAIN_BLOCK_LEN;
         } else if self.file_type == FileType::Directory {
             if !is_root {
@@ -279,18 +284,18 @@ fn map_dir_entry(
         Ok(entry) => {
             let cipher_name = &entry.file_name();
             let cipher_name: String = cipher_name.to_string_lossy().into();
-            let mut fs_dir_entry: FsDirEntry = entry.into();
-
-            if let Some(metadata) = fs_dir_entry.metadata.as_mut() {
-                metadata.adjust(this, &cipher_path.join(&cipher_name), false)?;
-                if let Some(file_type) = fs_dir_entry.file_type.as_mut() {
-                    *file_type = metadata.file_type;
-                }
-            }
 
             if is_special_entry(&cipher_name) {
                 Ok(None)
             } else {
+                let mut fs_dir_entry: FsDirEntry = entry.into();
+
+                if let Some(metadata) = fs_dir_entry.metadata.as_mut() {
+                    metadata.adjust(this, &cipher_path.join(&cipher_name), false)?;
+                    if let Some(file_type) = fs_dir_entry.file_type.as_mut() {
+                        *file_type = metadata.file_type;
+                    }
+                }
                 let plain_name = this.cipher_name_to_plain(dir_iv, &cipher_name)?;
                 Ok(Some((
                     fs_dir_entry.with_name(plain_name),
@@ -299,5 +304,154 @@ fn map_dir_entry(
             }
         }
         Err(e) => Err(e)?,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{CipherPathLayout, EncryptionLayout, FileType, FsBackend, Utf8Path};
+    use tempfile::tempdir;
+
+    /// Creates a deterministic Cryptomator backend with a materialized root storage directory.
+    fn test_backend() -> (tempfile::TempDir, CryptoMator<FsBackend>) {
+        let temp_dir = tempdir().unwrap();
+        let root = Utf8Path::from_path(temp_dir.path()).unwrap();
+
+        let mut siv_key = [0u8; 64];
+        for (i, byte) in siv_key.iter_mut().enumerate() {
+            *byte = i as u8;
+        }
+
+        let backend = CryptoMator {
+            backend: root.into(),
+            siv_key,
+        };
+
+        std::fs::create_dir_all(backend.dir_id_to_storage_path("").unwrap()).unwrap();
+
+        (temp_dir, backend)
+    }
+
+    #[test]
+    fn create_and_read_symlink_roundtrip() {
+        let (_temp_dir, backend) = test_backend();
+
+        backend.create_symlink("link", "../target.txt").unwrap();
+
+        let target = backend.read_symlink("link").unwrap();
+        let metadata = backend.metadata("link").unwrap();
+
+        assert_eq!(target, "../target.txt");
+        assert!(metadata.file_type == FileType::SymLink);
+        assert!(u16::from(metadata.permissions) == 0o777);
+    }
+
+    #[test]
+    fn list_dir_plain_names_returns_symlink_entry() {
+        let (_temp_dir, backend) = test_backend();
+        backend.create_symlink("link", "../target.txt").unwrap();
+
+        let entries: Vec<_> = backend
+            .list_dir_plain_names(Utf8Path::new(""))
+            .unwrap()
+            .map(|entry| entry.unwrap().0)
+            .collect();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].file_name, "link");
+        assert!(entries[0].file_type == Some(FileType::SymLink));
+    }
+
+    #[test]
+    fn metadata_reports_empty_plain_file_for_header_only_node() {
+        let (_temp_dir, backend) = test_backend();
+
+        backend.mknode("empty.txt", 0o644_u16.into()).unwrap();
+
+        let cipher_path = backend
+            .plain_path_to_cipher(Utf8Path::new("empty.txt"))
+            .unwrap();
+        let raw_metadata = backend.lower_fs().metadata(&cipher_path).unwrap();
+        let plain_metadata = backend.metadata("empty.txt").unwrap();
+
+        assert_eq!(
+            raw_metadata.len,
+            CryptoMator::<FsBackend>::HEADER_LEN as u64
+        );
+        assert_eq!(plain_metadata.len, 0);
+        assert!(plain_metadata.file_type == FileType::File);
+    }
+
+    #[test]
+    fn mkdir_creates_visible_and_storage_directories() {
+        let (_temp_dir, backend) = test_backend();
+
+        backend.mkdir("docs", 0o755_u16.into()).unwrap();
+
+        let cipher_path = backend.plain_path_to_cipher(Utf8Path::new("docs")).unwrap();
+        let dir_id = read_dirid(&cipher_path, false).unwrap();
+        let storage_path = backend.dir_id_to_storage_path(&dir_id).unwrap();
+
+        assert!(backend.lower_fs().exists(&cipher_path).unwrap());
+        assert!(
+            backend
+                .lower_fs()
+                .exists(&cipher_path.join("dir.c9r"))
+                .unwrap()
+        );
+        assert!(backend.lower_fs().exists(&storage_path).unwrap());
+        assert!(backend.metadata("docs").unwrap().file_type == FileType::Directory);
+    }
+
+    #[test]
+    fn remove_dir_removes_visible_and_storage_directories() {
+        let (_temp_dir, backend) = test_backend();
+
+        backend.mkdir("docs", 0o755_u16.into()).unwrap();
+        let cipher_path = backend.plain_path_to_cipher(Utf8Path::new("docs")).unwrap();
+        let dir_id = read_dirid(&cipher_path, false).unwrap();
+        let storage_path = backend.dir_id_to_storage_path(&dir_id).unwrap();
+
+        backend.remove_dir("docs").unwrap();
+
+        assert!(!backend.lower_fs().exists(&cipher_path).unwrap());
+        assert!(!backend.lower_fs().exists(&storage_path).unwrap());
+    }
+
+    #[test]
+    fn remove_deletes_file_and_symlink_entries() {
+        let (_temp_dir, backend) = test_backend();
+
+        backend.mknode("file.txt", 0o644_u16.into()).unwrap();
+        let file_path = backend
+            .plain_path_to_cipher(Utf8Path::new("file.txt"))
+            .unwrap();
+        backend.remove("file.txt").unwrap();
+        assert!(!backend.lower_fs().exists(&file_path).unwrap());
+
+        backend.create_symlink("link", "../target.txt").unwrap();
+        let symlink_path = backend.plain_path_to_cipher(Utf8Path::new("link")).unwrap();
+        backend.remove("link").unwrap();
+        assert!(!backend.lower_fs().exists(&symlink_path).unwrap());
+    }
+
+    #[test]
+    fn list_dir_plain_names_filters_special_entries() {
+        let (_temp_dir, backend) = test_backend();
+        let root_storage = backend.dir_id_to_storage_path("").unwrap();
+
+        backend
+            .lower_fs()
+            .put(&root_storage.join("dirid.c9r"), b"internal")
+            .unwrap();
+
+        let entries: Vec<_> = backend
+            .list_dir_plain_names(Utf8Path::new(""))
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+
+        assert!(entries.is_empty());
     }
 }

@@ -251,3 +251,167 @@ impl<T: Backend> EncryptionTranslator for CryptoMator<T> {
         Self::HEADER_LEN as u64 + div * Self::CIPHER_BLOCK_LEN + remain
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::MemoryBackend;
+
+    /// Creates a deterministic backend instance for pure crypto tests.
+    fn test_backend() -> CryptoMator<MemoryBackend> {
+        let mut siv_key = [0u8; 64];
+        for (i, byte) in siv_key.iter_mut().enumerate() {
+            *byte = i as u8;
+        }
+
+        CryptoMator {
+            backend: MemoryBackend,
+            siv_key,
+        }
+    }
+
+    #[test]
+    fn filename_roundtrip_preserves_plain_name() {
+        let backend = test_backend();
+        let parent_dir_id = b"directory-id";
+        let plain_name = "hello-e\u{301}_file.txt";
+
+        let cipher_name = backend
+            .plain_name_to_cipher(parent_dir_id, plain_name)
+            .unwrap();
+        let decrypted_name = backend
+            .cipher_name_to_plain(parent_dir_id, &cipher_name)
+            .unwrap();
+
+        assert_eq!(decrypted_name, "hello-\u{e9}_file.txt");
+    }
+
+    #[test]
+    fn block_roundtrip_preserves_plain_data() {
+        let backend = test_backend();
+        let header = backend.generate_cipher_header().unwrap();
+        let plain_data = b"hello encrypted world";
+
+        let cipher_data = backend
+            .plain_block_to_cipher(&header, 0, plain_data)
+            .unwrap();
+        let decrypted_data = backend
+            .cipher_block_to_plain(&header, 0, &cipher_data)
+            .unwrap();
+
+        assert_eq!(decrypted_data, plain_data);
+    }
+
+    #[test]
+    fn metavalue_roundtrip_preserves_plain_data() {
+        let backend = test_backend();
+        let plain_value = b"/some/symlink/target";
+
+        let cipher_value = backend.plain_metavalue_to_cipher(plain_value).unwrap();
+        let decrypted_value = backend.cipher_metavalue_to_plain(&cipher_value).unwrap();
+
+        assert_eq!(decrypted_value, plain_value);
+    }
+
+    #[test]
+    fn plain_and_cipher_sizes_roundtrip() {
+        let backend = test_backend();
+
+        for plain_size in [
+            0,
+            1,
+            15,
+            128,
+            4095,
+            4096,
+            4097,
+            32767,
+            32768,
+            32769,
+            65536 + 123,
+        ] {
+            let cipher_size = backend.plain_size_to_cipher(plain_size);
+            let recovered_plain_size = backend.cipher_size_to_plain(cipher_size).unwrap();
+            assert_eq!(recovered_plain_size, plain_size);
+        }
+    }
+
+    #[test]
+    fn corrupted_header_is_rejected() {
+        let backend = test_backend();
+        let mut header = backend.generate_cipher_header().unwrap();
+        let plain_data = b"integrity matters";
+        let cipher_data = backend
+            .plain_block_to_cipher(&header, 0, plain_data)
+            .unwrap();
+
+        header[0] ^= 0x01;
+
+        assert!(
+            backend
+                .cipher_block_to_plain(&header, 0, &cipher_data)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn filename_decryption_rejects_wrong_parent_dir_id() {
+        let backend = test_backend();
+        let cipher_name = backend
+            .plain_name_to_cipher(b"directory-id", "hello.txt")
+            .unwrap();
+
+        assert!(
+            backend
+                .cipher_name_to_plain(b"other-directory-id", &cipher_name)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn block_decryption_rejects_wrong_block_number() {
+        let backend = test_backend();
+        let header = backend.generate_cipher_header().unwrap();
+        let cipher_data = backend
+            .plain_block_to_cipher(&header, 7, b"hello encrypted world")
+            .unwrap();
+
+        assert!(
+            backend
+                .cipher_block_to_plain(&header, 8, &cipher_data)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn cipher_size_to_plain_rejects_truncated_header() {
+        let backend = test_backend();
+
+        assert!(
+            backend
+                .cipher_size_to_plain((CryptoMator::<MemoryBackend>::HEADER_LEN - 1) as u64)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn empty_block_roundtrip_preserves_plain_data() {
+        let backend = test_backend();
+        let header = backend.generate_cipher_header().unwrap();
+        let cipher_data = backend.plain_block_to_cipher(&header, 0, b"").unwrap();
+        let decrypted_data = backend
+            .cipher_block_to_plain(&header, 0, &cipher_data)
+            .unwrap();
+
+        assert_eq!(decrypted_data, b"");
+    }
+
+    #[test]
+    fn empty_metavalue_roundtrip_preserves_plain_data() {
+        let backend = test_backend();
+        let cipher_value = backend.plain_metavalue_to_cipher(b"").unwrap();
+        let decrypted_value = backend.cipher_metavalue_to_plain(&cipher_value).unwrap();
+
+        assert_eq!(decrypted_value, b"");
+    }
+}

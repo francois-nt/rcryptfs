@@ -25,7 +25,10 @@ pub struct CryptoMator<T: Backend> {
 }
 
 /// Reads the directory id vector from a cipher directory.
-fn read_dirid(cipher_dir: &Utf8Path) -> Result<String> {
+fn read_dirid(cipher_dir: &Utf8Path, is_root: bool) -> Result<String> {
+    if is_root {
+        return Ok(String::default());
+    }
     let p = cipher_dir.join("dir.c9r");
     let data = std::fs::read_to_string(&p).context(format!("read {:?}", p))?;
     if data.len() != 36 {
