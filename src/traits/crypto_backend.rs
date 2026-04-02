@@ -18,6 +18,8 @@ pub trait EncryptionTranslator {
     const CIPHER_BLOCK_LEN: u64;
     const PLAIN_BLOCK_LEN: u64;
     const HEADER_LEN: usize;
+    const ENCRYPT_SPARSE_PARTS: bool;
+    const EMPTY_FILE_HAS_HEADER: bool;
     /// Decrypts a cipher filename to plain text.
     fn cipher_name_to_plain(&self, parent_iv: &[u8], cipher_name: &str) -> Result<String>;
     /// Encrypts a plain filename to cipher text.
@@ -49,9 +51,9 @@ pub trait EncryptionTranslator {
     ) -> Result<Vec<u8>>;
 
     /// Encrypts a plain metavalue (e.g., symlink target) to cipher string.
-    fn plain_metavalue_to_cipher(&self, plain_metavalue: &[u8]) -> Result<String>;
+    fn plain_metavalue_to_cipher(&self, plain_metavalue: &[u8]) -> Result<Vec<u8>>;
     /// Decrypts a cipher metavalue to plain bytes.
-    fn cipher_metavalue_to_plain(&self, cipher_metavalue: &str) -> Result<Vec<u8>>;
+    fn cipher_metavalue_to_plain(&self, cipher_metavalue: &[u8]) -> Result<Vec<u8>>;
 }
 
 /// Trait for extended attribute name and value translation.
@@ -148,6 +150,13 @@ pub trait MinimalFs {
     fn remove_file(&self, path: &Utf8Path) -> std::io::Result<()>;
     fn remove_dir(&self, path: &Utf8Path, all: bool) -> std::io::Result<()>;
     fn put(&self, path: &Utf8Path, data: &[u8]) -> std::io::Result<()>;
+    fn read_at(&self, path: &Utf8Path, offset: u64, buffer: &mut [u8]) -> std::io::Result<usize>;
+    fn read(&self, path: &Utf8Path, offset: u64, size: usize) -> std::io::Result<Vec<u8>> {
+        let mut buffer = vec![0; size];
+        let bytes_read = self.read_at(path, offset, &mut buffer)?;
+        buffer.truncate(bytes_read);
+        Ok(buffer)
+    }
     fn set_permissions(
         &self,
         path: &Utf8Path,

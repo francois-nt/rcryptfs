@@ -70,6 +70,8 @@ impl<T: Backend> EncryptionTranslator for GoCryptFs<T> {
     const HEADER_LEN: usize = GoCryptFs::<T>::HEADER_LEN;
     const CIPHER_BLOCK_LEN: u64 = GoCryptFs::<T>::CIPHER_BLOCK_LEN;
     const PLAIN_BLOCK_LEN: u64 = GoCryptFs::<T>::PLAIN_BLOCK_LEN;
+    const ENCRYPT_SPARSE_PARTS: bool = false;
+    const EMPTY_FILE_HAS_HEADER: bool = false;
 
     /// Decrypts a cipher filename to plain text.
     fn cipher_name_to_plain(&self, parent_iv: &[u8], cipher_name: &str) -> Result<String> {
@@ -220,12 +222,12 @@ impl<T: Backend> EncryptionTranslator for GoCryptFs<T> {
     }
 
     /// Encrypts a plain metavalue (e.g., symlink target) to cipher string.
-    fn plain_metavalue_to_cipher(&self, plain_metavalue: &[u8]) -> Result<String> {
+    fn plain_metavalue_to_cipher(&self, plain_metavalue: &[u8]) -> Result<Vec<u8>> {
         let data = self.plain_block_to_cipher(&[], 0, plain_metavalue)?;
-        Ok(b64_engine(self.raw64).encode(data))
+        Ok(b64_engine(self.raw64).encode(data).into())
     }
     /// Decrypts a cipher metavalue to plain bytes.
-    fn cipher_metavalue_to_plain(&self, cipher_metavalue: &str) -> Result<Vec<u8>> {
+    fn cipher_metavalue_to_plain(&self, cipher_metavalue: &[u8]) -> Result<Vec<u8>> {
         let data = b64_engine(self.raw64).decode(cipher_metavalue)?;
         self.cipher_block_to_plain(&[], 0, &data)
     }

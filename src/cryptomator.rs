@@ -3,7 +3,7 @@ use std::fs::DirEntry;
 use crate::{
     Backend, CacheAccess, CipherPathLayout, DefaultFs, EncryptionLayout, EncryptionTranslator,
     FileType, FsBackend, FsDirEntry, Metadata, MinimalFs, OrIoError, Result, Utf8Path, Utf8PathBuf,
-    XattrTranslator,
+    XattrTranslator, temp_file_path,
 };
 use aes_gcm::{
     Aes256Gcm,
@@ -254,6 +254,8 @@ impl<T: Backend> EncryptionTranslator for CryptoMator<T> {
     const CIPHER_BLOCK_LEN: u64 = Self::PLAIN_BLOCK_LEN + 28;
     const HEADER_LEN: usize = 68;
     const PLAIN_BLOCK_LEN: u64 = 32768;
+    const ENCRYPT_SPARSE_PARTS: bool = true;
+    const EMPTY_FILE_HAS_HEADER: bool = true;
     fn cipher_name_to_plain(&self, parent_dir_id: &[u8], cipher_name: &str) -> Result<String> {
         log::debug!(
             "cipher name to plain on {cipher_name} with parent_dir_id_len {}",
@@ -345,11 +347,21 @@ impl<T: Backend> EncryptionTranslator for CryptoMator<T> {
             .map_err(|_| {
                 anyhow!("chunk decrypt failed (auth failed / wrong key / corrupted data)")
             })?;
-
         Ok(pt)
     }
-    fn cipher_metavalue_to_plain(&self, _cipher_metavalue: &str) -> Result<Vec<u8>> {
-        todo!()
+    fn cipher_metavalue_to_plain(&self, cipher_metavalue: &[u8]) -> Result<Vec<u8>> {
+        if cipher_metavalue.len() < Self::HEADER_LEN {
+            bail!(
+                "target link too short! {} < {}",
+                cipher_metavalue.len(),
+                Self::HEADER_LEN
+            );
+        }
+        self.cipher_block_to_plain(
+            &cipher_metavalue[..Self::HEADER_LEN],
+            0,
+            &cipher_metavalue[Self::HEADER_LEN..],
+        )
     }
     fn generate_cipher_header(&self) -> Result<Vec<u8>> {
         const MARKER_LEN: usize = 8;
@@ -389,7 +401,12 @@ impl<T: Backend> EncryptionTranslator for CryptoMator<T> {
         out.extend_from_slice(&header_nonce);
         out.extend_from_slice(&ct_and_tag);
 
-        debug_assert_eq!(out.len(), 68, "Cryptomator header must be 68 bytes");
+        debug_assert_eq!(
+            out.len(),
+            Self::HEADER_LEN,
+            "Cryptomator header must be {} bytes",
+            Self::HEADER_LEN
+        );
         Ok(out)
     }
     fn generate_diriv(&self) -> Vec<u8> {
@@ -428,8 +445,18 @@ impl<T: Backend> EncryptionTranslator for CryptoMator<T> {
         out.extend_from_slice(&ct_and_tag);
         Ok(out)
     }
-    fn plain_metavalue_to_cipher(&self, _plain_metavalue: &[u8]) -> Result<String> {
-        todo!()
+    fn plain_metavalue_to_cipher(&self, plain_metavalue: &[u8]) -> Result<Vec<u8>> {
+        let mut result = Vec::with_capacity(
+            Self::HEADER_LEN
+                + (Self::CIPHER_BLOCK_LEN - Self::PLAIN_BLOCK_LEN) as usize
+                + plain_metavalue.len(),
+        );
+        let mut header = self.generate_cipher_header()?;
+        let mut data = self.plain_block_to_cipher(&header, 0, plain_metavalue)?;
+        result.append(&mut header);
+        result.append(&mut data);
+
+        Ok(result)
     }
     fn cipher_size_to_plain(&self, cipher_size: u64) -> Result<u64> {
         if cipher_size == 0 {
@@ -451,7 +478,7 @@ impl<T: Backend> EncryptionTranslator for CryptoMator<T> {
     /// Converts plain file size to cipher file size.
     fn plain_size_to_cipher(&self, plain_size: u64) -> u64 {
         if plain_size == 0 {
-            return 0;
+            return Self::HEADER_LEN as u64;
         }
         let (div, mut remain) = (
             plain_size / Self::PLAIN_BLOCK_LEN,
@@ -535,8 +562,8 @@ impl CipherPathLayout for CryptoMator<FsBackend> {
         let cipher_name = self.plain_name_to_cipher(&dir_id, name)?;
         Ok(cipher_parent_path.join(cipher_name))
     }
-    fn create_temp_name(&self, _path: &str, _is_dir_iv: bool) -> Utf8PathBuf {
-        todo!()
+    fn create_temp_name(&self, path: &str, is_dir_iv: bool) -> Utf8PathBuf {
+        temp_file_path(&self.backend.cipher_root, path, is_dir_iv)
     }
     fn remove_cached_plain_path(&self, plain_path: &str) {
         crate::default_remove_cached_plain_path(&self.backend, plain_path);
@@ -627,24 +654,60 @@ impl EncryptionLayout for CryptoMator<FsBackend> {
             .or_invalid()?;
         self.lower_fs().set_permissions(&cipher_path, permissions)
     }
-
+    fn mknode(
+        &self,
+        plain_path: &str,
+        permissions: crate::Permissions,
+    ) -> std::io::Result<Metadata> {
+        let cipher_path = self.plain_path_to_cipher(plain_path.into()).or_invalid()?;
+        self.lower_fs()
+            .put(&cipher_path, &self.generate_cipher_header().or_invalid()?)
+            .or_invalid()?;
+        self.lower_fs().set_permissions(&cipher_path, permissions)
+    }
     fn remove_dir(&self, plain_path: &str) -> std::io::Result<()> {
         let cipher_path = self.plain_path_to_cipher(plain_path.into()).or_invalid()?;
-        let children_path = read_dirid(&cipher_path).or_invalid()?;
+        let dir_id = read_dirid(&cipher_path).or_invalid()?;
+
+        let children_path = self.dir_id_to_storage_path(&dir_id).or_invalid()?;
         self.lower_fs()
-            .remove_dir(children_path.as_str().into(), false)?;
-        self.lower_fs().remove_dir(&cipher_path, true)?;
+            .remove_dir(&children_path, false)
+            .inspect_err(|e| log::error!("cant rmdir on {children_path} - {e}"))?;
+        self.lower_fs()
+            .remove_dir(&cipher_path, true)
+            .inspect_err(|e| log::error!("cant rmdir all on {cipher_path} - {e}"))?;
         self.remove_cached_plain_path(plain_path);
         Ok(())
     }
     fn remove(&self, plain_path: &str) -> std::io::Result<()> {
-        let plain_path = plain_path.into();
-        let cipher_path = self.plain_path_to_cipher(plain_path).or_invalid()?;
+        let cipher_path = self.plain_path_to_cipher(plain_path.into()).or_invalid()?;
         let meta = self.lower_fs().metadata(&cipher_path)?;
         match meta.file_type {
-            FileType::File => self.lower_fs().remove_file(plain_path),
-            _ => self.lower_fs().remove_dir(plain_path, true),
+            FileType::File => self.lower_fs().remove_file(&cipher_path),
+            _ => self.lower_fs().remove_dir(&cipher_path, true),
         }
+    }
+    fn read_symlink(&self, plain_path: &str) -> std::io::Result<String> {
+        let cipher_path = self.plain_path_to_cipher(plain_path.into()).or_invalid()?;
+        let symlink_content = cipher_path.join("symlink.c9r");
+        let data = self
+            .lower_fs()
+            .read(&symlink_content, 0, 1024)
+            .or_invalid()?;
+        let target = self.cipher_metavalue_to_plain(&data).or_invalid()?;
+        Ok(str::from_utf8(&target).or_invalid()?.into())
+    }
+    fn create_symlink(&self, plain_path: &str, target: &str) -> std::io::Result<Metadata> {
+        let cipher_path = self.plain_path_to_cipher(plain_path.into()).or_invalid()?;
+        let cipher_target = self
+            .plain_metavalue_to_cipher(target.as_bytes())
+            .or_invalid()?;
+        self.lower_fs().mkdir(&cipher_path)?;
+        self.lower_fs()
+            .put(&cipher_path.join("symlink.c9r"), &cipher_target)?;
+        let mut meta = self.lower_fs().metadata(&cipher_path)?;
+        meta.adjust(self, &cipher_path, false).or_invalid()?;
+        Ok(meta)
     }
 }
 
@@ -653,24 +716,24 @@ fn is_special_entry(name: &str) -> bool {
 }
 
 trait AdujstMetadata {
-    fn adjust(
+    fn adjust<T: EncryptionTranslator>(
         &mut self,
-        this: &impl EncryptionTranslator,
+        this: &T,
         path: &Utf8Path,
         is_root: bool,
     ) -> Result<()>;
 }
 
 impl AdujstMetadata for Metadata {
-    fn adjust(
+    fn adjust<T: EncryptionTranslator>(
         &mut self,
-        this: &impl EncryptionTranslator,
+        this: &T,
         path: &Utf8Path,
         is_root: bool,
     ) -> Result<()> {
         if self.file_type == FileType::File {
             self.len = this.cipher_size_to_plain(self.len).or_invalid()?;
-            self.blocks = 1 + self.len / 32768;
+            self.blocks = 1 + self.len / T::PLAIN_BLOCK_LEN;
         } else if self.file_type == FileType::Directory {
             if !is_root {
                 let dir = path.join("dir.c9r");

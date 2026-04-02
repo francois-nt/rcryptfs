@@ -1,11 +1,9 @@
 use super::GoCryptFs;
 use crate::{
     CacheAccess, CipherPathLayout, DefaultFs, EncryptionLayout, EncryptionTranslator, FsBackend,
-    FsDirEntry, Result, Utf8Path, Utf8PathBuf,
+    FsDirEntry, Result, Utf8Path, Utf8PathBuf, temp_file_path,
 };
 use anyhow::{Context, anyhow};
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use sha2::Digest;
 use std::fs::DirEntry;
 
 impl CipherPathLayout for GoCryptFs<FsBackend> {
@@ -73,15 +71,7 @@ impl CipherPathLayout for GoCryptFs<FsBackend> {
         // Temporary names are deterministic on purpose. This assumes a single
         // rcryptfs process owns a backend at a time; concurrent multi-process
         // access to the same encrypted root is undefined behavior.
-        let path_digest = URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(path.as_bytes()).as_slice());
-        let mut new_name = String::from("temp.");
-        new_name.push_str(&path_digest);
-
-        let mut result = self.backend.cipher_root.join(new_name);
-        if is_dir_iv {
-            result.add_extension("diriv");
-        }
-        result
+        temp_file_path(&self.backend.cipher_root, path, is_dir_iv)
     }
     fn get_dir_iv_file(&self, cipher_folder_path: &Utf8Path) -> Utf8PathBuf {
         cipher_folder_path.join("gocryptfs.diriv")

@@ -1,4 +1,4 @@
-use crate::{Backend, CacheAccess, MinimalFs, OrIoError, WriteAt};
+use crate::{Backend, CacheAccess, MinimalFs, OrIoError, ReadAt, WriteAt};
 pub use camino::{Utf8Path, Utf8PathBuf};
 use chrono::{DateTime, Utc};
 use derive_more::derive::{From, Into};
@@ -74,6 +74,13 @@ impl MinimalFs for DefaultFs {
             .create(true)
             .open(path)?
             .write_all_at(0, data)
+    }
+    fn read_at(&self, path: &Utf8Path, offset: u64, buffer: &mut [u8]) -> std::io::Result<usize> {
+        // not all but a buffer limited to 8196
+        std::fs::OpenOptions::new()
+            .read(true)
+            .open(path)?
+            .read_at(offset, buffer)
     }
     fn set_permissions(
         &self,

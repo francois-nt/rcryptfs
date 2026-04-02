@@ -23,16 +23,20 @@ impl<T: EncryptionTranslator> CryptFsFile<T> {
         if options.append {
             options.write = true;
         }
+        let readonly = options.is_readonly();
         let mut options: OpenOptions = options.into();
+
         let cipher_file = options
             .read(true)
             .append(false)
             .open(cipher_path)
             .or_invalid()?;
 
-        let cipher_file_size = cipher_file
-            .size()?
-            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        let mut cipher_file_size = cipher_file.size()?.or_invalid()?;
+        if T::EMPTY_FILE_HAS_HEADER && !readonly && cipher_file_size == 0 {
+            cipher_file.write_all_at(0, &backend.generate_cipher_header().or_invalid()?)?;
+            cipher_file_size = cipher_file.size()?.or_invalid()?;
+        }
 
         let header = if cipher_file_size == 0 {
             Vec::default()
@@ -67,9 +71,9 @@ impl<T: EncryptionTranslator> CryptFsFile<T> {
         self.cipher_file
             .size()
             .inspect_err(|e| error!("catastrophic error while reading size len {e}"))?
-            .ok_or_else(|| {
+            .or_invalid()
+            .inspect_err(|_| {
                 error!("catastrophic error while reading size (null value)");
-                std::io::Error::from_raw_os_error(libc::EINVAL)
             })
     }
     /// Reads and decrypts one cipher block into the caller-provided plain buffer.
@@ -154,9 +158,7 @@ impl<T: EncryptionTranslator> CryptFsFile<T> {
 
         let mut target_end_offset = (target_plain_len % T::PLAIN_BLOCK_LEN) as usize;
         let current_end_offset = (current_plain_len % T::PLAIN_BLOCK_LEN) as usize;
-        if (current_end_offset == 0 && target_plain_len > current_plain_len)
-            || (target_end_offset == 0 && target_plain_len < current_plain_len)
-        {
+        if current_end_offset == 0 && target_plain_len < current_plain_len {
             // no re-encoding needed.
             return Ok(());
         }
@@ -171,8 +173,18 @@ impl<T: EncryptionTranslator> CryptFsFile<T> {
             return Ok(());
         }
 
-        let mut read_buffer = vec![0; T::PLAIN_BLOCK_LEN as usize];
+        if target_end_offset == T::PLAIN_BLOCK_LEN as usize && target_plain_len > current_plain_len
+        {
+            if T::ENCRYPT_SPARSE_PARTS && target_block > last_block {
+                let read_buffer = vec![0; T::PLAIN_BLOCK_LEN as usize];
+                for block_no in last_block + 1..=target_block {
+                    self.write_block(block_no, header, &read_buffer)?;
+                }
+            }
+            return Ok(());
+        }
 
+        let mut read_buffer = vec![0; T::PLAIN_BLOCK_LEN as usize];
         let bytes_read = self.read_block(last_block, header, &mut read_buffer)?;
 
         log::debug!(
@@ -182,6 +194,13 @@ impl<T: EncryptionTranslator> CryptFsFile<T> {
         if target_block > last_block {
             read_buffer[bytes_read..].fill(0);
             self.write_block(last_block, header, &read_buffer)?;
+            if T::ENCRYPT_SPARSE_PARTS {
+                read_buffer.fill(0);
+                for block_no in last_block + 1..target_block {
+                    self.write_block(block_no, header, &read_buffer)?;
+                }
+                self.write_block(target_block, header, &read_buffer[..target_end_offset])?;
+            }
         } else {
             // target_block == last_block
             if target_end_offset > bytes_read {

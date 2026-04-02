@@ -1,9 +1,9 @@
-use std::time::SystemTime;
-
-use filetime::set_symlink_file_times;
-
 use super::{EncryptionLayout, MinimalFs, OrIoError};
-use crate::{FileType, Metadata, Permissions, Utf8Path};
+use crate::{FileType, Metadata, Permissions, Utf8Path, Utf8PathBuf};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use filetime::set_symlink_file_times;
+use sha2::Digest;
+use std::time::SystemTime;
 
 pub(super) fn default_metadata<T: EncryptionLayout + ?Sized>(
     this: &T,
@@ -101,9 +101,10 @@ pub(super) fn default_create_symlink<T: EncryptionLayout + ?Sized>(
     let cipher_target = this
         .plain_metavalue_to_cipher(target.as_bytes())
         .or_invalid()?;
+    let cipher_target = str::from_utf8(&cipher_target).or_invalid()?;
 
     this.lower_fs()
-        .create_symlink(cipher_path.as_str(), &cipher_target)
+        .create_symlink(cipher_path.as_str(), cipher_target)
 }
 pub(super) fn default_read_symlink<T: EncryptionLayout + ?Sized>(
     this: &T,
@@ -112,7 +113,7 @@ pub(super) fn default_read_symlink<T: EncryptionLayout + ?Sized>(
     let cipher_path = this.plain_path_to_cipher(plain_path.into()).or_invalid()?;
     let cipher_target = this.lower_fs().read_symlink(cipher_path.as_str())?;
     let plain_value = this
-        .cipher_metavalue_to_plain(cipher_target.as_str())
+        .cipher_metavalue_to_plain(cipher_target.as_str().as_bytes())
         .or_invalid()?;
 
     String::from_utf8(plain_value).or_invalid()
@@ -160,4 +161,19 @@ pub(super) fn default_set_time<T: EncryptionLayout + ?Sized>(
         let mtime = mtime.unwrap_or(meta.modified);
         set_symlink_file_times(path, atime.into(), mtime.into())
     }
+}
+
+pub(crate) fn temp_file_path(root: &Utf8Path, path: &str, is_dir_iv: bool) -> Utf8PathBuf {
+    // Temporary names are deterministic on purpose. This assumes a single
+    // rcryptfs process owns a backend at a time; concurrent multi-process
+    // access to the same encrypted root is undefined behavior.
+    let path_digest = URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(path.as_bytes()).as_slice());
+    let mut new_name = String::from("temp.");
+    new_name.push_str(&path_digest);
+
+    let mut result = root.join(new_name);
+    if is_dir_iv {
+        result.add_extension("diriv");
+    }
+    result
 }
