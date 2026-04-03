@@ -217,6 +217,18 @@ impl EncryptionLayout for CryptoMator<FsBackend> {
         let target = self.cipher_metavalue_to_plain(&data).or_invalid()?;
         Ok(str::from_utf8(&target).or_invalid()?.into())
     }
+    fn set_permissions(
+        &self,
+        path: &str,
+        permissions: crate::Permissions,
+    ) -> std::io::Result<Metadata> {
+        let metadata = self.metadata(path)?;
+        if metadata.file_type == FileType::SymLink {
+            return Ok(metadata);
+        }
+        let cipher_path = self.plain_path_to_cipher(path.into()).or_invalid()?;
+        self.lower_fs().set_permissions(&cipher_path, permissions)
+    }
     fn create_symlink(&self, plain_path: &str, target: &str) -> std::io::Result<Metadata> {
         let cipher_path = self.plain_path_to_cipher(plain_path.into()).or_invalid()?;
         let cipher_target = self
@@ -453,5 +465,104 @@ mod tests {
             .unwrap();
 
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn rename_moves_file_directory_and_symlink_entries() {
+        let (_temp_dir, backend) = test_backend();
+
+        backend.mknode("file.txt", 0o644_u16.into()).unwrap();
+        backend.rename("file.txt", "file2.txt").unwrap();
+        assert!(backend.metadata("file.txt").is_err());
+        assert!(backend.metadata("file2.txt").is_ok());
+        assert!(backend.metadata("file2.txt").unwrap().file_type == FileType::File);
+
+        backend.mkdir("docs", 0o755_u16.into()).unwrap();
+        backend.rename("docs", "docs2").unwrap();
+        assert!(backend.metadata("docs").is_err());
+        assert!(backend.metadata("docs2").is_ok());
+        assert!(backend.metadata("docs2").unwrap().file_type == FileType::Directory);
+
+        backend.create_symlink("link", "../target.txt").unwrap();
+        backend.rename("link", "link2").unwrap();
+        assert!(backend.metadata("link").is_err());
+        assert!(backend.metadata("link2").is_ok());
+        assert!(backend.metadata("link2").unwrap().file_type == FileType::SymLink);
+        assert_eq!(backend.read_symlink("link2").unwrap(), "../target.txt");
+    }
+
+    #[test]
+    fn set_permissions_updates_file_directory_and_symlink_metadata() {
+        let (_temp_dir, backend) = test_backend();
+
+        backend.mknode("file.txt", 0o644_u16.into()).unwrap();
+        let file_metadata = backend
+            .set_permissions("file.txt", 0o600_u16.into())
+            .unwrap();
+        assert_eq!(u16::from(file_metadata.permissions), 0o600);
+        assert_eq!(
+            u16::from(backend.metadata("file.txt").unwrap().permissions),
+            0o600
+        );
+
+        backend.mkdir("docs", 0o755_u16.into()).unwrap();
+        let dir_metadata = backend.set_permissions("docs", 0o700_u16.into()).unwrap();
+        assert_eq!(u16::from(dir_metadata.permissions), 0o700);
+        assert_eq!(
+            u16::from(backend.metadata("docs").unwrap().permissions),
+            0o700
+        );
+
+        backend.create_symlink("link", "../target.txt").unwrap();
+        let symlink_after = backend.set_permissions("link", 0o600_u16.into()).unwrap();
+
+        assert!(symlink_after.file_type == FileType::SymLink);
+        assert_eq!(backend.read_symlink("link").unwrap(), "../target.txt");
+        assert!(backend.metadata("link").unwrap().file_type == FileType::SymLink);
+        assert_eq!(u16::from(symlink_after.permissions), 0o777);
+        assert_eq!(
+            u16::from(backend.metadata("link").unwrap().permissions),
+            0o777
+        );
+    }
+
+    #[test]
+    fn set_time_updates_file_directory_and_symlink_metadata() {
+        let (_temp_dir, backend) = test_backend();
+        let atime =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let mtime =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_123);
+
+        backend.mknode("file.txt", 0o644_u16.into()).unwrap();
+        let file_before = backend.metadata("file.txt").unwrap();
+        backend
+            .set_time("file.txt", Some(atime), Some(mtime))
+            .unwrap();
+        let file_after = backend.metadata("file.txt").unwrap();
+        assert_ne!(file_before.accessed, file_after.accessed);
+        assert_ne!(file_before.modified, file_after.modified);
+        assert_eq!(file_after.accessed, atime);
+        assert_eq!(file_after.modified, mtime);
+
+        backend.mkdir("docs", 0o755_u16.into()).unwrap();
+        let dir_before = backend.metadata("docs").unwrap();
+        backend.set_time("docs", Some(atime), Some(mtime)).unwrap();
+        let dir_after = backend.metadata("docs").unwrap();
+        assert_ne!(dir_before.accessed, dir_after.accessed);
+        assert_ne!(dir_before.modified, dir_after.modified);
+        assert_eq!(dir_after.accessed, atime);
+        assert_eq!(dir_after.modified, mtime);
+
+        backend.create_symlink("link", "../target.txt").unwrap();
+        let symlink_before = backend.metadata("link").unwrap();
+        backend.set_time("link", Some(atime), Some(mtime)).unwrap();
+        let symlink_after = backend.metadata("link").unwrap();
+        assert!(symlink_after.file_type == FileType::SymLink);
+        assert_eq!(backend.read_symlink("link").unwrap(), "../target.txt");
+        assert_eq!(symlink_after.accessed, atime);
+        assert_eq!(symlink_after.modified, mtime);
+        assert_ne!(symlink_before.accessed, symlink_after.accessed);
+        assert_ne!(symlink_before.modified, symlink_after.modified);
     }
 }

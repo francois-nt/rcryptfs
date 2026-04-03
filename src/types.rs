@@ -410,7 +410,7 @@ impl From<u32> for Permissions {
 impl From<std::fs::Permissions> for Permissions {
     fn from(value: std::fs::Permissions) -> Self {
         #[cfg(unix)]
-        return std::os::unix::fs::PermissionsExt::mode(&value).into();
+        return (std::os::unix::fs::PermissionsExt::mode(&value) & 0o777).into();
         #[cfg(not(unix))]
         return Self(value.readonly() as u16);
     }

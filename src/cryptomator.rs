@@ -1,21 +1,27 @@
 use crate::{
-    Backend, CipherPathLayout, EncryptionTranslator, FsBackend, MinimalFs, Result, Utf8Path,
-    Utf8PathBuf, XattrTranslator,
+    Backend, CipherPathLayout, EncryptionTranslator, FsBackend, MinimalFs, OrIoError, Result,
+    Utf8Path, Utf8PathBuf, XattrTranslator, is_dir_empty,
 };
 use aes_gcm::{
     Aes256Gcm,
     aead::{Aead, Payload},
 };
 use aes_kw::KekAes256;
-use aes_siv::aead::KeyInit;
 use aes_siv::siv::Aes256Siv;
 use anyhow::{Context, anyhow, bail};
 use base64::Engine;
 use data_encoding::BASE32_NOPAD;
+use hmac::{Hmac, Mac};
+use rand::RngCore;
 use scrypt::{Params as ScryptParams, scrypt};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
+use sha2::Sha256;
+use std::io::Write;
 use unicode_normalization::UnicodeNormalization;
+use uuid::Uuid;
+
+type HmacSha256 = Hmac<Sha256>;
 
 mod encryption_translator;
 mod layout;
@@ -37,6 +43,68 @@ fn read_dirid(cipher_dir: &Utf8Path, is_root: bool) -> Result<String> {
     Ok(data)
 }
 
+#[derive(Serialize)]
+struct JwtHeader<'a> {
+    kid: &'a str,
+    typ: &'a str,
+    alg: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JwtPayload<'a> {
+    format: u32,
+    shortening_threshold: u32,
+    jti: String,
+    cipher_combo: &'a str,
+}
+
+fn generate_vault_cryptomator(
+    master_keys: &MasterKeys,
+    cipher_combo: &str,        // "SIV_GCM" ou "SIV_CTRMAC"
+    shortening_threshold: u32, // typiquement 220
+) -> Result<String> {
+    if cipher_combo != "SIV_GCM" && cipher_combo != "SIV_CTRMAC" {
+        bail!("unsupported cipherCombo: {cipher_combo}");
+    }
+
+    // 1) header + payload
+    let header = JwtHeader {
+        kid: "masterkeyfile:masterkey.cryptomator",
+        typ: "JWT",
+        alg: "HS256",
+    };
+    let payload = JwtPayload {
+        format: 8,
+        shortening_threshold,
+        jti: Uuid::new_v4().to_string(),
+        cipher_combo,
+    };
+
+    // 2) JSON -> bytes
+    let header_json = serde_json::to_vec(&header)?;
+    let payload_json = serde_json::to_vec(&payload)?;
+
+    // 3) base64url sans padding
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let header_b64 = b64.encode(header_json);
+    let payload_b64 = b64.encode(payload_json);
+
+    // 4) message à signer
+    let signing_input = format!("{header_b64}.{payload_b64}");
+
+    // 5) key = encryptionMasterKey || macMasterKey (512-bit raw masterkey)
+    let jwt_key = master_keys.jwt_key();
+
+    let mut mac = HmacSha256::new_from_slice(&jwt_key)?;
+    mac.update(signing_input.as_bytes());
+    let sig = mac.finalize().into_bytes(); // 32 bytes
+
+    let sig_b64 = b64.encode(sig);
+
+    Ok(format!("{signing_input}.{sig_b64}"))
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CryptoMatorConfig {
@@ -49,9 +117,82 @@ struct CryptoMatorConfig {
     version_mac: String,
 }
 
-struct MasterKeys {
-    primary_master_key: Vec<u8>,
-    hmac_master_key: Vec<u8>,
+fn compute_version_mac(version: u32, mac_master_key: &[u8]) -> Result<Vec<u8>> {
+    let mut mac = HmacSha256::new_from_slice(mac_master_key)?;
+    mac.update(&version.to_be_bytes()); // 4 bytes big-endian
+    let out = mac.finalize().into_bytes(); // 32 bytes
+    let out: [u8; _] = out.into();
+    Ok(out.into())
+}
+
+impl CryptoMatorConfig {
+    fn try_new(password: &str) -> Result<(Self, MasterKeys)> {
+        const DEFAULT_VERSION: u32 = 999;
+        const DEFAULT_SCRYPT_COST: u32 = 32768;
+        const DEFAULT_SCRYPT_BLOCK_SIZE: u32 = 8;
+        let pw_nfc: String = password.nfc().collect();
+
+        let mut salt = [0u8; 8];
+        rand::rng().fill_bytes(&mut salt);
+
+        let params = ScryptParams::new(15, DEFAULT_SCRYPT_BLOCK_SIZE, 1, 32)
+            .map_err(|e| anyhow!("invalid default scrypt params: {e}"))?;
+
+        let mut kek_bytes = [0u8; 32];
+        scrypt(pw_nfc.as_bytes(), &salt, &params, &mut kek_bytes)
+            .map_err(|e| anyhow!("scrypt failed: {e}"))?;
+
+        let kek = KekAes256::from(kek_bytes);
+
+        let mut primary_master_key = vec![0u8; 32];
+        rand::rng().fill_bytes(&mut primary_master_key);
+
+        let mut hmac_master_key = vec![0u8; 32];
+        rand::rng().fill_bytes(&mut hmac_master_key);
+
+        Ok((
+            CryptoMatorConfig {
+                version: DEFAULT_VERSION,
+                scrypt_salt: base64::engine::general_purpose::STANDARD.encode(salt),
+                scrypt_cost_param: DEFAULT_SCRYPT_COST,
+                scrypt_block_size: DEFAULT_SCRYPT_BLOCK_SIZE,
+                primary_master_key: base64::engine::general_purpose::STANDARD.encode(
+                    kek.wrap_vec(&primary_master_key)
+                        .map_err(|e| anyhow!("AES-KW wrap primaryMasterKey failed: {e}"))?,
+                ),
+                hmac_master_key: base64::engine::general_purpose::STANDARD.encode(
+                    kek.wrap_vec(&hmac_master_key)
+                        .map_err(|e| anyhow!("AES-KW wrap hmacMasterKey failed: {e}"))?,
+                ),
+                version_mac: base64::engine::general_purpose::STANDARD
+                    .encode(compute_version_mac(DEFAULT_VERSION, &hmac_master_key)?),
+            },
+            MasterKeys {
+                primary_master_key,
+                hmac_master_key,
+            },
+        ))
+    }
+}
+
+pub struct MasterKeys {
+    pub primary_master_key: Vec<u8>,
+    pub hmac_master_key: Vec<u8>,
+}
+
+impl MasterKeys {
+    fn jwt_key(&self) -> [u8; 64] {
+        let mut arr = [0; 64];
+        arr[..32].copy_from_slice(&self.primary_master_key);
+        arr[32..].copy_from_slice(&self.hmac_master_key);
+        arr
+    }
+    pub fn siv_key(&self) -> [u8; 64] {
+        let mut arr = [0; 64];
+        arr[..32].copy_from_slice(&self.hmac_master_key);
+        arr[32..].copy_from_slice(&self.primary_master_key);
+        arr
+    }
 }
 
 fn log2_pow2(n: u32) -> Result<u8> {
@@ -120,6 +261,51 @@ const HEADER_NONCE_LEN: usize = 12;
 const NONCE_LEN: usize = 12;
 
 impl CryptoMator<FsBackend> {
+    /// Initializes a new Cryptomator-compatible backend with default parameters.
+    pub fn init_with_default_params(root_path: &Utf8Path, password: &str) -> Result<MasterKeys> {
+        if !is_dir_empty(root_path)? {
+            bail!("Directory {root_path} must be empty!");
+        }
+
+        let rollback = |_: &std::io::Error| {
+            let _ = std::fs::remove_file(root_path.join("masterkey.cryptomator"));
+            let _ = std::fs::remove_file(root_path.join("vault.cryptomator"));
+            let _ = std::fs::remove_dir_all(root_path.join("d"));
+        };
+
+        let (config, master_keys) = CryptoMatorConfig::try_new(password)?;
+
+        std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(root_path.join("masterkey.cryptomator"))
+            .and_then(|mut file| {
+                let json_config = serde_json::to_vec_pretty(&config)?;
+                file.write_all(&json_config)
+            })
+            .inspect_err(rollback)?;
+
+        std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(root_path.join("vault.cryptomator"))
+            .and_then(|mut file| {
+                let vault =
+                    generate_vault_cryptomator(&master_keys, "SIV_GCM", 220).or_invalid()?;
+                file.write_all(vault.as_bytes())
+            })
+            .inspect_err(rollback)?;
+
+        let siv_key = master_keys.siv_key();
+        let backend = CryptoMator {
+            backend: root_path.into(),
+            siv_key,
+        };
+        std::fs::create_dir_all(backend.dir_id_to_storage_path("")?).inspect_err(rollback)?;
+
+        Ok(master_keys)
+    }
+
     /// Creates a new GoCryptFs instance from a cipher root path and password.
     pub fn try_new(root_path: &Utf8Path, password: &str) -> Result<Self> {
         let file_path = root_path.join("masterkey.cryptomator");
@@ -127,9 +313,7 @@ impl CryptoMator<FsBackend> {
         let config: CryptoMatorConfig = serde_json::from_str(&json_str)?;
 
         let keys = derive_keys(password, &config)?;
-        let mut siv_key = [0u8; 64];
-        siv_key[..32].copy_from_slice(&keys.hmac_master_key);
-        siv_key[32..].copy_from_slice(&keys.primary_master_key);
+        let siv_key = keys.siv_key();
         Ok(CryptoMator {
             backend: root_path.into(),
             siv_key,
@@ -147,7 +331,7 @@ impl CryptoMator<FsBackend> {
     fn dir_id_to_storage_path(&self, dir_id: &str) -> Result<Utf8PathBuf> {
         // Key material for AES-SIV-512 (RFC 5297): 64 bytes split into two halves.
         // We concatenate mac_master_key || master_key.
-
+        use aes_siv::aead::KeyInit;
         let mut siv = Aes256Siv::new_from_slice(&self.siv_key)?;
 
         // associated data = null => empty iterator
@@ -184,7 +368,7 @@ impl<T: Backend> CryptoMator<T> {
 
         let header_nonce: [u8; HEADER_NONCE_LEN] = header[0..HEADER_NONCE_LEN].try_into()?;
         let ct_and_tag = &header[HEADER_NONCE_LEN..Self::HEADER_LEN]; // 40 + 16 = 56 bytes
-
+        use aes_siv::aead::KeyInit;
         let cipher = Aes256Gcm::new_from_slice(self.master_key())
             .map_err(|e| anyhow!("AES-GCM init failed: {e}"))?;
 

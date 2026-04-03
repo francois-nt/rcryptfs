@@ -5,8 +5,8 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use rcryptfs::{
-    FileSystemBuilder, FileSystemFactory, FileSystemHandler, FsBackend, GoCryptFs, NoCache,
-    is_background_child, is_dir_empty, platform, respawn_in_background,
+    CryptoMator, FileSystemBuilder, FileSystemFactory, FileSystemHandler, FsBackend, GoCryptFs,
+    NoCache, is_background_child, is_dir_empty, platform, respawn_in_background,
 };
 #[cfg(unix)]
 use std::ffi::OsStr;
@@ -38,6 +38,8 @@ static LOGGER: ConsoleLogger = ConsoleLogger;
 enum InitMode {
     #[value(name = "gocryptfs")]
     GoCryptFS,
+    #[value(name = "cryptomator")]
+    CryptoMator,
     Other,
 }
 
@@ -124,33 +126,24 @@ fn read_password_from_stdin(is_background_child: bool) -> Result<String> {
     Ok(password.trim_end_matches(&['\r', '\n'][..]).to_string())
 }
 
-/// Formats a 32-byte master key as two grouped hex lines for terminal display.
-fn format_32_bytes(data: &[u8]) -> (String, String) {
-    assert_eq!(data.len(), 32);
-
-    let first = data[..16]
-        .chunks(4)
-        .map(|chunk| {
-            chunk
-                .iter()
-                .map(|b| format!("{:02x}", b))
-                .collect::<String>()
+/// Formats a 16N-byte master key as N grouped hex lines for terminal display.
+fn format_bytes(data: &[u8]) -> String {
+    let lines = data
+        .chunks(16)
+        .map(|line| {
+            line.chunks(4)
+                .map(|chunk| {
+                    chunk
+                        .iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("-")
         })
         .collect::<Vec<_>>()
-        .join("-");
-
-    let second = data[16..]
-        .chunks(4)
-        .map(|chunk| {
-            chunk
-                .iter()
-                .map(|b| format!("{:02x}", b))
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join("-");
-
-    (first, second)
+        .join("-\n    ");
+    format!("    {lines}\n")
 }
 
 fn main() -> Result<()> {
@@ -178,8 +171,8 @@ fn main() -> Result<()> {
                     let master_key =
                         GoCryptFs::<FsBackend>::init_with_default_params(folder_path, &password)?;
                     println!("\nYour master key is:\n");
-                    let (first, second) = format_32_bytes(&master_key);
-                    println!("    {first}-\n    {second}\n");
+                    let formatted = format_bytes(&master_key);
+                    println!("{formatted}");
                     println!(
                         "If the gocryptfs.conf file becomes corrupted or you ever forget your password,"
                     );
@@ -188,6 +181,20 @@ fn main() -> Result<()> {
                     );
                     println!("paper and store it in a drawer. This message is only printed once.");
                     println!("The gocryptfs filesystem has been created successfully.");
+                    println!(
+                        "You can now mount it using: rcryptfs mount {} MOUNTPOINT",
+                        folder_path
+                    );
+                }
+                InitMode::CryptoMator => {
+                    let folder_path = init_args.folder_path.as_str().into();
+                    // Print the generated master key once so it can be stored offline for recovery.
+                    let master_keys =
+                        CryptoMator::<FsBackend>::init_with_default_params(folder_path, &password)?;
+                    println!("\nYour master key is:\n");
+                    let formatted = format_bytes(&master_keys.siv_key());
+                    println!("{formatted}");
+                    println!("The cryptomator filesystem has been created successfully.");
                     println!(
                         "You can now mount it using: rcryptfs mount {} MOUNTPOINT",
                         folder_path

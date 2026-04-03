@@ -982,6 +982,7 @@ dependencies = [
  "fuse_mt",
  "generic-array 1.3.5",
  "hkdf",
+ "hmac",
  "libc",
  "log",
  "parking_lot",

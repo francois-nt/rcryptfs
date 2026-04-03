@@ -179,6 +179,9 @@ where
         self.fs.remove(path)
     }
     fn remove_dir(&self, path: &str) -> std::io::Result<()> {
+        if path.is_empty() {
+            return Err(std::io::Error::from_raw_os_error(libc::ENOTEMPTY));
+        }
         self.fs.remove_dir(path)
     }
     fn rename(&self, old_path: &str, new_path: &str) -> std::io::Result<()> {

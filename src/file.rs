@@ -150,20 +150,36 @@ impl<T: EncryptionTranslator> CryptFsFile<T> {
         // When truncating:
         // - Truncate the new last plaintext block and re-encrypt it (updates the auth tag).
         // - If new length is exact block multiple (new_offset % BLOCK_LEN == 0), no re-encrypt: just truncate cipher file.
-        if target_plain_len == 0 || current_plain_len == 0 || current_plain_len == target_plain_len
-        {
+        if target_plain_len == 0 || current_plain_len == target_plain_len {
             // no re-encoding needed.
             return Ok(());
-        };
+        }
 
         let mut target_end_offset = (target_plain_len % T::PLAIN_BLOCK_LEN) as usize;
+        if target_end_offset == 0 {
+            target_end_offset = T::PLAIN_BLOCK_LEN as usize;
+        }
+
+        if current_plain_len == 0 {
+            if !T::ENCRYPT_SPARSE_PARTS {
+                return Ok(());
+            }
+
+            let target_block = (target_plain_len - 1) / T::PLAIN_BLOCK_LEN;
+            let zero_block = vec![0; T::PLAIN_BLOCK_LEN as usize];
+
+            for block_no in 0..target_block {
+                self.write_block(block_no, header, &zero_block)?;
+            }
+            self.write_block(target_block, header, &zero_block[..target_end_offset])?;
+
+            return Ok(());
+        }
+
         let current_end_offset = (current_plain_len % T::PLAIN_BLOCK_LEN) as usize;
         if current_end_offset == 0 && target_plain_len < current_plain_len {
             // no re-encoding needed.
             return Ok(());
-        }
-        if target_end_offset == 0 {
-            target_end_offset = T::PLAIN_BLOCK_LEN as usize;
         }
 
         let last_block = (current_plain_len.min(target_plain_len) - 1) / T::PLAIN_BLOCK_LEN;
@@ -426,16 +442,30 @@ impl<T: EncryptionTranslator> SetLen for CryptFsFile<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FsBackend, GoCryptFs};
+    use crate::{CryptoMator, FsBackend, GoCryptFs};
     use std::sync::Arc;
     use tempfile::tempdir;
 
     /// Creates a test file backed by a freshly initialized GoCryptFS repository.
-    fn open_test_file() -> (tempfile::TempDir, CryptFsFile<GoCryptFs<FsBackend>>) {
+    fn open_gocryptfs_test_file() -> (tempfile::TempDir, CryptFsFile<GoCryptFs<FsBackend>>) {
         let temp_dir = tempdir().unwrap();
         let root = Utf8Path::from_path(temp_dir.path()).unwrap();
         GoCryptFs::<FsBackend>::init_with_default_params(root, "password").unwrap();
         let backend = Arc::new(GoCryptFs::<FsBackend>::try_new(root, "password").unwrap());
+
+        let mut options = GenericOpenOptions::default();
+        options.read(true).write(true).create(true);
+        let file = CryptFsFile::try_open(&root.join("cipher.bin"), backend, options).unwrap();
+
+        (temp_dir, file)
+    }
+
+    /// Creates a test file backed by a freshly initialized Cryptomator repository.
+    fn open_cryptomator_test_file() -> (tempfile::TempDir, CryptFsFile<CryptoMator<FsBackend>>) {
+        let temp_dir = tempdir().unwrap();
+        let root = Utf8Path::from_path(temp_dir.path()).unwrap();
+        CryptoMator::<FsBackend>::init_with_default_params(root, "password").unwrap();
+        let backend = Arc::new(CryptoMator::<FsBackend>::try_new(root, "password").unwrap());
 
         let mut options = GenericOpenOptions::default();
         options.read(true).write(true).create(true);
@@ -450,8 +480,8 @@ mod tests {
     }
 
     #[test]
-    fn write_then_read_aligned_block() {
-        let (_temp_dir, file) = open_test_file();
+    fn gocryptfs_write_then_read_aligned_block() {
+        let (_temp_dir, file) = open_gocryptfs_test_file();
         let plain = sample_data(4096);
 
         file.write_all_at(0, &plain).unwrap();
@@ -464,8 +494,8 @@ mod tests {
     }
 
     #[test]
-    fn write_then_read_unaligned_range() {
-        let (_temp_dir, file) = open_test_file();
+    fn gocryptfs_write_then_read_unaligned_range() {
+        let (_temp_dir, file) = open_gocryptfs_test_file();
         let offset = 37;
         let plain = sample_data(900);
 
@@ -479,8 +509,8 @@ mod tests {
     }
 
     #[test]
-    fn read_unaligned_range_across_blocks() {
-        let (_temp_dir, file) = open_test_file();
+    fn gocryptfs_read_unaligned_range_across_blocks() {
+        let (_temp_dir, file) = open_gocryptfs_test_file();
         let full = sample_data(9000);
         let offset = 123;
         let expected = &full[offset..offset + 5000];
@@ -495,9 +525,9 @@ mod tests {
     }
 
     #[test]
-    fn write_and_read_handle_boundary_offsets_and_gaps() {
+    fn gocryptfs_write_and_read_handle_boundary_offsets_and_gaps() {
         for offset in [1u64, 4095, 4096, 4097] {
-            let (_temp_dir, file) = open_test_file();
+            let (_temp_dir, file) = open_gocryptfs_test_file();
             let plain = sample_data(128);
 
             file.write_all_at(offset, &plain).unwrap();
@@ -520,7 +550,90 @@ mod tests {
 
     #[test]
     fn truncate_preserves_prefix() {
-        let (_temp_dir, file) = open_test_file();
+        let (_temp_dir, file) = open_gocryptfs_test_file();
+        let full = sample_data(6000);
+        let truncated_len = 3000;
+
+        file.write_all_at(0, &full).unwrap();
+        file.set_len(truncated_len as u64).unwrap();
+
+        let mut read_back = vec![0u8; 4000];
+        let bytes_read = file.read_at(0, &mut read_back).unwrap();
+
+        assert_eq!(bytes_read, truncated_len);
+        assert_eq!(&read_back[..truncated_len], &full[..truncated_len]);
+    }
+
+    #[test]
+    fn cryptomator_open_materializes_header_for_empty_file() {
+        let temp_dir = tempdir().unwrap();
+        let root = Utf8Path::from_path(temp_dir.path()).unwrap();
+        CryptoMator::<FsBackend>::init_with_default_params(root, "password").unwrap();
+        let backend = Arc::new(CryptoMator::<FsBackend>::try_new(root, "password").unwrap());
+
+        let mut options = GenericOpenOptions::default();
+        options.read(true).write(true).create(true);
+        let _file = CryptFsFile::try_open(&root.join("cipher.bin"), backend, options).unwrap();
+
+        let raw_len = std::fs::metadata(root.join("cipher.bin")).unwrap().len();
+        assert_eq!(raw_len, CryptoMator::<FsBackend>::HEADER_LEN as u64);
+    }
+
+    #[test]
+    fn cryptomator_write_then_read_aligned_block() {
+        let (_temp_dir, file) = open_cryptomator_test_file();
+        let plain = sample_data(4096);
+
+        file.write_all_at(0, &plain).unwrap();
+
+        let mut read_back = vec![0u8; plain.len()];
+        let bytes_read = file.read_at(0, &mut read_back).unwrap();
+
+        assert_eq!(bytes_read, plain.len());
+        assert_eq!(read_back, plain);
+    }
+
+    #[test]
+    fn cryptomator_write_then_read_unaligned_range() {
+        let (_temp_dir, file) = open_cryptomator_test_file();
+        let offset = 37;
+        let plain = sample_data(900);
+
+        file.write_all_at(offset, &plain).unwrap();
+
+        let mut read_back = vec![0u8; plain.len()];
+        let bytes_read = file.read_at(offset, &mut read_back).unwrap();
+
+        assert_eq!(bytes_read, plain.len());
+        assert_eq!(read_back, plain);
+    }
+    #[test]
+    fn cryptomator_write_and_read_handle_boundary_offsets_and_gaps() {
+        for offset in [1u64, 32767, 32768, 32769, 65535, 65536, 65537] {
+            let (_temp_dir, file) = open_cryptomator_test_file();
+            let plain = sample_data(128);
+
+            file.write_all_at(offset, &plain).unwrap();
+
+            let mut gap_and_data = vec![0u8; offset as usize + plain.len()];
+            let bytes_read = file.read_at(0, &mut gap_and_data).unwrap();
+
+            assert_eq!(bytes_read, gap_and_data.len(), "offset {offset}");
+            assert!(
+                gap_and_data[..offset as usize].iter().all(|&b| b == 0),
+                "offset {offset}"
+            );
+            assert_eq!(
+                &gap_and_data[offset as usize..],
+                plain.as_slice(),
+                "offset {offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn cryptomator_truncate_preserves_prefix() {
+        let (_temp_dir, file) = open_cryptomator_test_file();
         let full = sample_data(6000);
         let truncated_len = 3000;
 
