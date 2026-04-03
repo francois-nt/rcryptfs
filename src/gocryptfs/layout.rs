@@ -143,3 +143,250 @@ fn map_dir_entry(
         Err(e) => Err(e)?,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{EncryptionLayout, FileType, FsBackend, MinimalFs};
+    use tempfile::tempdir;
+
+    /// Creates a freshly initialized GoCryptFS backend rooted in a temp directory.
+    fn test_backend() -> (tempfile::TempDir, GoCryptFs<FsBackend>) {
+        let temp_dir = tempdir().unwrap();
+        let root = Utf8Path::from_path(temp_dir.path()).unwrap();
+        GoCryptFs::<FsBackend>::init_with_default_params(root, "password").unwrap();
+        let backend = GoCryptFs::<FsBackend>::try_new(root, "password").unwrap();
+        (temp_dir, backend)
+    }
+
+    #[test]
+    fn plain_path_to_cipher_resolves_root_and_nested_paths() {
+        let (_temp_dir, backend) = test_backend();
+
+        let root_cipher = backend.plain_path_to_cipher(Utf8Path::new("")).unwrap();
+        assert_eq!(root_cipher, backend.backend.cipher_root);
+
+        backend.mkdir("docs", 0o755_u16.into()).unwrap();
+        backend.mknode("docs/note.txt", 0o644_u16.into()).unwrap();
+
+        let docs_cipher = backend.plain_path_to_cipher(Utf8Path::new("docs")).unwrap();
+        let note_cipher = backend
+            .plain_path_to_cipher(Utf8Path::new("docs/note.txt"))
+            .unwrap();
+
+        assert!(docs_cipher.starts_with(&backend.backend.cipher_root));
+        assert!(note_cipher.starts_with(&docs_cipher));
+        assert_ne!(docs_cipher, backend.backend.cipher_root);
+        assert_ne!(note_cipher.file_name(), Some("note.txt"));
+    }
+
+    #[test]
+    fn remove_cached_plain_path_invalidates_nested_cache_entries() {
+        let (_temp_dir, backend) = test_backend();
+
+        backend.mkdir("docs", 0o755_u16.into()).unwrap();
+        backend.mknode("docs/note.txt", 0o644_u16.into()).unwrap();
+
+        let _ = backend.plain_path_to_cipher(Utf8Path::new("docs")).unwrap();
+        let before = backend
+            .plain_path_to_cipher(Utf8Path::new("docs/note.txt"))
+            .unwrap();
+
+        backend.remove_cached_plain_path("docs");
+
+        let after = backend
+            .plain_path_to_cipher(Utf8Path::new("docs/note.txt"))
+            .unwrap();
+
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn create_temp_name_and_diriv_file_match_expected_shape() {
+        let (_temp_dir, backend) = test_backend();
+
+        let temp_path = backend.create_temp_name("docs", false);
+        let temp_diriv_path = backend.create_temp_name("docs", true);
+        let diriv_path = backend.get_dir_iv_file(Utf8Path::new("/tmp/cipher-dir"));
+
+        assert!(temp_path.starts_with(&backend.backend.cipher_root));
+        assert!(
+            temp_path
+                .file_name()
+                .unwrap_or_default()
+                .starts_with("temp.")
+        );
+        assert!(temp_diriv_path.extension() == Some("diriv"));
+        assert_eq!(
+            diriv_path,
+            Utf8Path::new("/tmp/cipher-dir").join("gocryptfs.diriv")
+        );
+    }
+
+    #[test]
+    fn list_dir_plain_names_returns_plain_entries_and_filters_special_files() {
+        let (_temp_dir, backend) = test_backend();
+
+        backend.mkdir("docs", 0o755_u16.into()).unwrap();
+        backend.mknode("file.txt", 0o644_u16.into()).unwrap();
+        backend.create_symlink("link", "../target.txt").unwrap();
+
+        let root_cipher = backend.plain_path_to_cipher(Utf8Path::new("")).unwrap();
+        backend
+            .lower_fs()
+            .put(&root_cipher.join("gocryptfs.conf"), b"ignored")
+            .unwrap();
+        backend
+            .lower_fs()
+            .put(&root_cipher.join("temp.junk"), b"ignored")
+            .unwrap();
+
+        let entries: Vec<_> = backend
+            .list_dir_plain_names(Utf8Path::new(""))
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+
+        assert_eq!(entries.len(), 3);
+        assert!(entries.iter().any(|(entry, _)| entry.file_name == "docs"));
+        assert!(
+            entries
+                .iter()
+                .any(|(entry, _)| entry.file_name == "file.txt")
+        );
+        assert!(entries.iter().any(|(entry, _)| entry.file_name == "link"));
+    }
+
+    #[test]
+    fn metadata_reports_plain_file_size() {
+        let (_temp_dir, backend) = test_backend();
+
+        let plain = b"hello layout metadata";
+        let cipher_path = backend
+            .plain_path_to_cipher(Utf8Path::new("file.txt"))
+            .unwrap();
+        let header = backend.generate_cipher_header().unwrap();
+        let cipher = backend.plain_block_to_cipher(&header, 0, plain).unwrap();
+        backend
+            .lower_fs()
+            .put(
+                &cipher_path,
+                &[header.as_slice(), cipher.as_slice()].concat(),
+            )
+            .unwrap();
+
+        let metadata = backend.metadata("file.txt").unwrap();
+
+        assert!(metadata.file_type == FileType::File);
+        assert_eq!(metadata.len, plain.len() as u64);
+    }
+
+    #[test]
+    fn mknode_creates_cipher_file_and_applies_permissions() {
+        let (_temp_dir, backend) = test_backend();
+
+        let metadata = backend.mknode("file.txt", 0o640_u16.into()).unwrap();
+        let cipher_path = backend
+            .plain_path_to_cipher(Utf8Path::new("file.txt"))
+            .unwrap();
+
+        assert!(backend.lower_fs().exists(&cipher_path).unwrap());
+        assert!(metadata.file_type == FileType::File);
+        assert_eq!(u16::from(metadata.permissions), 0o640);
+    }
+
+    #[test]
+    fn mkdir_creates_cipher_directory_and_diriv() {
+        let (_temp_dir, backend) = test_backend();
+
+        let metadata = backend.mkdir("docs", 0o750_u16.into()).unwrap();
+        let cipher_path = backend.plain_path_to_cipher(Utf8Path::new("docs")).unwrap();
+        let diriv_path = backend.get_dir_iv_file(&cipher_path);
+
+        assert!(backend.lower_fs().exists(&cipher_path).unwrap());
+        assert!(backend.lower_fs().exists(&diriv_path).unwrap());
+        assert!(metadata.file_type == FileType::Directory);
+        assert_eq!(u16::from(metadata.permissions), 0o750);
+    }
+
+    #[test]
+    fn remove_deletes_cipher_file() {
+        let (_temp_dir, backend) = test_backend();
+
+        backend.mknode("file.txt", 0o644_u16.into()).unwrap();
+        let cipher_path = backend
+            .plain_path_to_cipher(Utf8Path::new("file.txt"))
+            .unwrap();
+
+        backend.remove("file.txt").unwrap();
+
+        assert!(!backend.lower_fs().exists(&cipher_path).unwrap());
+    }
+
+    #[test]
+    fn remove_dir_deletes_directory_and_diriv() {
+        let (_temp_dir, backend) = test_backend();
+
+        backend.mkdir("docs", 0o755_u16.into()).unwrap();
+        let cipher_path = backend.plain_path_to_cipher(Utf8Path::new("docs")).unwrap();
+        let diriv_path = backend.get_dir_iv_file(&cipher_path);
+
+        backend.remove_dir("docs").unwrap();
+
+        assert!(!backend.lower_fs().exists(&cipher_path).unwrap());
+        assert!(!backend.lower_fs().exists(&diriv_path).unwrap());
+    }
+
+    #[test]
+    fn create_and_read_symlink_roundtrip() {
+        let (_temp_dir, backend) = test_backend();
+
+        let metadata = backend.create_symlink("link", "../target.txt").unwrap();
+
+        assert!(metadata.file_type == FileType::SymLink);
+        assert_eq!(backend.read_symlink("link").unwrap(), "../target.txt");
+    }
+
+    #[test]
+    fn rename_moves_file_directory_and_symlink_entries() {
+        let (_temp_dir, backend) = test_backend();
+
+        backend.mknode("file.txt", 0o644_u16.into()).unwrap();
+        backend.rename("file.txt", "file2.txt").unwrap();
+        assert!(backend.metadata("file.txt").is_err());
+        assert!(backend.metadata("file2.txt").is_ok());
+
+        backend.mkdir("docs", 0o755_u16.into()).unwrap();
+        backend.rename("docs", "docs2").unwrap();
+        assert!(backend.metadata("docs").is_err());
+        assert!(backend.metadata("docs2").is_ok());
+
+        backend.create_symlink("link", "../target.txt").unwrap();
+        backend.rename("link", "link2").unwrap();
+        assert!(backend.metadata("link").is_err());
+        assert!(backend.metadata("link2").is_ok());
+        assert_eq!(backend.read_symlink("link2").unwrap(), "../target.txt");
+    }
+
+    #[test]
+    fn set_permissions_and_time_update_plain_metadata() {
+        let (_temp_dir, backend) = test_backend();
+        let atime =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let mtime =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_123);
+
+        backend.mknode("file.txt", 0o644_u16.into()).unwrap();
+        let metadata = backend
+            .set_permissions("file.txt", 0o600_u16.into())
+            .unwrap();
+        assert_eq!(u16::from(metadata.permissions), 0o600);
+
+        backend
+            .set_time("file.txt", Some(atime), Some(mtime))
+            .unwrap();
+        let after = backend.metadata("file.txt").unwrap();
+        assert_eq!(after.accessed, atime);
+        assert_eq!(after.modified, mtime);
+    }
+}
