@@ -15,15 +15,13 @@ mod traits;
 mod types;
 pub use buffered_file::BufferedFile;
 pub use cache::{CacheLock, UnsafeCache};
-pub use cryptomator::CryptoMator;
+pub use cryptomator::{CryptoMator, CryptoMatorBuilder};
 pub use daemonize::{
     SetBackgroundChild, is_background_child, respawn_in_background, wait_child_mounted,
 };
 pub use file::CryptFsFile;
-pub use filesystem::{
-    EncryptedFileTranslator, FileCache, FileSystemBuilder, FileSystemFactory, NoCache,
-};
-pub use gocryptfs::GoCryptFs;
+pub use filesystem::{EncryptedFileTranslator, FileCache, FileCachePolicy, NoCache};
+pub use gocryptfs::{GoCryptFs, GoCryptFsBuilder};
 pub use traits::*;
 pub use types::*;
 

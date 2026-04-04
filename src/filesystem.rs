@@ -1,12 +1,12 @@
 use crate::{
-    BufferedFile, CryptFsFile, CryptoMator, EncryptionLayout, EncryptionTranslator, FileSystem,
-    FsBackend, FsDirEntry, GenericOpenOptions, GoCryptFs, Metadata, OrIoError, Permissions,
-    ReadOnlyFileSystem, ReadWrite, Result, Utf8Path, XattrTranslator,
+    BufferedFile, CryptFsFile, EncryptionLayout, EncryptionTranslator, FileSystem, FsDirEntry,
+    GenericOpenOptions, Metadata, OrIoError, Permissions, ReadOnlyFileSystem, ReadWrite, Utf8Path,
+    XattrTranslator,
 };
 
 use std::sync::Arc;
 
-pub trait FileCachePolicy: Send + Sync + 'static + Copy {
+pub trait FileCachePolicy: Send + Sync + 'static {
     fn cache_write(&self) -> bool;
     fn cache_read(&self) -> bool;
 }
@@ -52,35 +52,27 @@ impl FileCachePolicy for NoCache {
     }
 }
 
-pub struct EncryptedFileTranslator<T, C: FileCachePolicy> {
+#[derive(Clone)]
+pub struct EncryptedFileTranslator<T> {
     fs: Arc<T>,
-    cache_policy: C,
+    cache_policy: Arc<dyn FileCachePolicy>,
 }
 
-impl<T, C: FileCachePolicy> From<(T, C)> for EncryptedFileTranslator<T, C> {
-    fn from(value: (T, C)) -> Self {
+impl<T> From<(T, Box<dyn FileCachePolicy>)> for EncryptedFileTranslator<T> {
+    fn from(value: (T, Box<dyn FileCachePolicy>)) -> Self {
         Self {
             fs: Arc::from(value.0),
-            cache_policy: value.1,
-        }
-    }
-}
-
-impl<T, C: FileCachePolicy> Clone for EncryptedFileTranslator<T, C> {
-    fn clone(&self) -> Self {
-        Self {
-            fs: self.fs.clone(),
-            cache_policy: self.cache_policy,
+            cache_policy: Arc::from(value.1),
         }
     }
 }
 
 /// Opens an encrypted file and wraps it with the requested cache policy.
-fn try_open_crypt_file<T, C: FileCachePolicy>(
+fn try_open_crypt_file<T>(
     path: &Utf8Path,
     backend: Arc<T>,
     options: GenericOpenOptions,
-    cache_policy: C,
+    cache_policy: &dyn FileCachePolicy,
 ) -> std::io::Result<Box<dyn ReadWrite>>
 where
     T: EncryptionTranslator + Send + Sync + 'static,
@@ -96,7 +88,7 @@ where
     }
 }
 
-impl<T, C: FileCachePolicy> ReadOnlyFileSystem for EncryptedFileTranslator<T, C>
+impl<T> ReadOnlyFileSystem for EncryptedFileTranslator<T>
 where
     T: EncryptionTranslator + EncryptionLayout + XattrTranslator + Send + Sync + 'static,
 {
@@ -104,7 +96,12 @@ where
         let cipher_path = self.fs.plain_path_to_cipher(path.into()).or_invalid()?;
         let mut options = GenericOpenOptions::default();
         options.read(true);
-        try_open_crypt_file(&cipher_path, self.fs.clone(), options, self.cache_policy)
+        try_open_crypt_file(
+            &cipher_path,
+            self.fs.clone(),
+            options,
+            self.cache_policy.as_ref(),
+        )
     }
     fn metadata(&self, path: &str) -> std::io::Result<Metadata> {
         self.fs.metadata(path)
@@ -155,7 +152,7 @@ where
     }
 }
 
-impl<T, C: FileCachePolicy> FileSystem for EncryptedFileTranslator<T, C>
+impl<T> FileSystem for EncryptedFileTranslator<T>
 where
     T: EncryptionTranslator + EncryptionLayout + XattrTranslator + Send + Sync + 'static,
 {
@@ -166,7 +163,12 @@ where
         options: GenericOpenOptions,
     ) -> std::io::Result<Box<dyn ReadWrite>> {
         let cipher_path = self.fs.plain_path_to_cipher(path.into()).or_invalid()?;
-        try_open_crypt_file(&cipher_path, self.fs.clone(), options, self.cache_policy)
+        try_open_crypt_file(
+            &cipher_path,
+            self.fs.clone(),
+            options,
+            self.cache_policy.as_ref(),
+        )
     }
     /// Creates a new directory with given permissions.
     fn mkdir(&self, path: &str, permissions: Permissions) -> std::io::Result<Metadata> {
@@ -249,42 +251,6 @@ where
             let cipher_name = self.fs.plain_xattr_name_to_cipher(name).or_invalid()?;
             let cipher_xattr_value = self.fs.plain_xattr_value_to_cipher(value).or_invalid()?;
             xattr::set(cipher_path, cipher_name, &cipher_xattr_value)
-        }
-    }
-}
-
-pub trait FileSystemBuilder {
-    fn build<Cache: FileCachePolicy>(
-        root_path: &Utf8Path,
-        password: &str,
-        cache_policy: Cache,
-    ) -> Result<Box<dyn FileSystem>>;
-}
-
-pub struct FileSystemFactory;
-
-impl FileSystemBuilder for FileSystemFactory {
-    fn build<Cache: FileCachePolicy>(
-        root_path: &Utf8Path,
-        password: &str,
-        cache_policy: Cache,
-    ) -> Result<Box<dyn FileSystem>> {
-        if std::fs::exists(root_path.join("gocryptfs.conf")).unwrap_or(false) {
-            let cryptfs: EncryptedFileTranslator<GoCryptFs<FsBackend>, _> = (
-                GoCryptFs::<FsBackend>::try_new(root_path, password)?,
-                cache_policy,
-            )
-                .into();
-            Ok(Box::new(cryptfs))
-        } else if std::fs::exists(root_path.join("vault.cryptomator")).unwrap_or(false) {
-            let cryptfs: EncryptedFileTranslator<CryptoMator<FsBackend>, _> = (
-                CryptoMator::<FsBackend>::try_new(root_path, password)?,
-                cache_policy,
-            )
-                .into();
-            Ok(Box::new(cryptfs))
-        } else {
-            anyhow::bail!("unknown filesystem");
         }
     }
 }

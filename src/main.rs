@@ -5,8 +5,9 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use rcryptfs::{
-    CryptoMator, FileSystemBuilder, FileSystemFactory, FileSystemHandler, FsBackend, GoCryptFs,
-    NoCache, is_background_child, is_dir_empty, platform, respawn_in_background,
+    BackendProvider, CryptoMator, CryptoMatorBuilder, FileCachePolicy, FileSystem,
+    FileSystemHandler, FsBackend, GoCryptFs, GoCryptFsBuilder, NoCache, Utf8Path,
+    is_background_child, is_dir_empty, platform, respawn_in_background,
 };
 #[cfg(unix)]
 use std::ffi::OsStr;
@@ -146,6 +147,21 @@ fn format_bytes(data: &[u8]) -> String {
     format!("    {lines}\n")
 }
 
+static PROVIDERS: &[&dyn BackendProvider] = &[&CryptoMatorBuilder, &GoCryptFsBuilder];
+
+fn build_fs<C: FileCachePolicy>(
+    root_path: &Utf8Path,
+    password: &str,
+    cache: C,
+) -> Result<Box<dyn FileSystem>> {
+    for &provider in PROVIDERS {
+        if provider.probe(root_path) {
+            return provider.try_build(root_path, password, Box::new(cache));
+        }
+    }
+    anyhow::bail!("unknown filesystem");
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -221,8 +237,7 @@ fn main() -> Result<()> {
             let password = read_password(true, false)?;
             log::set_logger(&LOGGER).map_err(|e| anyhow::anyhow!("{e}"))?;
             log::set_max_level(log::LevelFilter::Error);
-            let cryptfs =
-                FileSystemFactory::build(cli_args.folder_path.as_str().into(), &password, NoCache)?;
+            let cryptfs = build_fs(cli_args.folder_path.as_str().into(), &password, NoCache)?;
             let handler: FileSystemHandler<rcryptfs::CacheLock> = cryptfs.into();
             // CLI mode reuses stdin after password entry, so the platform layer restores an interactive input when needed.
             platform::prepare_cli_stdin(stdin_is_piped())?;
@@ -266,8 +281,7 @@ fn run_mount(mount_args: &MountArgs, is_background_child: bool) -> Result<()> {
         );
     }
     let password = read_password(false, is_background_child)?;
-    let cryptfs =
-        FileSystemFactory::build(mount_args.folder_path.as_str().into(), &password, NoCache)?;
+    let cryptfs = build_fs(mount_args.folder_path.as_str().into(), &password, NoCache)?;
     if !is_background_child {
         println!("Decrypting master key");
     }

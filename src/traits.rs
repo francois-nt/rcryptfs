@@ -1,4 +1,7 @@
-use crate::{FsDirEntry, GenericOpenOptions, Metadata, Permissions, Result, UnsafeCache};
+use crate::{
+    FsDirEntry, GenericOpenOptions, Metadata, Permissions, Result, UnsafeCache,
+    filesystem::FileCachePolicy,
+};
 pub use camino::{Utf8Path, Utf8PathBuf};
 use log::error;
 use std::{fmt::Display, time::SystemTime};
@@ -38,6 +41,16 @@ pub trait ReadAt {
             Ok(())
         }
     }
+}
+
+pub trait BackendProvider: Send + Sync + 'static {
+    fn probe(&self, root: &Utf8Path) -> bool;
+    fn try_build(
+        &self,
+        root: &Utf8Path,
+        password: &str,
+        cache_policy: Box<dyn FileCachePolicy>,
+    ) -> Result<Box<dyn FileSystem>>;
 }
 
 /// Returns the logical size of a file-like object when available.

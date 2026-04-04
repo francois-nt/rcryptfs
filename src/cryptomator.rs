@@ -1,6 +1,7 @@
 use crate::{
-    Backend, CipherPathLayout, EncryptionTranslator, FsBackend, MinimalFs, OrIoError, Result,
-    Utf8Path, Utf8PathBuf, XattrTranslator, is_dir_empty,
+    Backend, BackendProvider, CipherPathLayout, EncryptedFileTranslator, EncryptionTranslator,
+    FileSystem, FsBackend, MinimalFs, OrIoError, Result, Utf8Path, Utf8PathBuf, XattrTranslator,
+    filesystem::FileCachePolicy, is_dir_empty,
 };
 use aes_gcm::{
     Aes256Gcm,
@@ -259,6 +260,26 @@ fn derive_keys(password: &str, config: &CryptoMatorConfig) -> Result<MasterKeys>
 
 const HEADER_NONCE_LEN: usize = 12;
 const NONCE_LEN: usize = 12;
+
+pub struct CryptoMatorBuilder;
+impl BackendProvider for CryptoMatorBuilder {
+    fn probe(&self, root: &Utf8Path) -> bool {
+        std::fs::exists(root.join("vault.cryptomator")).unwrap_or(false)
+    }
+    fn try_build(
+        &self,
+        root: &Utf8Path,
+        password: &str,
+        cache_policy: Box<dyn FileCachePolicy>,
+    ) -> Result<Box<dyn FileSystem>> {
+        let cryptfs: EncryptedFileTranslator<CryptoMator<FsBackend>> = (
+            CryptoMator::<FsBackend>::try_new(root, password)?,
+            cache_policy,
+        )
+            .into();
+        Ok(Box::new(cryptfs))
+    }
+}
 
 impl CryptoMator<FsBackend> {
     /// Initializes a new Cryptomator-compatible backend with default parameters.
