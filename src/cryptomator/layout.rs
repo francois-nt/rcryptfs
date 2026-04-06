@@ -6,6 +6,7 @@ use crate::{
 };
 use std::fs::DirEntry;
 
+/// Resolves a plain folder path to its storage directory and dir id.
 fn folder_path_to_cipher_and_dirid(
     this: &CryptoMator<FsBackend>,
     plain_path: &Utf8Path,
@@ -247,6 +248,7 @@ fn is_special_entry(name: &str) -> bool {
     name == "dirid.c9r"
 }
 
+/// Adjusts raw lower-fs metadata to the logical Cryptomator view.
 trait AdujstMetadata {
     fn adjust<T: EncryptionTranslator>(
         &mut self,
@@ -286,6 +288,7 @@ impl AdujstMetadata for Metadata {
     }
 }
 
+/// Maps one storage entry to its plain directory entry when it should be visible.
 fn map_dir_entry(
     this: &impl EncryptionLayout,
     cipher_path: &Utf8Path,

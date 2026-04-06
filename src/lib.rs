@@ -3,6 +3,7 @@
     deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
 use anyhow::Result;
+mod backend_provider;
 mod buffered_file;
 mod cache;
 mod cryptomator;
@@ -13,6 +14,7 @@ mod gocryptfs;
 pub mod platform;
 mod traits;
 mod types;
+pub use backend_provider::{BackendProvider, build_filesystem};
 pub use buffered_file::BufferedFile;
 pub use cache::{CacheLock, UnsafeCache};
 pub use cryptomator::{CryptoMator, CryptoMatorBuilder};

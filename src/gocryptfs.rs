@@ -1,7 +1,7 @@
 use super::Utf8Path;
 use crate::{
     Backend, BackendProvider, EncryptedFileTranslator, FileSystem, FsBackend, Result,
-    filesystem::FileCachePolicy, is_dir_empty,
+    filesystem::FileCachePolicy, is_dir_empty, register_provider,
 };
 use aes::{Aes256, cipher::generic_array::GenericArray};
 use aes_gcm::{
@@ -311,7 +311,10 @@ impl GoCryptFs<FsBackend> {
     }
 }
 
+/// Backend provider for GoCryptFS repositories.
 pub struct GoCryptFsBuilder;
+register_provider!(GoCryptFsBuilder);
+
 impl BackendProvider for GoCryptFsBuilder {
     fn probe(&self, root: &Utf8Path) -> bool {
         std::fs::exists(root.join("gocryptfs.conf")).unwrap_or(false)

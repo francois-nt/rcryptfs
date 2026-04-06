@@ -1,7 +1,7 @@
 use crate::{
     Backend, BackendProvider, CipherPathLayout, EncryptedFileTranslator, EncryptionTranslator,
     FileSystem, FsBackend, MinimalFs, OrIoError, Result, Utf8Path, Utf8PathBuf, XattrTranslator,
-    filesystem::FileCachePolicy, is_dir_empty,
+    filesystem::FileCachePolicy, is_dir_empty, register_provider,
 };
 use aes_gcm::{
     Aes256Gcm,
@@ -26,6 +26,7 @@ type HmacSha256 = Hmac<Sha256>;
 
 mod encryption_translator;
 mod layout;
+/// Cryptomator backend state with the derived SIV key material.
 pub struct CryptoMator<T: Backend> {
     backend: T,
     siv_key: [u8; 64],
@@ -44,6 +45,7 @@ fn read_dirid(cipher_dir: &Utf8Path, is_root: bool) -> Result<String> {
     Ok(data)
 }
 
+/// JWT header stored in vault.cryptomator.
 #[derive(Serialize)]
 struct JwtHeader<'a> {
     kid: &'a str,
@@ -51,6 +53,7 @@ struct JwtHeader<'a> {
     alg: &'a str,
 }
 
+/// JWT payload stored in vault.cryptomator.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct JwtPayload<'a> {
@@ -60,6 +63,7 @@ struct JwtPayload<'a> {
     cipher_combo: &'a str,
 }
 
+/// Builds the signed vault.cryptomator token for the current master keys.
 fn generate_vault_cryptomator(
     master_keys: &MasterKeys,
     cipher_combo: &str,        // "SIV_GCM" ou "SIV_CTRMAC"
@@ -106,6 +110,7 @@ fn generate_vault_cryptomator(
     Ok(format!("{signing_input}.{sig_b64}"))
 }
 
+/// Serialized masterkey.cryptomator contents.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CryptoMatorConfig {
@@ -118,6 +123,7 @@ struct CryptoMatorConfig {
     version_mac: String,
 }
 
+/// Computes the version authentication tag stored in masterkey.cryptomator.
 fn compute_version_mac(version: u32, mac_master_key: &[u8]) -> Result<Vec<u8>> {
     let mut mac = HmacSha256::new_from_slice(mac_master_key)?;
     mac.update(&version.to_be_bytes()); // 4 bytes big-endian
@@ -127,6 +133,7 @@ fn compute_version_mac(version: u32, mac_master_key: &[u8]) -> Result<Vec<u8>> {
 }
 
 impl CryptoMatorConfig {
+    /// Creates a fresh Cryptomator config and the matching raw master keys.
     fn try_new(password: &str) -> Result<(Self, MasterKeys)> {
         const DEFAULT_VERSION: u32 = 999;
         const DEFAULT_SCRYPT_COST: u32 = 32768;
@@ -176,18 +183,21 @@ impl CryptoMatorConfig {
     }
 }
 
+/// Raw Cryptomator master keys before they are wrapped for storage.
 pub struct MasterKeys {
     pub primary_master_key: Vec<u8>,
     pub hmac_master_key: Vec<u8>,
 }
 
 impl MasterKeys {
+    /// Returns the JWT signing key order used for vault.cryptomator.
     fn jwt_key(&self) -> [u8; 64] {
         let mut arr = [0; 64];
         arr[..32].copy_from_slice(&self.primary_master_key);
         arr[32..].copy_from_slice(&self.hmac_master_key);
         arr
     }
+    /// Returns the SIV key order used for filename encryption.
     pub fn siv_key(&self) -> [u8; 64] {
         let mut arr = [0; 64];
         arr[..32].copy_from_slice(&self.hmac_master_key);
@@ -196,6 +206,7 @@ impl MasterKeys {
     }
 }
 
+/// Converts a power-of-two scrypt cost into the log2 value expected by the crate.
 fn log2_pow2(n: u32) -> Result<u8> {
     if n < 2 || (n & (n - 1)) != 0 {
         bail!("scryptCostParam (N) must be a power of two >= 2 (got {n})");
@@ -203,6 +214,7 @@ fn log2_pow2(n: u32) -> Result<u8> {
     Ok(n.trailing_zeros() as u8)
 }
 
+/// Derives and unwraps the Cryptomator master keys from a password and config.
 fn derive_keys(password: &str, config: &CryptoMatorConfig) -> Result<MasterKeys> {
     // 1) Cryptomator expects password normalization (NFC)
     let pw_nfc: String = password.nfc().collect();
@@ -261,7 +273,14 @@ fn derive_keys(password: &str, config: &CryptoMatorConfig) -> Result<MasterKeys>
 const HEADER_NONCE_LEN: usize = 12;
 const NONCE_LEN: usize = 12;
 
+/// Backend provider for Cryptomator repositories.
 pub struct CryptoMatorBuilder;
+
+
+
+register_provider!(CryptoMatorBuilder);
+
+
 impl BackendProvider for CryptoMatorBuilder {
     fn probe(&self, root: &Utf8Path) -> bool {
         std::fs::exists(root.join("vault.cryptomator")).unwrap_or(false)

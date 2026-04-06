@@ -36,6 +36,8 @@ data-encoding = "2.10.0"
 aes-kw = { version = "0.2.1", features = ["alloc"] }
 uuid =  { version = "1.22.0", features = ["v4"] }
 hmac = "0.12.0"
+linkme = "0.3.35"
+paste = "1.0.15"
 
 [target.'cfg(unix)'.dependencies]
 fuse_mt = "0.6.2"

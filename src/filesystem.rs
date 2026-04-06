@@ -6,11 +6,13 @@ use crate::{
 
 use std::sync::Arc;
 
+/// Describes how opened cipher files should be wrapped with read or write caching.
 pub trait FileCachePolicy: Send + Sync + 'static {
     fn cache_write(&self) -> bool;
     fn cache_read(&self) -> bool;
 }
 
+/// Enables buffering for selected file access patterns.
 #[derive(Clone, Copy, Default)]
 pub struct FileCache {
     cache_write: bool,
@@ -18,12 +20,14 @@ pub struct FileCache {
 }
 
 impl FileCache {
+    /// Returns a policy that buffers writes.
     pub fn with_cache_write(self) -> Self {
         Self {
             cache_write: true,
             cache_read: self.cache_read,
         }
     }
+    /// Returns a policy that buffers reads.
     pub fn with_cache_read(self) -> Self {
         Self {
             cache_write: self.cache_write,
@@ -41,6 +45,7 @@ impl FileCachePolicy for FileCache {
     }
 }
 
+/// Disables all extra buffering around opened encrypted files.
 #[derive(Clone, Copy, Default)]
 pub struct NoCache;
 impl FileCachePolicy for NoCache {
@@ -52,6 +57,7 @@ impl FileCachePolicy for NoCache {
     }
 }
 
+/// Adapts a backend layout and translator into the FileSystem traits.
 #[derive(Clone)]
 pub struct EncryptedFileTranslator<T> {
     fs: Arc<T>,
