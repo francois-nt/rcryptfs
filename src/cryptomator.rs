@@ -74,7 +74,6 @@ fn generate_vault_cryptomator(
         bail!("unsupported cipherCombo: {cipher_combo}");
     }
 
-    // 1) header + payload
     let header = JwtHeader {
         kid: "masterkeyfile:masterkey.cryptomator",
         typ: "JWT",
@@ -87,19 +86,15 @@ fn generate_vault_cryptomator(
         cipher_combo,
     };
 
-    // 2) JSON -> bytes
     let header_json = serde_json::to_vec(&header)?;
     let payload_json = serde_json::to_vec(&payload)?;
 
-    // 3) base64url sans padding
     let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
     let header_b64 = b64.encode(header_json);
     let payload_b64 = b64.encode(payload_json);
 
-    // 4) message à signer
     let signing_input = format!("{header_b64}.{payload_b64}");
 
-    // 5) key = encryptionMasterKey || macMasterKey (512-bit raw masterkey)
     let jwt_key = master_keys.jwt_key();
 
     let mut mac = HmacSha256::new_from_slice(&jwt_key)?;
@@ -217,28 +212,23 @@ fn log2_pow2(n: u32) -> Result<u8> {
 
 /// Derives and unwraps the Cryptomator master keys from a password and config.
 fn derive_keys(password: &str, config: &CryptoMatorConfig) -> Result<CryptomatorMasterKeys> {
-    // 1) Cryptomator expects password normalization (NFC)
     let pw_nfc: String = password.nfc().collect();
 
-    // 2) Decode salt
     let salt = base64::engine::general_purpose::STANDARD
         .decode(config.scrypt_salt.as_bytes())
         .context("base64 decode scryptSalt")?;
 
-    // 3) scrypt params
     let log_n = log2_pow2(config.scrypt_cost_param)?;
     let r = config.scrypt_block_size;
-    let p: u32 = 1; // Cryptomator uses non-parallel scrypt; no field for p in masterkey.cryptomator
+    let p: u32 = 1;
 
     let params =
         ScryptParams::new(log_n, r, p, 32).map_err(|e| anyhow!("invalid scrypt params: {e}"))?;
 
-    // 4) Derive KEK (32 bytes)
     let mut kek_bytes = [0u8; 32];
     scrypt(pw_nfc.as_bytes(), &salt, &params, &mut kek_bytes)
         .map_err(|e| anyhow!("scrypt failed: {e}"))?;
 
-    // 5) Decode wrapped keys (AES Key Wrap)
     let wrapped_primary = base64::engine::general_purpose::STANDARD
         .decode(config.primary_master_key.as_bytes())
         .context("base64 decode primaryMasterKey")?;
@@ -246,7 +236,6 @@ fn derive_keys(password: &str, config: &CryptoMatorConfig) -> Result<Cryptomator
         .decode(config.hmac_master_key.as_bytes())
         .context("base64 decode hmacMasterKey")?;
 
-    // 6) Unwrap (wrong password => unwrap error)
     let kek = KekAes256::from(kek_bytes);
 
     let primary = kek.unwrap_vec(&wrapped_primary).map_err(|e| {
