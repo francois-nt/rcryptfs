@@ -1,7 +1,7 @@
 use super::GoCryptFs;
-use crate::{
+use crate::core::{
     CacheAccess, CipherPathLayout, DefaultFs, EncryptionLayout, EncryptionTranslator, FsBackend,
-    FsDirEntry, Result, Utf8Path, Utf8PathBuf, temp_file_path,
+    FsDirEntry, Result, Utf8Path, Utf8PathBuf, default_remove_cached_plain_path, temp_file_path,
 };
 use anyhow::{Context, anyhow};
 use std::fs::DirEntry;
@@ -12,7 +12,7 @@ impl CipherPathLayout for GoCryptFs<FsBackend> {
         &DefaultFs
     }
     fn remove_cached_plain_path(&self, plain_path: &str) {
-        crate::default_remove_cached_plain_path(&self.backend, plain_path);
+        default_remove_cached_plain_path(&self.backend, plain_path);
     }
 
     /// Converts a plain path to its cipher text equivalent.
@@ -147,7 +147,7 @@ fn map_dir_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EncryptionLayout, FileType, FsBackend, MinimalFs};
+    use crate::core::{EncryptionLayout, FileType, FsBackend, MinimalFs};
     use tempfile::tempdir;
 
     /// Creates a freshly initialized GoCryptFS backend rooted in a temp directory.

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rcryptfs::{FileSystemHandler, FileType, FsDirEntry, FsTime, OpenCache};
+use rcryptfs::core::{FileSystemHandler, FileType, FsDirEntry, FsTime, OpenCache};
 use rustyline::error::ReadlineError;
 
 use crate::platform;

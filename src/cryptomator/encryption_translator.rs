@@ -1,5 +1,5 @@
 use super::{CryptoMator, HEADER_NONCE_LEN, NONCE_LEN};
-use crate::{Backend, EncryptionTranslator, Result};
+use crate::core::{Backend, EncryptionTranslator, Result};
 use aes_gcm::{
     Aes256Gcm,
     aead::{Aead, Payload},
@@ -255,7 +255,7 @@ impl<T: Backend> EncryptionTranslator for CryptoMator<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::MemoryBackend;
+    use crate::core::MemoryBackend;
 
     /// Creates a deterministic backend instance for pure crypto tests.
     fn test_backend() -> CryptoMator<MemoryBackend> {

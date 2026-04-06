@@ -1,4 +1,4 @@
-use crate::{FsDirEntry, GenericOpenOptions, Metadata, Permissions, Result, UnsafeCache};
+use super::{FsDirEntry, GenericOpenOptions, Metadata, Permissions, Result, UnsafeCache};
 pub use camino::{Utf8Path, Utf8PathBuf};
 use log::error;
 use std::{fmt::Display, time::SystemTime};

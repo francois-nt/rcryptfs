@@ -1,8 +1,8 @@
 use super::{CryptoMator, read_dirid};
-use crate::{
+use crate::core::{
     CacheAccess, CipherPathLayout, DefaultFs, EncryptionLayout, EncryptionTranslator, FileType,
-    FsBackend, FsDirEntry, Metadata, MinimalFs, OrIoError, Result, Utf8Path, Utf8PathBuf,
-    temp_file_path,
+    FsBackend, FsDirEntry, Metadata, MinimalFs, OrIoError, Permissions, Result, Utf8Path,
+    Utf8PathBuf, default_remove_cached_plain_path, temp_file_path,
 };
 use std::fs::DirEntry;
 
@@ -78,7 +78,7 @@ impl CipherPathLayout for CryptoMator<FsBackend> {
         temp_file_path(&self.backend.cipher_root, path, is_dir_iv)
     }
     fn remove_cached_plain_path(&self, plain_path: &str) {
-        crate::default_remove_cached_plain_path(&self.backend, plain_path);
+        default_remove_cached_plain_path(&self.backend, plain_path);
     }
     fn get_dir_iv_file(&self, cipher_folder_path: &Utf8Path) -> Utf8PathBuf {
         cipher_folder_path.join("dir.c9r")
@@ -89,7 +89,7 @@ impl EncryptionLayout for CryptoMator<FsBackend> {
     fn list_dir_plain_names(
         &self,
         plain_path: &Utf8Path,
-    ) -> Result<impl Iterator<Item = Result<(crate::FsDirEntry, Utf8PathBuf)>> + '_> {
+    ) -> Result<impl Iterator<Item = Result<(FsDirEntry, Utf8PathBuf)>> + '_> {
         let (cipher_path, dir_id) = folder_path_to_cipher_and_dirid(self, plain_path)?;
         // let plain_path: Utf8PathBuf = plain_path.into();
         // let cipher_path = self.plain_path_to_cipher(&plain_path)?;
@@ -110,7 +110,7 @@ impl EncryptionLayout for CryptoMator<FsBackend> {
         }))
     }
 
-    fn metadata(&self, plain_path: &str) -> std::io::Result<crate::Metadata> {
+    fn metadata(&self, plain_path: &str) -> std::io::Result<Metadata> {
         let cipher_path = self.plain_path_to_cipher(plain_path.into()).or_invalid()?;
         log::debug!("metadata on [{plain_path}] : {cipher_path}");
         let mut metadata = self.lower_fs().metadata(&cipher_path)?;
@@ -120,11 +120,7 @@ impl EncryptionLayout for CryptoMator<FsBackend> {
         Ok(metadata)
     }
 
-    fn mkdir(
-        &self,
-        plain_path: &str,
-        permissions: crate::Permissions,
-    ) -> std::io::Result<Metadata> {
+    fn mkdir(&self, plain_path: &str, permissions: Permissions) -> std::io::Result<Metadata> {
         log::debug!("mkdir on {plain_path}");
         let plain_path: &Utf8Path = plain_path.into();
         let parent = plain_path.parent().unwrap_or_else(|| "".into());
@@ -174,11 +170,7 @@ impl EncryptionLayout for CryptoMator<FsBackend> {
             .or_invalid()?;
         self.lower_fs().set_permissions(&cipher_path, permissions)
     }
-    fn mknode(
-        &self,
-        plain_path: &str,
-        permissions: crate::Permissions,
-    ) -> std::io::Result<Metadata> {
+    fn mknode(&self, plain_path: &str, permissions: Permissions) -> std::io::Result<Metadata> {
         let cipher_path = self.plain_path_to_cipher(plain_path.into()).or_invalid()?;
         self.lower_fs()
             .put(&cipher_path, &self.generate_cipher_header().or_invalid()?)
@@ -218,11 +210,7 @@ impl EncryptionLayout for CryptoMator<FsBackend> {
         let target = self.cipher_metavalue_to_plain(&data).or_invalid()?;
         Ok(str::from_utf8(&target).or_invalid()?.into())
     }
-    fn set_permissions(
-        &self,
-        path: &str,
-        permissions: crate::Permissions,
-    ) -> std::io::Result<Metadata> {
+    fn set_permissions(&self, path: &str, permissions: Permissions) -> std::io::Result<Metadata> {
         let metadata = self.metadata(path)?;
         if metadata.file_type == FileType::SymLink {
             return Ok(metadata);
@@ -325,7 +313,7 @@ fn map_dir_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CipherPathLayout, EncryptionLayout, FileType, FsBackend, Utf8Path};
+    use crate::core::{CipherPathLayout, EncryptionLayout, FileType, FsBackend, Utf8Path};
     use tempfile::tempdir;
 
     /// Creates a deterministic Cryptomator backend with a materialized root storage directory.

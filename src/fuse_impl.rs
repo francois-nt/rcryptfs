@@ -1,6 +1,6 @@
-use super::{FileType, Metadata, ReadOnlyFileSystem};
-use crate::{
-    ErrorMapper, FileSystem, FileSystemHandler, GenericOpenOptions, IoErrorToLib, OpenCache,
+use crate::core::{
+    ErrorMapper, FileSystem, FileSystemHandler, FileType, GenericOpenOptions, IoErrorToLib,
+    Metadata, OpenCache, ReadOnlyFileSystem,
 };
 use fuse_mt::{FileAttr, FilesystemMT};
 use log::debug;

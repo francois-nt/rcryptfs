@@ -1,8 +1,9 @@
-use crate::{
+use crate::core::{
     Backend, BackendProvider, CipherPathLayout, EncryptedFileTranslator, EncryptionTranslator,
-    FileSystem, FsBackend, MasterKey, MinimalFs, OrIoError, Result, Utf8Path, Utf8PathBuf,
-    XattrTranslator, filesystem::FileCachePolicy, is_dir_empty, register_provider,
+    FileCachePolicy, FileSystem, FsBackend, MasterKey, MinimalFs, OrIoError, Result, Utf8Path,
+    Utf8PathBuf, XattrTranslator, is_dir_empty,
 };
+use crate::register_provider;
 use aes_gcm::{
     Aes256Gcm,
     aead::{Aead, Payload},
@@ -302,7 +303,7 @@ impl BackendProvider for CryptoMatorBuilder {
         &self,
         root: &Utf8Path,
         password: &str,
-    ) -> Result<Box<dyn crate::MasterKey>> {
+    ) -> Result<Box<dyn MasterKey>> {
         CryptoMator::<FsBackend>::init_with_default_params(root, password)
             .map(|keys| -> Box<dyn MasterKey> { Box::new(keys) })
     }

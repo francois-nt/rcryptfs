@@ -1,4 +1,4 @@
-use crate::{OrIoError, platform};
+use crate::{core::OrIoError, platform};
 use anyhow::{Result, bail};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{ChildStdout, Stdio};

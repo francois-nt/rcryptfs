@@ -1,8 +1,9 @@
 use super::Utf8Path;
-use crate::{
-    Backend, BackendProvider, EncryptedFileTranslator, FileSystem, FsBackend, MasterKey, Result,
-    filesystem::FileCachePolicy, is_dir_empty, register_provider,
+use super::core::{
+    Backend, BackendProvider, EncryptedFileTranslator, FileCachePolicy, FileSystem, FsBackend,
+    MasterKey, Result, is_dir_empty,
 };
+use crate::register_provider;
 use aes::{Aes256, cipher::generic_array::GenericArray};
 use aes_gcm::{
     Aes256Gcm, AesGcm, KeyInit,
@@ -355,7 +356,7 @@ impl MasterKey for GoCryptFSMasterKey {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EncryptionTranslator, MemoryBackend};
+    use crate::core::{EncryptionTranslator, MemoryBackend};
     use tempfile::tempdir;
 
     /// Creates a deterministic backend instance for pure crypto tests.

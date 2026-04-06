@@ -1,4 +1,4 @@
-use crate::{OpenCache, OrIoError, ReadWrite};
+use super::{OpenCache, OrIoError, ReadWrite};
 use parking_lot::RwLock;
 use std::{
     collections::HashMap,

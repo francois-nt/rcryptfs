@@ -1,5 +1,5 @@
 use super::GoCryptFs;
-use crate::{Backend, EncryptionTranslator, Result};
+use crate::core::{Backend, EncryptionTranslator, Result};
 use aes::{Aes256, cipher::KeyIvInit};
 use aes_gcm::{
     AeadCore, AesGcm, KeyInit,

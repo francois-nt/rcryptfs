@@ -1,4 +1,4 @@
-use crate::{OrIoError, ReadAt, ReadWrite, SetLen, SetSync, WriteAt, file::ModifiedTime};
+use super::{OrIoError, ReadAt, ReadWrite, SetLen, SetSync, WriteAt, file::ModifiedTime};
 use parking_lot::Mutex;
 
 const BLOCK_LEN: usize = 4096;

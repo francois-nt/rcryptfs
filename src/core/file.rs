@@ -1,4 +1,4 @@
-use crate::{
+use super::{
     EncryptionTranslator, GenericOpenOptions, OrIoError, ReadAt, SetLen, SetSync, Size, Utf8Path,
     WriteAt,
 };
@@ -441,8 +441,8 @@ impl<T: EncryptionTranslator> SetLen for CryptFsFile<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{CryptoMator, FsBackend, GoCryptFs};
+    use crate::core::*;
+    use crate::{CryptoMator, GoCryptFs};
     use std::sync::Arc;
     use tempfile::tempdir;
 

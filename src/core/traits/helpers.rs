@@ -1,5 +1,6 @@
+use super::super::FileType;
 use super::{EncryptionLayout, MinimalFs, OrIoError};
-use crate::{FileType, Metadata, Permissions, Utf8Path, Utf8PathBuf};
+use super::{Metadata, Permissions, Utf8Path, Utf8PathBuf};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use filetime::set_symlink_file_times;
 use sha2::Digest;

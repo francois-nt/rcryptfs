@@ -1,10 +1,10 @@
-use std::{collections::BTreeMap, time::SystemTime};
-
+use super::super::FsCacheEntry;
+use super::{FsDirEntry, Metadata, Permissions, Result, Utf8Path, Utf8PathBuf};
 use super::{
     default_create_symlink, default_metadata, default_mkdir, default_mknode, default_read_symlink,
     default_remove, default_remove_dir, default_rename, default_set_permissions, default_set_time,
 };
-use crate::{FsCacheEntry, FsDirEntry, Metadata, Permissions, Result, Utf8Path, Utf8PathBuf};
+use std::{collections::BTreeMap, time::SystemTime};
 /// Marker trait for backend implementations.
 pub trait Backend {
     fn get_fs(&self) -> impl MinimalFs;

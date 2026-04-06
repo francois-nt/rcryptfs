@@ -1,4 +1,4 @@
-use crate::{FileCachePolicy, FileSystem, Result, Utf8Path};
+use super::{FileCachePolicy, FileSystem, Result, Utf8Path};
 use linkme::distributed_slice;
 
 pub trait MasterKey {
@@ -50,8 +50,8 @@ pub static PROVIDERS: [&dyn BackendProvider];
 macro_rules! register_provider {
     ($provider:ident) => {
         ::paste::paste! {
-            #[::linkme::distributed_slice($crate::backend_provider::PROVIDERS)]
-            static [<$provider:upper>]: &dyn $crate::BackendProvider = &$provider;
+            #[::linkme::distributed_slice($crate::core::backend_provider::PROVIDERS)]
+            static [<$provider:upper>]: &dyn $crate::core::BackendProvider = &$provider;
         }
     };
 }

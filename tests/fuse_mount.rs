@@ -1,7 +1,8 @@
 #![cfg(unix)]
 
 use anyhow::Result;
-use rcryptfs::{SetBackgroundChild, is_dir_empty, wait_child_mounted};
+use rcryptfs::core::{FsBackend, Utf8Path, is_dir_empty};
+use rcryptfs::{GoCryptFs, SetBackgroundChild, wait_child_mounted};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -77,8 +78,8 @@ fn mount_allows_basic_file_roundtrip() {
     let mount_dir = tempdir().unwrap();
     let password = "test-password";
 
-    rcryptfs::GoCryptFs::<rcryptfs::FsBackend>::init_with_default_params(
-        camino::Utf8Path::from_path(cipher_dir.path()).unwrap(),
+    GoCryptFs::<FsBackend>::init_with_default_params(
+        Utf8Path::from_path(cipher_dir.path()).unwrap(),
         password,
     )
     .unwrap();

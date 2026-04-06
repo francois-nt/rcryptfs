@@ -1,5 +1,5 @@
 use super::GoCryptFs;
-use crate::{Backend, EncryptionTranslator, Result, XattrTranslator};
+use crate::core::{Backend, EncryptionTranslator, Result, XattrTranslator};
 
 const XATTR_IV: &[u8] = b"xattr_name_iv_xx";
 const XATTR_NAME_PREFIX: &str = "user.gocryptfs.";
