@@ -1,7 +1,7 @@
 use crate::{
     Backend, BackendProvider, CipherPathLayout, EncryptedFileTranslator, EncryptionTranslator,
-    FileSystem, FsBackend, MinimalFs, OrIoError, Result, Utf8Path, Utf8PathBuf, XattrTranslator,
-    filesystem::FileCachePolicy, is_dir_empty, register_provider,
+    FileSystem, FsBackend, MasterKey, MinimalFs, OrIoError, Result, Utf8Path, Utf8PathBuf,
+    XattrTranslator, filesystem::FileCachePolicy, is_dir_empty, register_provider,
 };
 use aes_gcm::{
     Aes256Gcm,
@@ -65,7 +65,7 @@ struct JwtPayload<'a> {
 
 /// Builds the signed vault.cryptomator token for the current master keys.
 fn generate_vault_cryptomator(
-    master_keys: &MasterKeys,
+    master_keys: &CryptomatorMasterKeys,
     cipher_combo: &str,        // "SIV_GCM" ou "SIV_CTRMAC"
     shortening_threshold: u32, // typiquement 220
 ) -> Result<String> {
@@ -134,7 +134,7 @@ fn compute_version_mac(version: u32, mac_master_key: &[u8]) -> Result<Vec<u8>> {
 
 impl CryptoMatorConfig {
     /// Creates a fresh Cryptomator config and the matching raw master keys.
-    fn try_new(password: &str) -> Result<(Self, MasterKeys)> {
+    fn try_new(password: &str) -> Result<(Self, CryptomatorMasterKeys)> {
         const DEFAULT_VERSION: u32 = 999;
         const DEFAULT_SCRYPT_COST: u32 = 32768;
         const DEFAULT_SCRYPT_BLOCK_SIZE: u32 = 8;
@@ -175,7 +175,7 @@ impl CryptoMatorConfig {
                 version_mac: base64::engine::general_purpose::STANDARD
                     .encode(compute_version_mac(DEFAULT_VERSION, &hmac_master_key)?),
             },
-            MasterKeys {
+            CryptomatorMasterKeys {
                 primary_master_key,
                 hmac_master_key,
             },
@@ -184,12 +184,12 @@ impl CryptoMatorConfig {
 }
 
 /// Raw Cryptomator master keys before they are wrapped for storage.
-pub struct MasterKeys {
+pub struct CryptomatorMasterKeys {
     pub primary_master_key: Vec<u8>,
     pub hmac_master_key: Vec<u8>,
 }
 
-impl MasterKeys {
+impl CryptomatorMasterKeys {
     /// Returns the JWT signing key order used for vault.cryptomator.
     fn jwt_key(&self) -> [u8; 64] {
         let mut arr = [0; 64];
@@ -215,7 +215,7 @@ fn log2_pow2(n: u32) -> Result<u8> {
 }
 
 /// Derives and unwraps the Cryptomator master keys from a password and config.
-fn derive_keys(password: &str, config: &CryptoMatorConfig) -> Result<MasterKeys> {
+fn derive_keys(password: &str, config: &CryptoMatorConfig) -> Result<CryptomatorMasterKeys> {
     // 1) Cryptomator expects password normalization (NFC)
     let pw_nfc: String = password.nfc().collect();
 
@@ -264,7 +264,7 @@ fn derive_keys(password: &str, config: &CryptoMatorConfig) -> Result<MasterKeys>
         );
     }
 
-    Ok(MasterKeys {
+    Ok(CryptomatorMasterKeys {
         primary_master_key: primary,
         hmac_master_key: hmac,
     })
@@ -279,6 +279,9 @@ pub struct CryptoMatorBuilder;
 register_provider!(CryptoMatorBuilder);
 
 impl BackendProvider for CryptoMatorBuilder {
+    fn name(&self) -> &'static str {
+        "cryptomator"
+    }
     fn probe(&self, root: &Utf8Path) -> bool {
         std::fs::exists(root.join("vault.cryptomator")).unwrap_or(false)
     }
@@ -295,11 +298,28 @@ impl BackendProvider for CryptoMatorBuilder {
             .into();
         Ok(Box::new(cryptfs))
     }
+    fn init_with_default_params(
+        &self,
+        root: &Utf8Path,
+        password: &str,
+    ) -> Result<Box<dyn crate::MasterKey>> {
+        CryptoMator::<FsBackend>::init_with_default_params(root, password)
+            .map(|keys| -> Box<dyn MasterKey> { Box::new(keys) })
+    }
+}
+
+impl MasterKey for CryptomatorMasterKeys {
+    fn to_vec(&self) -> Vec<u8> {
+        self.siv_key().to_vec()
+    }
 }
 
 impl CryptoMator<FsBackend> {
     /// Initializes a new Cryptomator-compatible backend with default parameters.
-    pub fn init_with_default_params(root_path: &Utf8Path, password: &str) -> Result<MasterKeys> {
+    pub fn init_with_default_params(
+        root_path: &Utf8Path,
+        password: &str,
+    ) -> Result<CryptomatorMasterKeys> {
         if !is_dir_empty(root_path)? {
             bail!("Directory {root_path} must be empty!");
         }

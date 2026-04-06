@@ -3,9 +3,9 @@
     deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
 use anyhow::{Context, Result, bail};
-use clap::{Parser, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, builder::PossibleValuesParser};
 use rcryptfs::{
-    CryptoMator, FileSystemHandler, FsBackend, GoCryptFs, NoCache, build_filesystem,
+    FileSystemHandler, NoCache, build_filesystem, get_providers_name, init_filesystem,
     is_background_child, is_dir_empty, platform, respawn_in_background,
 };
 #[cfg(unix)]
@@ -33,16 +33,6 @@ impl log::Log for ConsoleLogger {
 struct ConsoleLogger;
 static LOGGER: ConsoleLogger = ConsoleLogger;
 
-#[derive(Copy, Clone, Debug, ValueEnum)]
-/// Supported backend formats for repository initialization.
-enum InitMode {
-    #[value(name = "gocryptfs")]
-    GoCryptFS,
-    #[value(name = "cryptomator")]
-    CryptoMator,
-    Other,
-}
-
 #[derive(Parser)]
 #[command(long_about = None)]
 struct Args {
@@ -60,8 +50,12 @@ enum Command {
 #[derive(Parser)]
 struct InitArgs {
     /// Initialize encrypted directory
-    #[arg(long = "type", value_enum, value_name = "CRYPTFS_TYPE", default_value_t = InitMode::GoCryptFS)]
-    init_mode: InitMode,
+    #[arg(
+        long = "type",
+        value_name = "CRYPTFS_TYPE",
+        default_value = "gocryptfs"
+    )]
+    init_mode: String,
     /// local encrypted folder
     folder_path: String,
 }
@@ -126,28 +120,22 @@ fn read_password_from_stdin(is_background_child: bool) -> Result<String> {
     Ok(password.trim_end_matches(&['\r', '\n'][..]).to_string())
 }
 
-/// Formats a 16N-byte master key as N grouped hex lines for terminal display.
-fn format_bytes(data: &[u8]) -> String {
-    let lines = data
-        .chunks(16)
-        .map(|line| {
-            line.chunks(4)
-                .map(|chunk| {
-                    chunk
-                        .iter()
-                        .map(|b| format!("{:02x}", b))
-                        .collect::<String>()
-                })
-                .collect::<Vec<_>>()
-                .join("-")
+fn parse_args() -> Result<Args> {
+    let provider_names = get_providers_name();
+
+    let cmd = Args::command().mut_subcommand("init", |init_cmd| {
+        init_cmd.mut_arg("init_mode", |arg| {
+            arg.value_parser(PossibleValuesParser::new(provider_names))
+                .default_value("gocryptfs")
         })
-        .collect::<Vec<_>>()
-        .join("-\n    ");
-    format!("    {lines}\n")
+    });
+
+    let matches = cmd.get_matches();
+    Args::from_arg_matches(&matches).map_err(Into::into)
 }
 
 fn main() -> Result<()> {
-    let args = Args::parse();
+    let args = parse_args()?;
 
     match &args.command {
         Command::Init(init_args) => {
@@ -164,47 +152,28 @@ fn main() -> Result<()> {
                 password
             };
 
-            match init_args.init_mode {
-                InitMode::GoCryptFS => {
-                    let folder_path = init_args.folder_path.as_str().into();
-                    // Print the generated master key once so it can be stored offline for recovery.
-                    let master_key =
-                        GoCryptFs::<FsBackend>::init_with_default_params(folder_path, &password)?;
-                    println!("\nYour master key is:\n");
-                    let formatted = format_bytes(&master_key);
-                    println!("{formatted}");
-                    println!(
-                        "If the gocryptfs.conf file becomes corrupted or you ever forget your password,"
-                    );
-                    println!(
-                        "there is only one hope for recovery: The master key. Print it to a piece of"
-                    );
-                    println!("paper and store it in a drawer. This message is only printed once.");
-                    println!("The gocryptfs filesystem has been created successfully.");
-                    println!(
-                        "You can now mount it using: rcryptfs mount {} MOUNTPOINT",
-                        folder_path
-                    );
-                }
-                InitMode::CryptoMator => {
-                    let folder_path = init_args.folder_path.as_str().into();
-                    // Print the generated master key once so it can be stored offline for recovery.
-                    let master_keys =
-                        CryptoMator::<FsBackend>::init_with_default_params(folder_path, &password)?;
-                    println!("\nYour master key is:\n");
-                    let formatted = format_bytes(&master_keys.siv_key());
-                    println!("{formatted}");
-                    println!("The cryptomator filesystem has been created successfully.");
-                    println!(
-                        "You can now mount it using: rcryptfs mount {} MOUNTPOINT",
-                        folder_path
-                    );
-                }
-                _ => {
-                    // do nothing for the moment
-                    bail!("other init_mode is not implemented yet");
-                }
-            };
+            let folder_path = init_args.folder_path.as_str().into();
+            let master_key = init_filesystem(folder_path, &password, init_args.init_mode.as_str())?;
+            println!("\nYour master key is:\n");
+            let formatted = master_key.to_formatted_bytes();
+            println!("{formatted}");
+
+            if init_args.init_mode == "gocryptfs" {
+                println!(
+                    "If the gocryptfs.conf file becomes corrupted or you ever forget your password,\n\
+                    there is only one hope for recovery: The master key. Print it to a piece of\n\
+                    paper and store it in a drawer. This message is only printed once."
+                );
+            }
+
+            println!(
+                "The {} filesystem has been created successfully.",
+                init_args.init_mode
+            );
+            println!(
+                "You can now mount it using: rcryptfs mount {} MOUNTPOINT",
+                folder_path
+            );
         }
 
         Command::Mount(mount_args) => {

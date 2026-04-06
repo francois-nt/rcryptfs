@@ -14,7 +14,9 @@ mod gocryptfs;
 pub mod platform;
 mod traits;
 mod types;
-pub use backend_provider::{BackendProvider, build_filesystem};
+pub use backend_provider::{
+    BackendProvider, MasterKey, build_filesystem, get_providers_name, init_filesystem,
+};
 pub use buffered_file::BufferedFile;
 pub use cache::{CacheLock, UnsafeCache};
 pub use cryptomator::{CryptoMator, CryptoMatorBuilder};

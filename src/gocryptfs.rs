@@ -1,6 +1,6 @@
 use super::Utf8Path;
 use crate::{
-    Backend, BackendProvider, EncryptedFileTranslator, FileSystem, FsBackend, Result,
+    Backend, BackendProvider, EncryptedFileTranslator, FileSystem, FsBackend, MasterKey, Result,
     filesystem::FileCachePolicy, is_dir_empty, register_provider,
 };
 use aes::{Aes256, cipher::generic_array::GenericArray};
@@ -316,6 +316,9 @@ pub struct GoCryptFsBuilder;
 register_provider!(GoCryptFsBuilder);
 
 impl BackendProvider for GoCryptFsBuilder {
+    fn name(&self) -> &'static str {
+        "gocryptfs"
+    }
     fn probe(&self, root: &Utf8Path) -> bool {
         std::fs::exists(root.join("gocryptfs.conf")).unwrap_or(false)
     }
@@ -331,6 +334,21 @@ impl BackendProvider for GoCryptFsBuilder {
         )
             .into();
         Ok(Box::new(cryptfs))
+    }
+    fn init_with_default_params(
+        &self,
+        root: &Utf8Path,
+        password: &str,
+    ) -> Result<Box<dyn MasterKey>> {
+        GoCryptFs::<FsBackend>::init_with_default_params(root, password)
+            .map(|key| -> Box<dyn MasterKey> { Box::new(GoCryptFSMasterKey(key)) })
+    }
+}
+
+struct GoCryptFSMasterKey(Vec<u8>);
+impl MasterKey for GoCryptFSMasterKey {
+    fn to_vec(&self) -> Vec<u8> {
+        self.0.to_vec()
     }
 }
 
