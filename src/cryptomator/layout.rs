@@ -63,6 +63,7 @@ impl CipherPathLayout for CryptoMator<FsBackend> {
     fn lower_fs(&self) -> &Self::LowerFs {
         &DefaultFs
     }
+    /// Resolves one logical path to its visible storage entry inside the parent storage directory.
     fn plain_path_to_cipher(&self, plain_path: &Utf8Path) -> Result<Utf8PathBuf> {
         if plain_path.as_str().is_empty() {
             return Ok(folder_path_to_cipher_and_dirid(self, plain_path)?.0);
@@ -74,12 +75,15 @@ impl CipherPathLayout for CryptoMator<FsBackend> {
         let cipher_name = self.plain_name_to_cipher(&dir_id, name)?;
         Ok(cipher_parent_path.join(cipher_name))
     }
+    /// Creates a temporary path inside the cipher root for rename-based updates.
     fn create_temp_name(&self, path: &str, is_dir_iv: bool) -> Utf8PathBuf {
         temp_file_path(&self.backend.cipher_root, path, is_dir_iv)
     }
+    /// Drops one cached plain path and all cached descendants derived from it.
     fn remove_cached_plain_path(&self, plain_path: &str) {
         default_remove_cached_plain_path(&self.backend, plain_path);
     }
+    /// Returns the marker file that makes a visible entry behave like a logical directory.
     fn get_dir_iv_file(&self, cipher_folder_path: &Utf8Path) -> Utf8PathBuf {
         cipher_folder_path.join("dir.c9r")
     }
@@ -90,6 +94,7 @@ impl EncryptionLayout for CryptoMator<FsBackend> {
         &self,
         plain_path: &Utf8Path,
     ) -> Result<impl Iterator<Item = Result<(FsDirEntry, Utf8PathBuf)>> + '_> {
+        // Directory listings come from the storage directory identified by the folder dir id.
         let (cipher_path, dir_id) = folder_path_to_cipher_and_dirid(self, plain_path)?;
         // let plain_path: Utf8PathBuf = plain_path.into();
         // let cipher_path = self.plain_path_to_cipher(&plain_path)?;
@@ -111,6 +116,7 @@ impl EncryptionLayout for CryptoMator<FsBackend> {
     }
 
     fn metadata(&self, plain_path: &str) -> std::io::Result<Metadata> {
+        // Metadata must be rewritten from the raw storage view to the logical Cryptomator view.
         let cipher_path = self.plain_path_to_cipher(plain_path.into()).or_invalid()?;
         log::debug!("metadata on [{plain_path}] : {cipher_path}");
         let mut metadata = self.lower_fs().metadata(&cipher_path)?;
@@ -122,6 +128,8 @@ impl EncryptionLayout for CryptoMator<FsBackend> {
 
     fn mkdir(&self, plain_path: &str, permissions: Permissions) -> std::io::Result<Metadata> {
         log::debug!("mkdir on {plain_path}");
+        // A logical directory is represented twice: once as a visible entry with dir.c9r,
+        // and once as its storage directory addressed by the generated dir id.
         let plain_path: &Utf8Path = plain_path.into();
         let parent = plain_path.parent().unwrap_or_else(|| "".into());
         let name = plain_path.file_name().or_invalid()?;
@@ -171,6 +179,7 @@ impl EncryptionLayout for CryptoMator<FsBackend> {
         self.lower_fs().set_permissions(&cipher_path, permissions)
     }
     fn mknode(&self, plain_path: &str, permissions: Permissions) -> std::io::Result<Metadata> {
+        // Empty logical files are materialized with a header immediately.
         let cipher_path = self.plain_path_to_cipher(plain_path.into()).or_invalid()?;
         self.lower_fs()
             .put(&cipher_path, &self.generate_cipher_header().or_invalid()?)
@@ -178,6 +187,7 @@ impl EncryptionLayout for CryptoMator<FsBackend> {
         self.lower_fs().set_permissions(&cipher_path, permissions)
     }
     fn remove_dir(&self, plain_path: &str) -> std::io::Result<()> {
+        // Removing a logical directory must remove both its visible entry and its storage directory.
         let cipher_path = self.plain_path_to_cipher(plain_path.into()).or_invalid()?;
         let is_root = plain_path.is_empty();
         let dir_id = read_dirid(&cipher_path, is_root).or_invalid()?;
@@ -193,6 +203,7 @@ impl EncryptionLayout for CryptoMator<FsBackend> {
         Ok(())
     }
     fn remove(&self, plain_path: &str) -> std::io::Result<()> {
+        // Logical symlinks are stored as directories, so removal depends on the visible entry type.
         let cipher_path = self.plain_path_to_cipher(plain_path.into()).or_invalid()?;
         let meta = self.lower_fs().metadata(&cipher_path)?;
         match meta.file_type {
@@ -201,6 +212,7 @@ impl EncryptionLayout for CryptoMator<FsBackend> {
         }
     }
     fn read_symlink(&self, plain_path: &str) -> std::io::Result<String> {
+        // Logical symlink targets live in the symlink.c9r payload inside the visible entry.
         let cipher_path = self.plain_path_to_cipher(plain_path.into()).or_invalid()?;
         let symlink_content = cipher_path.join("symlink.c9r");
         let data = self
@@ -210,6 +222,7 @@ impl EncryptionLayout for CryptoMator<FsBackend> {
         let target = self.cipher_metavalue_to_plain(&data).or_invalid()?;
         Ok(str::from_utf8(&target).or_invalid()?.into())
     }
+    /// Ignores chmod on logical symlinks so the backing directory stays traversable.
     fn set_permissions(&self, path: &str, permissions: Permissions) -> std::io::Result<Metadata> {
         let metadata = self.metadata(path)?;
         if metadata.file_type == FileType::SymLink {
@@ -218,6 +231,7 @@ impl EncryptionLayout for CryptoMator<FsBackend> {
         let cipher_path = self.plain_path_to_cipher(path.into()).or_invalid()?;
         self.lower_fs().set_permissions(&cipher_path, permissions)
     }
+    /// Creates a logical symlink as a visible directory containing one encrypted target payload.
     fn create_symlink(&self, plain_path: &str, target: &str) -> std::io::Result<Metadata> {
         let cipher_path = self.plain_path_to_cipher(plain_path.into()).or_invalid()?;
         let cipher_target = self

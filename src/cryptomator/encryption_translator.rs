@@ -11,6 +11,7 @@ use base64::Engine;
 use rand::RngCore;
 use unicode_normalization::UnicodeNormalization;
 
+/// Implements Cryptomator filename, content, and metavalue encryption rules.
 impl<T: Backend> EncryptionTranslator for CryptoMator<T> {
     const CIPHER_BLOCK_LEN: u64 = Self::PLAIN_BLOCK_LEN + 28;
     const HEADER_LEN: usize = 68;
@@ -38,16 +39,14 @@ impl<T: Backend> EncryptionTranslator for CryptoMator<T> {
         let s = str::from_utf8(&plain_bytes)?;
         Ok(s.to_string())
     }
+    /// Encrypts a plain entry name with AES-SIV and encodes it as a .c9r filename.
     fn plain_name_to_cipher(&self, parent_dir_id: &[u8], plain_name: &str) -> Result<String> {
         if plain_name == "." || plain_name == ".." {
             return Ok(plain_name.to_string());
         }
-        // 1) Unicode NFC + UTF-8 (Cryptomator spec)
+
         let nfc_name: String = plain_name.nfc().collect();
         let pt = nfc_name.as_bytes();
-
-        // 2) AES-SIV with AD = parent_dir_id
-        // Key material: 64 bytes = mac_master_key || master_key
 
         let mut siv = Aes256Siv::new_from_slice(&self.siv_key)
             .map_err(|e| anyhow!("invalid AES-SIV key length: {e}"))?;
@@ -56,9 +55,6 @@ impl<T: Backend> EncryptionTranslator for CryptoMator<T> {
             .encrypt(std::iter::once(parent_dir_id), pt)
             .map_err(|_| anyhow!("AES-SIV encryption failed"))?;
 
-        // 3) base64url + ".c9r"
-        // Cryptomator format 7+ uses base64url and the .c9r extension.
-        // (Padding '=' is allowed/used in examples.)
         let b64 = base64::engine::general_purpose::URL_SAFE.encode(ct);
         Ok(format!("{b64}.c9r"))
     }
@@ -73,10 +69,8 @@ impl<T: Backend> EncryptionTranslator for CryptoMator<T> {
             return Ok(Vec::default());
         }
 
-        // 1) parse header -> contentKey + headerNonce
         let (content_key, header_nonce) = self.decrypt_content_key_from_header(header)?;
 
-        // 2) parse chunk
         if cipher_data.len() < (Self::CIPHER_BLOCK_LEN - Self::PLAIN_BLOCK_LEN) as usize {
             bail!(
                 "cipher chunk too short: {} < {}",
@@ -86,12 +80,12 @@ impl<T: Backend> EncryptionTranslator for CryptoMator<T> {
         }
         let (chunk_nonce_bytes, ct_and_tag) = cipher_data.split_at(HEADER_NONCE_LEN);
 
-        // 3) build AAD = be64(block_no) || headerNonce
+        // Cryptomator binds each chunk to its block number and file header nonce.
+        // The same AAD layout is used for encryption and decryption of file chunks.
         let mut aad = [0u8; 8 + 12];
         aad[0..8].copy_from_slice(&block_no.to_be_bytes());
         aad[8..20].copy_from_slice(&header_nonce);
 
-        // 4) decrypt
         let cipher = Aes256Gcm::new_from_slice(&content_key)
             .map_err(|e| anyhow!("AES-GCM init failed: {e}"))?;
 
@@ -110,6 +104,7 @@ impl<T: Backend> EncryptionTranslator for CryptoMator<T> {
             })?;
         Ok(pt)
     }
+    /// Decrypts a stored metavalue by treating it as a single encrypted block after its header.
     fn cipher_metavalue_to_plain(&self, cipher_metavalue: &[u8]) -> Result<Vec<u8>> {
         if cipher_metavalue.len() < Self::HEADER_LEN {
             bail!(
@@ -124,29 +119,25 @@ impl<T: Backend> EncryptionTranslator for CryptoMator<T> {
             &cipher_metavalue[Self::HEADER_LEN..],
         )
     }
+    /// Generates the per-file header that wraps the random content key.
     fn generate_cipher_header(&self) -> Result<Vec<u8>> {
         const MARKER_LEN: usize = 8;
         const CONTENT_KEY_LEN: usize = 32;
 
-        // 1) headerNonce aléatoire
         let mut header_nonce = [0u8; HEADER_NONCE_LEN];
         rand::rng().fill_bytes(&mut header_nonce);
 
-        // 2) contentKey aléatoire (clé par fichier)
         let mut content_key = [0u8; CONTENT_KEY_LEN];
         rand::rng().fill_bytes(&mut content_key);
 
-        // 3) plaintext header payload = 8 * 0xFF || contentKey
         let mut payload_pt = [0u8; MARKER_LEN + CONTENT_KEY_LEN];
         payload_pt[..MARKER_LEN].fill(0xFF);
         payload_pt[MARKER_LEN..].copy_from_slice(&content_key);
 
-        // 4) AES-256-GCM encrypt avec master_key, AAD vide
         let cipher =
             Aes256Gcm::new_from_slice(self.master_key()).context("master_key must be 32 bytes")?;
         let nonce = aes_gcm::Nonce::from_slice(&header_nonce);
 
-        // encrypt() renvoie ciphertext||tag (tag=16)
         let ct_and_tag = cipher
             .encrypt(
                 nonce,
@@ -157,7 +148,6 @@ impl<T: Backend> EncryptionTranslator for CryptoMator<T> {
             )
             .map_err(|e| anyhow!("{e} - header encryption failed"))?;
 
-        // 5) header final: nonce || ct || tag
         let mut out = Vec::with_capacity(HEADER_NONCE_LEN + ct_and_tag.len());
         out.extend_from_slice(&header_nonce);
         out.extend_from_slice(&ct_and_tag);
@@ -170,6 +160,7 @@ impl<T: Backend> EncryptionTranslator for CryptoMator<T> {
         );
         Ok(out)
     }
+    /// Cryptomator uses UUID strings as directory identifiers.
     fn generate_diriv(&self) -> Vec<u8> {
         uuid::Uuid::new_v4().to_string().into()
     }
@@ -206,6 +197,7 @@ impl<T: Backend> EncryptionTranslator for CryptoMator<T> {
         out.extend_from_slice(&ct_and_tag);
         Ok(out)
     }
+    /// Stores a metavalue as one encrypted block prefixed with a regular Cryptomator header.
     fn plain_metavalue_to_cipher(&self, plain_metavalue: &[u8]) -> Result<Vec<u8>> {
         let mut result = Vec::with_capacity(
             Self::HEADER_LEN
@@ -219,6 +211,7 @@ impl<T: Backend> EncryptionTranslator for CryptoMator<T> {
 
         Ok(result)
     }
+    /// Converts an on-disk size back to the logical plaintext size, accounting for per-block overhead.
     fn cipher_size_to_plain(&self, cipher_size: u64) -> Result<u64> {
         if cipher_size == 0 {
             return Ok(0);
