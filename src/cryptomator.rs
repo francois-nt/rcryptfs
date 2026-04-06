@@ -276,10 +276,7 @@ const NONCE_LEN: usize = 12;
 /// Backend provider for Cryptomator repositories.
 pub struct CryptoMatorBuilder;
 
-
-
 register_provider!(CryptoMatorBuilder);
-
 
 impl BackendProvider for CryptoMatorBuilder {
     fn probe(&self, root: &Utf8Path) -> bool {
