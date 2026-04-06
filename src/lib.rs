@@ -7,11 +7,11 @@ mod cryptomator;
 mod daemonize;
 mod gocryptfs;
 pub mod platform;
+pub use core::{Utf8Path, Utf8PathBuf};
 pub use cryptomator::{CryptoMator, CryptoMatorBuilder};
 pub use daemonize::{
     SetBackgroundChild, is_background_child, respawn_in_background, wait_child_mounted,
 };
-pub use core::{Utf8Path, Utf8PathBuf};
 pub use gocryptfs::{GoCryptFs, GoCryptFsBuilder};
 
 #[cfg(unix)]

@@ -50,7 +50,7 @@ pub static PROVIDERS: [&dyn BackendProvider];
 macro_rules! register_provider {
     ($provider:ident) => {
         ::paste::paste! {
-            #[::linkme::distributed_slice($crate::core::backend_provider::PROVIDERS)]
+            #[::linkme::distributed_slice($crate::core::PROVIDERS)]
             static [<$provider:upper>]: &dyn $crate::core::BackendProvider = &$provider;
         }
     };
