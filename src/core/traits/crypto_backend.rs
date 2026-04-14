@@ -7,7 +7,8 @@ use super::{
 use std::{collections::BTreeMap, time::SystemTime};
 /// Marker trait for backend implementations.
 pub trait Backend {
-    fn get_fs(&self) -> impl MinimalFs;
+    type LowerFs: MinimalFs;
+    fn get_fs(&self) -> &Self::LowerFs;
 }
 
 pub trait CacheAccess {
@@ -101,7 +102,7 @@ pub trait EncryptionLayout: CipherPathLayout {
     fn list_dir_plain_names(
         &self,
         plain_path: &Utf8Path,
-    ) -> Result<impl Iterator<Item = Result<(FsDirEntry, Utf8PathBuf)>> + '_>;
+    ) -> Result<impl Iterator<Item = Result<(FsDirEntry, Utf8PathBuf)>> + '_ + use<'_, Self>>;
 
     fn metadata(&self, plain_path: &str) -> std::io::Result<Metadata> {
         default_metadata(self, plain_path)
@@ -168,4 +169,8 @@ pub trait MinimalFs {
     fn set_xattr(&self, path: &str, name: &str, value: &[u8]) -> std::io::Result<()>;
     fn read_symlink(&self, path: &str) -> std::io::Result<Utf8PathBuf>;
     fn create_symlink(&self, path: &str, target_path: &str) -> std::io::Result<Metadata>;
+    fn list_dir(
+        &self,
+        path: &str,
+    ) -> std::io::Result<impl Iterator<Item = std::io::Result<FsDirEntry>> + '_ + use<'_, Self>>;
 }

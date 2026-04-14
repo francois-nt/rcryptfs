@@ -1,15 +1,15 @@
 use super::GoCryptFs;
 use crate::core::{
-    CacheAccess, CipherPathLayout, DefaultFs, EncryptionLayout, EncryptionTranslator, FsBackend,
-    FsDirEntry, Result, Utf8Path, Utf8PathBuf, default_remove_cached_plain_path, temp_file_path,
+    Backend, CacheAccess, CipherPathLayout, EncryptionLayout, EncryptionTranslator, FsBackend,
+    FsDirEntry, MinimalFs, Result, Utf8Path, Utf8PathBuf, default_remove_cached_plain_path,
+    temp_file_path,
 };
 use anyhow::{Context, anyhow};
-use std::fs::DirEntry;
 
 impl CipherPathLayout for GoCryptFs<FsBackend> {
-    type LowerFs = DefaultFs;
+    type LowerFs = <FsBackend as Backend>::LowerFs;
     fn lower_fs(&self) -> &Self::LowerFs {
-        &DefaultFs
+        self.backend.get_fs()
     }
     fn remove_cached_plain_path(&self, plain_path: &str) {
         default_remove_cached_plain_path(&self.backend, plain_path);
@@ -83,18 +83,30 @@ impl EncryptionLayout for GoCryptFs<FsBackend> {
     fn list_dir_plain_names(
         &self,
         plain_path: &Utf8Path,
-    ) -> Result<impl Iterator<Item = Result<(FsDirEntry, Utf8PathBuf)>> + '_> {
+    ) -> Result<impl Iterator<Item = Result<(FsDirEntry, Utf8PathBuf)>> + '_ + use<'_>> {
         let plain_path: Utf8PathBuf = plain_path.into();
         let cipher_path = self.plain_path_to_cipher(&plain_path)?;
         let dir_iv = read_diriv(&cipher_path)?;
-        //std::fs::metadata(path)
-        Ok(std::fs::read_dir(&cipher_path)?.filter_map(move |entry| {
-            match map_dir_entry(self, &cipher_path, &dir_iv, entry) {
-                Ok(Some((plain_name, cipher_path))) => Some(Ok((plain_name, cipher_path))),
-                Ok(None) => None,
-                Err(e) => Some(Err(e)),
-            }
-        }))
+
+        Ok(self
+            .lower_fs()
+            .list_dir(cipher_path.as_str())?
+            .filter_map(
+                move |entry| match map_dir_entry(self, &cipher_path, &dir_iv, entry) {
+                    Ok(Some((plain_name, cipher_path))) => Some(Ok((plain_name, cipher_path))),
+                    Ok(None) => None,
+                    Err(e) => Some(Err(e)),
+                },
+            ))
+
+        // //std::fs::metadata(path)
+        // Ok(std::fs::read_dir(&cipher_path)?.filter_map(move |entry| {
+        //     match map_dir_entry(self, &cipher_path, &dir_iv, entry) {
+        //         Ok(Some((plain_name, cipher_path))) => Some(Ok((plain_name, cipher_path))),
+        //         Ok(None) => None,
+        //         Err(e) => Some(Err(e)),
+        //     }
+        // }))
     }
 }
 
@@ -123,19 +135,17 @@ fn map_dir_entry(
     this: &impl EncryptionLayout,
     cipher_path: &Utf8Path,
     dir_iv: &[u8],
-    entry: Result<DirEntry, std::io::Error>,
+    entry: Result<FsDirEntry, std::io::Error>,
 ) -> Result<Option<(FsDirEntry, Utf8PathBuf)>> {
     match entry {
         Ok(entry) => {
-            let cipher_name = &entry.file_name();
-            let cipher_name = cipher_name.to_string_lossy();
-            let fs_dir_entry: FsDirEntry = entry.into();
+            let cipher_name = entry.file_name.clone();
             if is_special_entry(&cipher_name) {
                 Ok(None)
             } else {
                 let plain_name = this.cipher_name_to_plain(dir_iv, &cipher_name)?;
                 Ok(Some((
-                    fs_dir_entry.with_name(plain_name),
+                    entry.with_name(plain_name),
                     cipher_path.join(Utf8Path::new(&cipher_name)),
                 )))
             }

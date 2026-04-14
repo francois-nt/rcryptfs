@@ -1,10 +1,9 @@
 use super::{CryptoMator, read_dirid};
 use crate::core::{
-    CacheAccess, CipherPathLayout, DefaultFs, EncryptionLayout, EncryptionTranslator, FileType,
+    Backend, CacheAccess, CipherPathLayout, EncryptionLayout, EncryptionTranslator, FileType,
     FsBackend, FsDirEntry, Metadata, MinimalFs, OrIoError, Permissions, Result, Utf8Path,
     Utf8PathBuf, default_remove_cached_plain_path, temp_file_path,
 };
-use std::fs::DirEntry;
 
 /// Resolves a plain folder path to its storage directory and dir id.
 fn folder_path_to_cipher_and_dirid(
@@ -59,9 +58,9 @@ fn folder_path_to_cipher_and_dirid(
 }
 
 impl CipherPathLayout for CryptoMator<FsBackend> {
-    type LowerFs = DefaultFs;
+    type LowerFs = <FsBackend as Backend>::LowerFs;
     fn lower_fs(&self) -> &Self::LowerFs {
-        &DefaultFs
+        self.backend.get_fs()
     }
     /// Resolves one logical path to its visible storage entry inside the parent storage directory.
     fn plain_path_to_cipher(&self, plain_path: &Utf8Path) -> Result<Utf8PathBuf> {
@@ -93,7 +92,7 @@ impl EncryptionLayout for CryptoMator<FsBackend> {
     fn list_dir_plain_names(
         &self,
         plain_path: &Utf8Path,
-    ) -> Result<impl Iterator<Item = Result<(FsDirEntry, Utf8PathBuf)>> + '_> {
+    ) -> Result<impl Iterator<Item = Result<(FsDirEntry, Utf8PathBuf)>> + '_ + use<'_>> {
         // Directory listings come from the storage directory identified by the folder dir id.
         let (cipher_path, dir_id) = folder_path_to_cipher_and_dirid(self, plain_path)?;
         // let plain_path: Utf8PathBuf = plain_path.into();
@@ -105,14 +104,29 @@ impl EncryptionLayout for CryptoMator<FsBackend> {
         // };
         // let cipher_path = self.dir_id_to_storage_path(&dir_id)?;
         log::debug!("read_dir on {}", &cipher_path);
-        Ok(std::fs::read_dir(&cipher_path)?.filter_map(move |entry| {
-            log::debug!("> entry {:?}", entry);
-            match map_dir_entry(self, &cipher_path, &dir_id, entry) {
-                Ok(Some((plain_name, cipher_path))) => Some(Ok((plain_name, cipher_path))),
-                Ok(None) => None,
-                Err(e) => Some(Err(e)),
-            }
-        }))
+        Ok(self
+            .lower_fs()
+            .list_dir(cipher_path.as_str())?
+            .filter_map(move |entry| {
+                match &entry {
+                    Ok(entry) => log::debug!("> entry Ok {entry}"),
+                    Err(e) => log::debug!("> entry Err {e}"),
+                };
+                match map_dir_entry(self, &cipher_path, &dir_id, entry) {
+                    Ok(Some((plain_name, cipher_path))) => Some(Ok((plain_name, cipher_path))),
+                    Ok(None) => None,
+                    Err(e) => Some(Err(e)),
+                }
+            }))
+
+        // Ok(std::fs::read_dir(&cipher_path)?.filter_map(move |entry| {
+        //     log::debug!("> entry {:?}", entry);
+        //     match map_dir_entry(self, &cipher_path, &dir_id, entry) {
+        //         Ok(Some((plain_name, cipher_path))) => Some(Ok((plain_name, cipher_path))),
+        //         Ok(None) => None,
+        //         Err(e) => Some(Err(e)),
+        //     }
+        // }))
     }
 
     fn metadata(&self, plain_path: &str) -> std::io::Result<Metadata> {
@@ -295,27 +309,24 @@ fn map_dir_entry(
     this: &impl EncryptionLayout,
     cipher_path: &Utf8Path,
     dir_iv: &[u8],
-    entry: Result<DirEntry, std::io::Error>,
+    entry: Result<FsDirEntry, std::io::Error>,
 ) -> Result<Option<(FsDirEntry, Utf8PathBuf)>> {
     match entry {
-        Ok(entry) => {
-            let cipher_name = &entry.file_name();
-            let cipher_name: String = cipher_name.to_string_lossy().into();
+        Ok(mut entry) => {
+            let cipher_name = entry.file_name.clone();
 
             if is_special_entry(&cipher_name) {
                 Ok(None)
             } else {
-                let mut fs_dir_entry: FsDirEntry = entry.into();
-
-                if let Some(metadata) = fs_dir_entry.metadata.as_mut() {
+                if let Some(metadata) = entry.metadata.as_mut() {
                     metadata.adjust(this, &cipher_path.join(&cipher_name), false)?;
-                    if let Some(file_type) = fs_dir_entry.file_type.as_mut() {
+                    if let Some(file_type) = entry.file_type.as_mut() {
                         *file_type = metadata.file_type;
                     }
                 }
                 let plain_name = this.cipher_name_to_plain(dir_iv, &cipher_name)?;
                 Ok(Some((
-                    fs_dir_entry.with_name(plain_name),
+                    entry.with_name(plain_name),
                     cipher_path.join(Utf8Path::new(&cipher_name)),
                 )))
             }

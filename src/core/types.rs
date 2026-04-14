@@ -41,6 +41,12 @@ impl From<&Utf8Path> for FsBackend {
 pub struct DefaultFs;
 
 impl MinimalFs for DefaultFs {
+    fn list_dir(
+        &self,
+        path: &str,
+    ) -> std::io::Result<impl Iterator<Item = std::io::Result<FsDirEntry>> + '_ + use<'_>> {
+        Ok(std::fs::read_dir(path)?.map(|entry| entry.map(|v| v.into())))
+    }
     fn metadata(&self, path: &Utf8Path) -> std::io::Result<Metadata> {
         Ok(std::fs::symlink_metadata(path)?.into())
     }
@@ -167,13 +173,15 @@ impl MinimalFs for DefaultFs {
 /// In-memory backend for testing.
 pub struct MemoryBackend;
 impl Backend for FsBackend {
-    fn get_fs(&self) -> impl MinimalFs {
-        DefaultFs
+    type LowerFs = DefaultFs;
+    fn get_fs(&self) -> &DefaultFs {
+        &DefaultFs
     }
 }
 impl Backend for MemoryBackend {
-    fn get_fs(&self) -> impl MinimalFs {
-        DefaultFs
+    type LowerFs = DefaultFs;
+    fn get_fs(&self) -> &DefaultFs {
+        &DefaultFs
     }
 }
 
@@ -505,5 +513,78 @@ impl Display for Metadata {
         display_system_time(f, "\tmodification_time:", self.modified)?;
         write!(f, "\tmode: {}", self.permissions)?;
         Ok(())
+    }
+}
+
+pub struct UnixPathBuf(String);
+
+impl UnixPathBuf {
+    const UNIX_SEP: char = '/';
+    pub fn push(&mut self, path: impl AsRef<str>) {
+        let path = path.as_ref();
+        if path.is_empty() {
+            return;
+        }
+        if self.0.is_empty() {
+            self.0 = path.into();
+            return;
+        }
+        if self.0.ends_with(Self::UNIX_SEP) {
+            if let Some(stripped) = path.strip_prefix(Self::UNIX_SEP) {
+                self.0.push_str(stripped);
+            } else {
+                self.0.push_str(path);
+            }
+        } else {
+            if !path.starts_with(Self::UNIX_SEP) {
+                self.0.push(Self::UNIX_SEP);
+            }
+            self.0.push_str(path);
+        }
+    }
+    pub fn join(&self, path: impl AsRef<str>) -> UnixPathBuf {
+        let mut inner_string = String::with_capacity(self.0.capacity() + path.as_ref().len() + 1);
+        inner_string.push_str(&self.0);
+        let mut buf = UnixPathBuf(inner_string);
+        buf.push(path);
+        buf
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl std::ops::Deref for UnixPathBuf {
+    type Target = Utf8Path;
+    fn deref(&self) -> &Self::Target {
+        self.as_ref()
+    }
+}
+
+impl AsRef<Utf8Path> for UnixPathBuf {
+    fn as_ref(&self) -> &Utf8Path {
+        self.0.as_str().into()
+    }
+}
+
+impl AsRef<std::path::Path> for UnixPathBuf {
+    fn as_ref(&self) -> &std::path::Path {
+        self.as_std_path()
+    }
+}
+
+impl From<Utf8PathBuf> for UnixPathBuf {
+    fn from(value: Utf8PathBuf) -> Self {
+        Self(value.into_string().replace('\\', "/"))
+    }
+}
+
+impl From<&Utf8Path> for UnixPathBuf {
+    fn from(value: &Utf8Path) -> Self {
+        let buf: Utf8PathBuf = value.into();
+        buf.into()
     }
 }
