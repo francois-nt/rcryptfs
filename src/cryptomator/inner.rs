@@ -1,9 +1,7 @@
 use crate::core::{
-    Backend, BackendProvider, CipherPathLayout, EncryptedFileTranslator, EncryptionTranslator,
-    FileCachePolicy, FileSystem, FsBackend, MasterKey, MinimalFs, OrIoError, Result, Utf8Path,
-    Utf8PathBuf, XattrTranslator, is_dir_empty,
+    Backend, CipherPathLayout, EncryptionTranslator, FsBackend, MasterKey, MinimalFs, OrIoError,
+    Result, Utf8Path, Utf8PathBuf, XattrTranslator, is_dir_empty,
 };
-use crate::register_provider;
 use aes_gcm::{
     Aes256Gcm,
     aead::{Aead, Payload},
@@ -22,29 +20,8 @@ use sha2::Sha256;
 use std::io::Write;
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
-
 type HmacSha256 = Hmac<Sha256>;
-
-mod encryption_translator;
-mod layout;
-/// Cryptomator backend state with the derived SIV key material.
-pub struct CryptoMator<T: Backend> {
-    backend: T,
-    siv_key: [u8; 64],
-}
-
-/// Reads the directory id vector from a cipher directory.
-fn read_dirid(cipher_dir: &Utf8Path, is_root: bool) -> Result<String> {
-    if is_root {
-        return Ok(String::default());
-    }
-    let p = cipher_dir.join("dir.c9r");
-    let data = std::fs::read_to_string(&p).context(format!("read {:?}", p))?;
-    if data.len() != 36 {
-        return Err(anyhow!("dirid has len {}, expected 36", data.len()));
-    }
-    Ok(data)
-}
+use super::CryptoMator;
 
 /// JWT header stored in vault.cryptomator.
 #[derive(Serialize)]
@@ -260,44 +237,6 @@ fn derive_keys(password: &str, config: &CryptoMatorConfig) -> Result<Cryptomator
     })
 }
 
-const HEADER_NONCE_LEN: usize = 12;
-const NONCE_LEN: usize = 12;
-
-/// Backend provider for Cryptomator repositories.
-pub struct CryptoMatorBuilder;
-
-register_provider!(CryptoMatorBuilder);
-
-impl BackendProvider for CryptoMatorBuilder {
-    fn name(&self) -> &'static str {
-        "cryptomator"
-    }
-    fn probe(&self, root: &Utf8Path) -> bool {
-        std::fs::exists(root.join("vault.cryptomator")).unwrap_or(false)
-    }
-    fn try_build(
-        &self,
-        root: &Utf8Path,
-        password: &str,
-        cache_policy: Box<dyn FileCachePolicy>,
-    ) -> Result<Box<dyn FileSystem>> {
-        let cryptfs: EncryptedFileTranslator<CryptoMator<FsBackend>> = (
-            CryptoMator::<FsBackend>::try_new(root, password)?,
-            cache_policy,
-        )
-            .into();
-        Ok(Box::new(cryptfs))
-    }
-    fn init_with_default_params(
-        &self,
-        root: &Utf8Path,
-        password: &str,
-    ) -> Result<Box<dyn MasterKey>> {
-        CryptoMator::<FsBackend>::init_with_default_params(root, password)
-            .map(|keys| -> Box<dyn MasterKey> { Box::new(keys) })
-    }
-}
-
 impl MasterKey for CryptomatorMasterKeys {
     fn to_vec(&self) -> Vec<u8> {
         self.siv_key().to_vec()
@@ -367,7 +306,7 @@ impl CryptoMator<FsBackend> {
         })
     }
 
-    fn mkdir_storage_path(&self, dir_id: &str) -> Result<()> {
+    pub(super) fn mkdir_storage_path(&self, dir_id: &str) -> Result<()> {
         let full_path = self.dir_id_to_storage_path(dir_id)?;
         self.lower_fs()
             .mkdir(full_path.parent().unwrap_or_else(|| "".into()))?;
@@ -375,7 +314,7 @@ impl CryptoMator<FsBackend> {
         Ok(())
     }
 
-    fn dir_id_to_storage_path(&self, dir_id: &str) -> Result<Utf8PathBuf> {
+    pub(super) fn dir_id_to_storage_path(&self, dir_id: &str) -> Result<Utf8PathBuf> {
         // Key material for AES-SIV-512 (RFC 5297): 64 bytes split into two halves.
         // We concatenate mac_master_key || master_key.
         use aes_siv::aead::KeyInit;
@@ -400,11 +339,17 @@ impl CryptoMator<FsBackend> {
     }
 }
 
+const HEADER_NONCE_LEN: usize = 12;
+//const NONCE_LEN: usize = 12;
+
 impl<T: Backend> CryptoMator<T> {
-    fn master_key(&self) -> &[u8] {
+    pub(super) fn master_key(&self) -> &[u8] {
         &self.siv_key[32..]
     }
-    fn decrypt_content_key_from_header(&self, header: &[u8]) -> Result<([u8; 32], [u8; 12])> {
+    pub(super) fn decrypt_content_key_from_header(
+        &self,
+        header: &[u8],
+    ) -> Result<([u8; 32], [u8; 12])> {
         if header.len() < Self::HEADER_LEN {
             bail!(
                 "Cryptomator header too short: {} < {}",

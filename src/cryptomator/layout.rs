@@ -1,9 +1,23 @@
-use super::{CryptoMator, read_dirid};
+use super::CryptoMator;
 use crate::core::{
     Backend, CacheAccess, CipherPathLayout, EncryptionLayout, EncryptionTranslator, FileType,
     FsBackend, FsDirEntry, Metadata, MinimalFs, OrIoError, Permissions, Result, Utf8Path,
     Utf8PathBuf, default_remove_cached_plain_path, temp_file_path,
 };
+use anyhow::{Context, anyhow};
+
+/// Reads the directory id vector from a cipher directory.
+fn read_dirid(cipher_dir: &Utf8Path, is_root: bool) -> Result<String> {
+    if is_root {
+        return Ok(String::default());
+    }
+    let p = cipher_dir.join("dir.c9r");
+    let data = std::fs::read_to_string(&p).context(format!("read {:?}", p))?;
+    if data.len() != 36 {
+        return Err(anyhow!("dirid has len {}, expected 36", data.len()));
+    }
+    Ok(data)
+}
 
 /// Resolves a plain folder path to its storage directory and dir id.
 fn folder_path_to_cipher_and_dirid(

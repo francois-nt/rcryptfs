@@ -1,9 +1,6 @@
-use super::Utf8Path;
-use super::core::{
-    Backend, BackendProvider, EncryptedFileTranslator, FileCachePolicy, FileSystem, FsBackend,
-    MasterKey, Result, is_dir_empty,
-};
-use crate::register_provider;
+use super::GoCryptFs;
+use crate::Utf8Path;
+use crate::core::{Backend, FsBackend, Result, is_dir_empty};
 use aes::{Aes256, cipher::generic_array::GenericArray};
 use aes_gcm::{
     Aes256Gcm, AesGcm, KeyInit,
@@ -16,21 +13,6 @@ use scrypt::{Params as ScryptParams, scrypt};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::io::Write;
-
-mod encryption_translator;
-mod layout;
-mod xattr_translator;
-
-/// GoCryptFS backend with derived content and filename encryption keys.
-pub struct GoCryptFs<T: Backend> {
-    backend: T,
-    /// AES-256-GCM key for file content (blocks)
-    gcm_key: [u8; 32],
-    /// AES-256-EME key for filename encryption
-    eme_key: [u8; 32],
-    /// base64 encoding of file names (Raw64 => no pad)
-    raw64: bool,
-}
 
 /// Derives encryption keys from master key and feature flags.
 fn derive_keys<T: Backend>(
@@ -255,12 +237,13 @@ fn get_master_key(input: &str, config: &GoCryptfsConfig) -> Result<Vec<u8>> {
 
 impl<T: Backend> GoCryptFs<T> {
     /// Constants matching the GoCryptFS on-disk file layout.
-    const NONCE_LEN: usize = 16;
-    const HEADER_LEN: usize = 18;
-    const FILEID_LEN: usize = 16;
-    const TAG_LEN: usize = 16;
-    const PLAIN_BLOCK_LEN: u64 = 4096;
-    const CIPHER_BLOCK_LEN: u64 = Self::PLAIN_BLOCK_LEN + (Self::TAG_LEN + Self::NONCE_LEN) as u64;
+    pub(super) const NONCE_LEN: usize = 16;
+    pub(super) const HEADER_LEN: usize = 18;
+    pub(super) const FILEID_LEN: usize = 16;
+    pub(super) const TAG_LEN: usize = 16;
+    pub(super) const PLAIN_BLOCK_LEN: u64 = 4096;
+    pub(super) const CIPHER_BLOCK_LEN: u64 =
+        Self::PLAIN_BLOCK_LEN + (Self::TAG_LEN + Self::NONCE_LEN) as u64;
 }
 
 impl GoCryptFs<FsBackend> {
@@ -309,47 +292,6 @@ impl GoCryptFs<FsBackend> {
             master_key.as_slice().try_into()?,
             &config.feature_flags,
         )
-    }
-}
-
-/// Backend provider for GoCryptFS repositories.
-pub struct GoCryptFsBuilder;
-register_provider!(GoCryptFsBuilder);
-
-impl BackendProvider for GoCryptFsBuilder {
-    fn name(&self) -> &'static str {
-        "gocryptfs"
-    }
-    fn probe(&self, root: &Utf8Path) -> bool {
-        std::fs::exists(root.join("gocryptfs.conf")).unwrap_or(false)
-    }
-    fn try_build(
-        &self,
-        root: &Utf8Path,
-        password: &str,
-        cache_policy: Box<dyn FileCachePolicy>,
-    ) -> Result<Box<dyn FileSystem>> {
-        let cryptfs: EncryptedFileTranslator<GoCryptFs<FsBackend>> = (
-            GoCryptFs::<FsBackend>::try_new(root, password)?,
-            cache_policy,
-        )
-            .into();
-        Ok(Box::new(cryptfs))
-    }
-    fn init_with_default_params(
-        &self,
-        root: &Utf8Path,
-        password: &str,
-    ) -> Result<Box<dyn MasterKey>> {
-        GoCryptFs::<FsBackend>::init_with_default_params(root, password)
-            .map(|key| -> Box<dyn MasterKey> { Box::new(GoCryptFSMasterKey(key)) })
-    }
-}
-
-struct GoCryptFSMasterKey(Vec<u8>);
-impl MasterKey for GoCryptFSMasterKey {
-    fn to_vec(&self) -> Vec<u8> {
-        self.0.to_vec()
     }
 }
 
