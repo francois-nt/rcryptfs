@@ -170,7 +170,7 @@ pub trait ReadOnlyFileSystem: Send + Sync + 'static {
     /// Reads the target of a symbolic link.
     fn read_symlink(&self, path: &str) -> std::io::Result<String>;
     /// Lists extended attribute names.
-    fn list_xattr(&self, path: &str) -> std::io::Result<Box<dyn Iterator<Item = String> + '_>>;
+    fn list_xattr(&self, path: &str) -> std::io::Result<Vec<String>>;
     /// Gets an extended attribute value.
     fn get_xattr(&self, path: &str, name: &str) -> std::io::Result<Vec<u8>>;
 }

@@ -1,8 +1,8 @@
 use super::GoCryptFs;
 use crate::core::{
     Backend, CacheAccess, CipherPathLayout, EncryptionLayout, EncryptionTranslator, FsBackend,
-    FsDirEntry, MinimalFs, Result, Utf8Path, Utf8PathBuf, default_remove_cached_plain_path,
-    temp_file_path,
+    FsDirEntry, MinimalFs, OrIoError, Result, Utf8Path, Utf8PathBuf,
+    default_remove_cached_plain_path, temp_file_path,
 };
 use anyhow::{Context, anyhow};
 
@@ -83,10 +83,11 @@ impl EncryptionLayout for GoCryptFs<FsBackend> {
     fn list_dir_plain_names(
         &self,
         plain_path: &Utf8Path,
-    ) -> Result<impl Iterator<Item = Result<(FsDirEntry, Utf8PathBuf)>> + '_ + use<'_>> {
+    ) -> std::io::Result<impl Iterator<Item = Result<(FsDirEntry, Utf8PathBuf)>> + '_ + use<'_>>
+    {
         let plain_path: Utf8PathBuf = plain_path.into();
-        let cipher_path = self.plain_path_to_cipher(&plain_path)?;
-        let dir_iv = read_diriv(&cipher_path)?;
+        let cipher_path = self.plain_path_to_cipher(&plain_path).or_invalid()?;
+        let dir_iv = read_diriv(&cipher_path).or_invalid()?;
 
         Ok(self
             .lower_fs()

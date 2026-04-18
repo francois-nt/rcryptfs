@@ -455,7 +455,7 @@ impl<C: OpenCache + 'static> FilesystemMT for FileSystemHandler<C> {
         debug!("listxattr on path {:?} size: {size}", path);
         let path = path.sanitize()?;
         let mut names = vec![];
-        for name in self.as_ref().list_xattr(path).or_libc_invalid()? {
+        for name in self.as_ref().list_xattr(path).libc_err()? {
             names.extend_from_slice(name.as_bytes());
             names.push(0);
         }

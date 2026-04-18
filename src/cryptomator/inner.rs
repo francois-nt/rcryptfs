@@ -1,6 +1,6 @@
 use crate::core::{
     Backend, CipherPathLayout, EncryptionTranslator, FsBackend, MasterKey, MinimalFs, OrIoError,
-    Result, Utf8Path, Utf8PathBuf, XattrTranslator, is_dir_empty,
+    Result, Utf8Path, Utf8PathBuf, XattrLayout, is_dir_empty,
 };
 use aes_gcm::{
     Aes256Gcm,
@@ -393,17 +393,4 @@ impl<T: Backend> CryptoMator<T> {
     }
 }
 
-impl<T: Backend> XattrTranslator for CryptoMator<T> {
-    fn cipher_xattr_name_to_plain(&self, _cipher_xattr_name: &str) -> Result<String> {
-        bail!("todo")
-    }
-    fn cipher_xattr_value_to_plain(&self, _cipher_xattr_value: &[u8]) -> Result<Vec<u8>> {
-        bail!("todo")
-    }
-    fn plain_xattr_name_to_cipher(&self, _plain_xattr_name: &str) -> Result<String> {
-        bail!("todo")
-    }
-    fn plain_xattr_value_to_cipher(&self, _plain_xattr_value: &[u8]) -> Result<Vec<u8>> {
-        bail!("todo")
-    }
-}
+impl<T: Backend> XattrLayout for CryptoMator<T> {}

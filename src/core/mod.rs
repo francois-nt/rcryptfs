@@ -9,7 +9,6 @@ pub use anyhow::Result;
 pub use backend_provider::{
     BackendProvider, MasterKey, PROVIDERS, build_filesystem, get_providers_name, init_filesystem,
 };
-
 pub use buffered_file::BufferedFile;
 pub use cache::{CacheLock, UnsafeCache};
 pub use file::CryptFsFile;

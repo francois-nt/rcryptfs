@@ -58,15 +58,31 @@ pub trait EncryptionTranslator {
 }
 
 /// Trait for extended attribute name and value translation.
-pub trait XattrTranslator: EncryptionTranslator {
-    /// Converts a plain extended attribute name to cipher text.
-    fn plain_xattr_name_to_cipher(&self, plain_xattr_name: &str) -> Result<String>;
-    /// Converts a cipher extended attribute name to plain text.
-    fn cipher_xattr_name_to_plain(&self, cipher_xattr_name: &str) -> Result<String>;
-    /// Encrypts a plain extended attribute value.
-    fn plain_xattr_value_to_cipher(&self, plain_xattr_value: &[u8]) -> Result<Vec<u8>>;
-    /// Decrypts a cipher extended attribute value.
-    fn cipher_xattr_value_to_plain(&self, cipher_xattr_value: &[u8]) -> Result<Vec<u8>>;
+pub trait XattrLayout: EncryptionTranslator {
+    fn get_xattr(&self, _path: &str, _name: &str) -> std::io::Result<Vec<u8>> {
+        #[cfg(not(unix))]
+        return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
+        #[cfg(unix)]
+        return Err(std::io::Error::from_raw_os_error(libc::ENOSYS));
+    }
+    fn list_xattr(&self, _path: &str) -> std::io::Result<Vec<String>> {
+        #[cfg(not(unix))]
+        return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
+        #[cfg(unix)]
+        return Err(std::io::Error::from_raw_os_error(libc::ENOSYS));
+    }
+    fn remove_xattr(&self, _path: &str, _name: &str) -> std::io::Result<()> {
+        #[cfg(not(unix))]
+        return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
+        #[cfg(unix)]
+        return Err(std::io::Error::from_raw_os_error(libc::ENOSYS));
+    }
+    fn set_xattr(&self, _path: &str, _name: &str, _value: &[u8]) -> std::io::Result<()> {
+        #[cfg(not(unix))]
+        return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
+        #[cfg(unix)]
+        return Err(std::io::Error::from_raw_os_error(libc::ENOSYS));
+    }
 }
 
 pub(crate) fn default_remove_cached_plain_path<T: CacheAccess>(backend: &T, plain_path: &str) {
@@ -102,7 +118,7 @@ pub trait EncryptionLayout: CipherPathLayout {
     fn list_dir_plain_names(
         &self,
         plain_path: &Utf8Path,
-    ) -> Result<impl Iterator<Item = Result<(FsDirEntry, Utf8PathBuf)>> + '_ + use<'_, Self>>;
+    ) -> std::io::Result<impl Iterator<Item = Result<(FsDirEntry, Utf8PathBuf)>> + '_ + use<'_, Self>>;
 
     fn metadata(&self, plain_path: &str) -> std::io::Result<Metadata> {
         default_metadata(self, plain_path)

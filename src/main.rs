@@ -247,10 +247,11 @@ fn run_mount(mount_args: &MountArgs, is_background_child: bool) -> Result<()> {
     }
 
     let mut handler: FileSystemHandler<CacheLock> = cryptfs.into();
-    if !is_background_child {
+    if !is_background_child || std::env::var_os("VERBOSE").is_some() {
         log::set_logger(&LOGGER).map_err(|e| anyhow::anyhow!("{e}"))?;
         log::set_max_level(log::LevelFilter::Debug);
-    } else {
+    }
+    if is_background_child {
         handler.set_as_background_child();
     }
 

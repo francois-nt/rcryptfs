@@ -1,7 +1,8 @@
+use crate::core::XattrLayout;
+
 use super::{
     BufferedFile, CryptFsFile, EncryptionLayout, EncryptionTranslator, FileSystem, FsDirEntry,
     GenericOpenOptions, Metadata, OrIoError, Permissions, ReadOnlyFileSystem, ReadWrite, Utf8Path,
-    XattrTranslator,
 };
 
 use std::sync::Arc;
@@ -96,7 +97,7 @@ where
 
 impl<T> ReadOnlyFileSystem for EncryptedFileTranslator<T>
 where
-    T: EncryptionTranslator + EncryptionLayout + XattrTranslator + Send + Sync + 'static,
+    T: EncryptionTranslator + EncryptionLayout + XattrLayout + Send + Sync + 'static,
 {
     fn open_readonly(&self, path: &str) -> std::io::Result<Box<dyn ReadWrite>> {
         let cipher_path = self.fs.plain_path_to_cipher(path.into()).or_invalid()?;
@@ -124,43 +125,16 @@ where
         self.fs.read_symlink(path)
     }
     fn get_xattr(&self, path: &str, name: &str) -> std::io::Result<Vec<u8>> {
-        #[cfg(not(unix))]
-        {
-            let _ = (path, name);
-            return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
-        }
-        #[cfg(unix)]
-        {
-            let cipher_path = self.fs.plain_path_to_cipher(path.into()).or_invalid()?;
-            let cipher_name = self.fs.plain_xattr_name_to_cipher(name).or_invalid()?;
-
-            let cipher_xattr_value =
-                xattr::get(cipher_path, cipher_name)?.or_io_error(libc::ENODATA)?;
-            self.fs
-                .cipher_xattr_value_to_plain(&cipher_xattr_value)
-                .or_invalid()
-        }
+        self.fs.get_xattr(path, name)
     }
-    fn list_xattr(&self, path: &str) -> std::io::Result<Box<dyn Iterator<Item = String> + '_>> {
-        #[cfg(not(unix))]
-        {
-            let _ = path;
-            return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
-        }
-        #[cfg(unix)]
-        {
-            let cipher_path = self.fs.plain_path_to_cipher(path.into()).or_invalid()?;
-            Ok(Box::new(xattr::list(cipher_path)?.flat_map(move |s| {
-                s.to_str()
-                    .and_then(|s| self.fs.cipher_xattr_name_to_plain(s).ok())
-            })))
-        }
+    fn list_xattr(&self, path: &str) -> std::io::Result<Vec<String>> {
+        self.fs.list_xattr(path)
     }
 }
 
 impl<T> FileSystem for EncryptedFileTranslator<T>
 where
-    T: EncryptionTranslator + EncryptionLayout + XattrTranslator + Send + Sync + 'static,
+    T: EncryptionTranslator + EncryptionLayout + XattrLayout + Send + Sync + 'static,
 {
     /// Opens a file with the specified options.
     fn open_file_with(
@@ -232,31 +206,9 @@ where
     }
 
     fn remove_xattr(&self, path: &str, name: &str) -> std::io::Result<()> {
-        #[cfg(not(unix))]
-        {
-            let _ = (path, name);
-            return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
-        }
-        #[cfg(unix)]
-        {
-            let cipher_path = self.fs.plain_path_to_cipher(path.into()).or_invalid()?;
-            let cipher_name = self.fs.plain_xattr_name_to_cipher(name).or_invalid()?;
-
-            xattr::remove(cipher_path, cipher_name)
-        }
+        self.fs.remove_xattr(path, name)
     }
     fn set_xattr(&self, path: &str, name: &str, value: &[u8]) -> std::io::Result<()> {
-        #[cfg(not(unix))]
-        {
-            let _ = (path, name, value);
-            return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
-        }
-        #[cfg(unix)]
-        {
-            let cipher_path = self.fs.plain_path_to_cipher(path.into()).or_invalid()?;
-            let cipher_name = self.fs.plain_xattr_name_to_cipher(name).or_invalid()?;
-            let cipher_xattr_value = self.fs.plain_xattr_value_to_cipher(value).or_invalid()?;
-            xattr::set(cipher_path, cipher_name, &cipher_xattr_value)
-        }
+        self.fs.set_xattr(path, name, value)
     }
 }

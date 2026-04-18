@@ -106,9 +106,11 @@ impl EncryptionLayout for CryptoMator<FsBackend> {
     fn list_dir_plain_names(
         &self,
         plain_path: &Utf8Path,
-    ) -> Result<impl Iterator<Item = Result<(FsDirEntry, Utf8PathBuf)>> + '_ + use<'_>> {
+    ) -> std::io::Result<impl Iterator<Item = Result<(FsDirEntry, Utf8PathBuf)>> + '_ + use<'_>>
+    {
         // Directory listings come from the storage directory identified by the folder dir id.
-        let (cipher_path, dir_id) = folder_path_to_cipher_and_dirid(self, plain_path)?;
+        let (cipher_path, dir_id) =
+            folder_path_to_cipher_and_dirid(self, plain_path).or_invalid()?;
         // let plain_path: Utf8PathBuf = plain_path.into();
         // let cipher_path = self.plain_path_to_cipher(&plain_path)?;
         // let dir_id = if plain_path == "" {
