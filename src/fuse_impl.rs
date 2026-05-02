@@ -1,26 +1,37 @@
 use crate::core::{
-    ErrorMapper, FileSystem, FileSystemHandler, FileType, GenericOpenOptions, IoErrorToLib,
-    Metadata, OpenCache, ReadOnlyFileSystem,
+    FileSystem, FileSystemHandler, FileType, GenericOpenOptions, Metadata, OpenCache, OrIoError,
+    ReadOnlyFileSystem,
 };
-use fuse_mt::{FileAttr, FilesystemMT};
+use fuser_ng::{EntryName, FileAttr, Filesystem, RequestInfo, ResolvedPath};
 use log::debug;
 use std::{ffi::OsString, io::Write, path::Path, time::Duration};
 
-impl TryFrom<FileType> for fuse_mt::FileType {
-    type Error = i32;
-    fn try_from(value: FileType) -> Result<Self, i32> {
+macro_rules! sanitize {
+    ($p:ident) => {
+        let $p = $p.full_path();
+        let $p = $p.sanitize()?;
+    };
+    ($p:ident, $sp:ident) => {
+        let $sp = $p.full_path();
+        let $sp = $sp.sanitize()?;
+    };
+}
+
+impl TryFrom<FileType> for fuser_ng::FileType {
+    type Error = std::io::Error;
+    fn try_from(value: FileType) -> std::io::Result<Self> {
         match value {
-            FileType::File => Ok(fuse_mt::FileType::RegularFile),
-            FileType::Directory => Ok(fuse_mt::FileType::Directory),
-            FileType::SymLink => Ok(fuse_mt::FileType::Symlink),
-            _ => Err(libc::ENOENT),
+            FileType::File => Ok(fuser_ng::FileType::RegularFile),
+            FileType::Directory => Ok(fuser_ng::FileType::Directory),
+            FileType::SymLink => Ok(fuser_ng::FileType::Symlink),
+            _ => Err(std::io::Error::from_raw_os_error(libc::ENOENT)),
         }
     }
 }
 
-impl TryFrom<Metadata> for fuse_mt::FileAttr {
-    type Error = i32;
-    fn try_from(value: Metadata) -> Result<Self, i32> {
+impl TryFrom<Metadata> for fuser_ng::FileAttr {
+    type Error = std::io::Error;
+    fn try_from(value: Metadata) -> std::io::Result<Self> {
         Ok(Self {
             size: value.len,
             // Report allocation with the crypto block granularity used internally.
@@ -34,6 +45,7 @@ impl TryFrom<Metadata> for fuse_mt::FileAttr {
             nlink: 1,
             uid: value.uid.unwrap_or_default(),
             gid: value.gid.unwrap_or_default(),
+            blksize: 4096,
             rdev: 0,
             flags: 0,
         })
@@ -84,12 +96,10 @@ impl HasFlag for u32 {
 fn open<T: FileSystem + ?Sized, C: OpenCache>(
     backend: &T,
     cache: &C,
-    path: &Path,
+    path: &str,
     flags: u32,
     mode: Option<u32>,
-) -> Result<u64, libc::c_int> {
-    let path = path.sanitize()?;
-
+) -> std::io::Result<u64> {
     let create_new = flags.has(libc::O_EXCL);
     let create = flags.has(libc::O_CREAT);
     let truncate = flags.has(libc::O_TRUNC);
@@ -112,19 +122,19 @@ fn open<T: FileSystem + ?Sized, C: OpenCache>(
     debug!("open options are {:?}", &options);
 
     let file = if options.is_readonly() {
-        backend.open_readonly(path).libc_err()?
+        backend.open_readonly(path)?
     } else {
-        backend.open_file_with(path, options).libc_err()?
+        backend.open_file_with(path, options)?
     };
     Ok(cache.insert(file))
 }
 
-impl<C: OpenCache + 'static> FilesystemMT for FileSystemHandler<C> {
+impl<C: OpenCache + 'static> Filesystem for FileSystemHandler<C> {
     fn init(
         &self,
-        req: fuse_mt::RequestInfo,
-        //config: &mut fuse_mt::KernelConfig,
-    ) -> fuse_mt::ResultEmpty {
+        req: RequestInfo,
+        _config: &mut fuser_ng::KernelConfig,
+    ) -> fuser_ng::ResultEmpty {
         debug!(
             "trying to init! unique {} uid {} gid {} pid {}",
             req.unique, req.uid, req.gid, req.pid
@@ -135,21 +145,21 @@ impl<C: OpenCache + 'static> FilesystemMT for FileSystemHandler<C> {
         } else {
             println!("Filesystem mounted and ready.");
         }
-        // let _ = config.add_capabilities(fuse_mt::consts::FUSE_WRITEBACK_CACHE);
+        // let _ = config.add_capabilities(fuser_ng::consts::FUSE_WRITEBACK_CACHE);
 
         Ok(())
     }
-    fn opendir(&self, _req: fuse_mt::RequestInfo, path: &Path, flags: u32) -> fuse_mt::ResultOpen {
+    fn opendir(&self, _req: RequestInfo, path: &ResolvedPath, flags: u32) -> fuser_ng::ResultOpen {
         debug!("opendir on path {:?} with flags {flags}", path);
         Ok((0, 0))
     }
     fn releasedir(
         &self,
-        _req: fuse_mt::RequestInfo,
-        path: &Path,
+        _req: RequestInfo,
+        path: &ResolvedPath,
         fh: u64,
         flags: u32,
-    ) -> fuse_mt::ResultEmpty {
+    ) -> fuser_ng::ResultEmpty {
         debug!(
             "releasedir on path {:?} with fh {fh} and flags {flags}",
             path
@@ -158,76 +168,47 @@ impl<C: OpenCache + 'static> FilesystemMT for FileSystemHandler<C> {
     }
     fn mknod(
         &self,
-        _req: fuse_mt::RequestInfo,
-        parent: &Path,
-        name: &std::ffi::OsStr,
+        _req: RequestInfo,
+        path: &EntryName,
         mode: u32,
         _rdev: u32,
-    ) -> fuse_mt::ResultEntry {
-        let path = parent.join(name);
+    ) -> fuser_ng::ResultEntry {
         debug!("mknod on {:?}", path);
-        let path = path.sanitize()?;
-        Ok((
-            TTL,
-            self.as_ref()
-                .mknode(path, mode.into())
-                .libc_err()?
-                .try_into()?,
-        ))
+        sanitize!(path);
+        Ok((TTL, self.as_ref().mknode(path, mode.into())?.try_into()?))
     }
-    fn mkdir(
-        &self,
-        _req: fuse_mt::RequestInfo,
-        parent: &Path,
-        name: &std::ffi::OsStr,
-        mode: u32,
-    ) -> fuse_mt::ResultEntry {
-        let path = parent.join(name);
+    fn mkdir(&self, _req: RequestInfo, path: &EntryName, mode: u32) -> fuser_ng::ResultEntry {
         debug!("mkdir on {:?}", path);
-        let path = path.sanitize()?;
-        Ok((
-            TTL,
-            self.as_ref()
-                .mkdir(path, mode.into())
-                .libc_err()?
-                .try_into()?,
-        ))
+        sanitize!(path);
+        Ok((TTL, self.as_ref().mkdir(path, mode.into())?.try_into()?))
     }
     fn rename(
         &self,
-        _req: fuse_mt::RequestInfo,
-        parent: &Path,
-        name: &std::ffi::OsStr,
-        newparent: &Path,
-        newname: &std::ffi::OsStr,
-    ) -> fuse_mt::ResultEmpty {
-        debug!(
-            "rename on path {:?} {:?} {:?} {:?}",
-            parent, name, newparent, newname
-        );
-        let path = parent.join(name);
-        let path = path.sanitize()?;
-        let new_path = newparent.join(newname);
-        let new_path = new_path.sanitize()?;
-        self.as_ref().rename(path, new_path).libc_err()
+        _req: RequestInfo,
+        path: &EntryName,
+        new_path: &EntryName,
+    ) -> fuser_ng::ResultEmpty {
+        debug!("rename on path {:?} to {:?} ", path, new_path);
+        sanitize!(path);
+        sanitize!(new_path);
+        self.as_ref().rename(path, new_path)
     }
     fn create(
         &self,
-        req: fuse_mt::RequestInfo,
-        parent: &Path,
-        name: &std::ffi::OsStr,
+        req: RequestInfo,
+        path: &EntryName,
         mode: u32,
         flags: u32,
-    ) -> fuse_mt::ResultCreate {
-        let path = parent.join(name);
+    ) -> fuser_ng::ResultCreate {
         debug!("create on path {:?} with flags {flags}", path);
-        let fh = open(self.as_ref(), self.as_cache(), &path, flags, Some(mode))?;
+        sanitize!(path, spath);
+        let fh = open(self.as_ref(), self.as_cache(), spath, flags, Some(mode))?;
         debug!("got fh {fh}");
-        let attr = self.getattr(req, &path, None)?.1;
+        let attr = self.getattr(req, path, None)?.1;
 
         debug!("got create attr {:?}", attr);
 
-        Ok(fuse_mt::CreatedEntry {
+        Ok(fuser_ng::CreatedEntry {
             ttl: TTL,
             attr,
             fh,
@@ -236,145 +217,120 @@ impl<C: OpenCache + 'static> FilesystemMT for FileSystemHandler<C> {
     }
     fn chmod(
         &self,
-        _req: fuse_mt::RequestInfo,
-        path: &Path,
+        _req: RequestInfo,
+        path: &ResolvedPath,
         _fh: Option<u64>,
         mode: u32,
-    ) -> fuse_mt::ResultEmpty {
+    ) -> fuser_ng::ResultEmpty {
         debug!("chmod on {:?} {:0o}", path, mode);
-        let path = path.sanitize()?;
-        self.as_ref()
-            .set_permissions(path, mode.into())
-            .libc_err()
-            .map(|_| {})
+        sanitize!(path);
+        self.as_ref().set_permissions(path, mode.into()).map(|_| {})
     }
-    fn symlink(
-        &self,
-        req: fuse_mt::RequestInfo,
-        parent: &Path,
-        name: &std::ffi::OsStr,
-        target: &Path,
-    ) -> fuse_mt::ResultEntry {
-        let path = parent.join(name);
+    fn symlink(&self, req: RequestInfo, path: &EntryName, target: &Path) -> fuser_ng::ResultEntry {
         debug!("symlink on path {:?} with target {:?}", path, target);
-        let path = path.sanitize()?;
+        sanitize!(path);
+
         let mut attr: FileAttr = self
             .as_ref()
-            .create_symlink(path, target.to_str().or_libc_invalid()?)
-            .libc_err()?
+            .create_symlink(path, target.to_str().or_invalid()?)?
             .try_into()?;
         attr.gid = req.gid;
         attr.uid = req.uid;
         Ok((TTL, attr))
     }
-    fn readlink(&self, _req: fuse_mt::RequestInfo, path: &Path) -> fuse_mt::ResultData {
+    fn readlink(&self, _req: RequestInfo, path: &ResolvedPath) -> fuser_ng::ResultData {
         debug!("readlink on path {:?}", path);
-        let path = path.sanitize()?;
-        self.as_ref()
-            .read_symlink(path)
-            .map(|s| s.into())
-            .libc_err()
+        sanitize!(path);
+        self.as_ref().read_symlink(path).map(|s| s.into())
     }
     fn chown(
         &self,
-        _req: fuse_mt::RequestInfo,
-        path: &Path,
+        _req: RequestInfo,
+        path: &ResolvedPath,
         fh: Option<u64>,
         uid: Option<u32>,
         gid: Option<u32>,
-    ) -> fuse_mt::ResultEmpty {
+    ) -> fuser_ng::ResultEmpty {
         debug!("chown on {:?} {:?} {:?} {:?}", path, fh, uid, gid);
-        let path = path.sanitize()?;
-        self.as_ref().chown(path, uid, gid).libc_err()?;
+        sanitize!(path);
+        self.as_ref().chown(path, uid, gid)?;
         Ok(())
     }
     fn utimens(
         &self,
-        _req: fuse_mt::RequestInfo,
-        path: &Path,
+        _req: RequestInfo,
+        path: &ResolvedPath,
         fh: Option<u64>,
         atime: Option<std::time::SystemTime>,
         mtime: Option<std::time::SystemTime>,
-    ) -> fuse_mt::ResultEmpty {
+    ) -> fuser_ng::ResultEmpty {
         log::debug!("utimens on {:?} {:?} {:?} {:?}", path, fh, atime, mtime);
-        let path = path.sanitize()?;
+        sanitize!(path);
         if atime.is_none() && mtime.is_none() {
             log::error!("error in utimens on {:?} {:?} {:?}", path, atime, mtime);
-            Err(libc::EINVAL)?
+            return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
         }
         //if let Some(fh) = fh {
         //log::error!("flushing file {fh} before utimens");
         //self.as_cache().access(fh, |file| file.flush()).libc_err()?;
         //}
-        self.as_ref().set_time(path, atime, mtime).libc_err()
+        self.as_ref().set_time(path, atime, mtime)
     }
 
-    fn open(&self, _req: fuse_mt::RequestInfo, path: &Path, flags: u32) -> fuse_mt::ResultOpen {
+    fn open(&self, _req: RequestInfo, path: &ResolvedPath, flags: u32) -> fuser_ng::ResultOpen {
         debug!("open on path {:?} with flags {flags}", path);
         if flags.has(libc::O_DIRECT) {
             log::error!("open on path {:?} with flags {flags}", path);
         }
-        let fh = open(self.as_ref(), self.as_cache(), path, flags, None)?;
+        sanitize!(path, spath);
+        let fh = open(self.as_ref(), self.as_cache(), spath, flags, None)?;
         Ok((fh, 0))
     }
     fn read(
         &self,
-        _req: fuse_mt::RequestInfo,
-        path: &Path,
+        _req: RequestInfo,
+        path: &ResolvedPath,
         fh: u64,
         offset: u64,
         size: u32,
-        callback: impl FnOnce(fuse_mt::ResultSlice<'_>) -> fuse_mt::CallbackResult,
-    ) -> fuse_mt::CallbackResult {
+        callback: impl FnOnce(fuser_ng::ResultSlice<'_>) -> fuser_ng::CallbackResult,
+    ) -> fuser_ng::CallbackResult {
         read(self.as_cache(), path, fh, offset, size, callback)
     }
     fn write(
         &self,
-        _req: fuse_mt::RequestInfo,
-        _path: &Path,
+        _req: RequestInfo,
+        _path: &ResolvedPath,
         fh: u64,
         offset: u64,
         data: Vec<u8>,
         _flags: u32,
-    ) -> fuse_mt::ResultWrite {
+    ) -> fuser_ng::ResultWrite {
         //log::error!("writing to {:?} at {offset} len {}", _path, data.len());
         self.as_cache()
             .access(fh, |file| {
                 file.write_all_at(offset, &data).map(|_| data.len() as u32)
             })
-            .libc_err()
     }
-    fn rmdir(
-        &self,
-        _req: fuse_mt::RequestInfo,
-        parent: &Path,
-        name: &std::ffi::OsStr,
-    ) -> fuse_mt::ResultEmpty {
-        let path = parent.join(name);
+    fn rmdir(&self, _req: RequestInfo, path: &EntryName) -> fuser_ng::ResultEmpty {
         debug!("rmdir on {:?}", path);
-        let path = path.sanitize()?;
-        self.as_ref().remove_dir(path).libc_err()
+        sanitize!(path);
+        self.as_ref().remove_dir(path)
     }
-    fn unlink(
-        &self,
-        _req: fuse_mt::RequestInfo,
-        parent: &Path,
-        name: &std::ffi::OsStr,
-    ) -> fuse_mt::ResultEmpty {
-        let path = parent.join(name);
+    fn unlink(&self, _req: RequestInfo, path: &EntryName) -> fuser_ng::ResultEmpty {
         debug!("unlink on {:?}", path);
-        let path = path.sanitize()?;
-        self.as_ref().remove(path).libc_err()
+        sanitize!(path);
+        self.as_ref().remove(path)
     }
     fn release(
         &self,
-        _req: fuse_mt::RequestInfo,
-        path: &Path,
+        _req: RequestInfo,
+        path: &ResolvedPath,
         fh: u64,
         flags: u32,
         lock_owner: u64,
         flush: bool,
-    ) -> fuse_mt::ResultEmpty {
+    ) -> fuser_ng::ResultEmpty {
         log::debug!(
             "release on path {:?} with fh {fh} flags {flags} lock_owner {lock_owner} flush {flush}",
             path
@@ -383,166 +339,157 @@ impl<C: OpenCache + 'static> FilesystemMT for FileSystemHandler<C> {
             let _ = self.as_cache().access(fh, |f| f.flush());
         }
 
-        self.as_cache().release(fh).libc_err()?;
+        self.as_cache().release(fh)?;
 
         Ok(())
     }
     fn fsync(
         &self,
-        _req: fuse_mt::RequestInfo,
-        path: &Path,
+        _req: RequestInfo,
+        path: &ResolvedPath,
         fh: u64,
         datasync: bool,
-    ) -> fuse_mt::ResultEmpty {
+    ) -> fuser_ng::ResultEmpty {
         log::debug!("sync on path {:?} with fh {fh} datasync {datasync}", path);
 
         self.as_cache()
             .access(fh, |file| file.sync(datasync))
-            .libc_err()
     }
     fn flush(
         &self,
-        _req: fuse_mt::RequestInfo,
-        path: &Path,
+        _req: RequestInfo,
+        path: &ResolvedPath,
         fh: u64,
         _lock_owner: u64,
-    ) -> fuse_mt::ResultEmpty {
+    ) -> fuser_ng::ResultEmpty {
         log::debug!("flush on path {:?} with fh {fh}", path);
         let _ = self.as_cache().access(fh, |file| file.flush());
         Ok(())
     }
     fn truncate(
         &self,
-        _req: fuse_mt::RequestInfo,
-        path: &Path,
+        _req: RequestInfo,
+        path: &ResolvedPath,
         fh: Option<u64>,
         size: u64,
-    ) -> fuse_mt::ResultEmpty {
+    ) -> fuser_ng::ResultEmpty {
         log::debug!("truncate on path {:?} with fh {:?} size {size}", path, fh);
         if let Some(fh) = fh {
             self.as_cache()
                 .access(fh, |file| file.set_len(size))
-                .libc_err()
         } else {
-            self.as_ref().truncate(path.sanitize()?, size).libc_err()
+            sanitize!(path);
+            self.as_ref().truncate(path, size)
         }
     }
     fn getxattr(
         &self,
-        _req: fuse_mt::RequestInfo,
-        path: &Path,
+        _req: RequestInfo,
+        path: &ResolvedPath,
         name: &std::ffi::OsStr,
         size: u32,
-    ) -> fuse_mt::ResultXattr {
+    ) -> fuser_ng::ResultXattr {
         debug!("getxattr on path {:?} name: {:?} size: {size}", path, name);
-        let path = path.sanitize()?;
+        sanitize!(path);
         let value = self
             .as_ref()
-            .get_xattr(path, name.to_str().or_libc_invalid()?)
-            .libc_err();
+            .get_xattr(path, name.to_str().or_invalid()?);
         if size == 0 {
-            value.map(|s| fuse_mt::Xattr::Size(s.len() as u32))
+            value.map(|s| fuser_ng::Xattr::Size(s.len() as u32))
         } else {
-            value.map(fuse_mt::Xattr::Data)
+            value.map(fuser_ng::Xattr::Data)
         }
     }
     fn listxattr(
         &self,
-        _req: fuse_mt::RequestInfo,
-        path: &Path,
+        _req: RequestInfo,
+        path: &ResolvedPath,
         size: u32,
-    ) -> fuse_mt::ResultXattr {
+    ) -> fuser_ng::ResultXattr {
         debug!("listxattr on path {:?} size: {size}", path);
-        let path = path.sanitize()?;
+        sanitize!(path);
         let mut names = vec![];
-        for name in self.as_ref().list_xattr(path).libc_err()? {
+        for name in self.as_ref().list_xattr(path)? {
             names.extend_from_slice(name.as_bytes());
             names.push(0);
         }
         if size == 0 {
-            Ok(fuse_mt::Xattr::Size(names.len() as u32))
+            Ok(fuser_ng::Xattr::Size(names.len() as u32))
         } else {
-            Ok(fuse_mt::Xattr::Data(names))
+            Ok(fuser_ng::Xattr::Data(names))
         }
     }
     fn removexattr(
         &self,
-        _req: fuse_mt::RequestInfo,
-        path: &Path,
+        _req: RequestInfo,
+        path: &ResolvedPath,
         name: &std::ffi::OsStr,
-    ) -> fuse_mt::ResultEmpty {
+    ) -> fuser_ng::ResultEmpty {
         debug!("remove xattr on path {:?} name: {:?}", path, name);
-        let path = path.sanitize()?;
+        sanitize!(path);
         self.as_ref()
-            .remove_xattr(path, name.to_str().or_libc_invalid()?)
-            .libc_err()
+            .remove_xattr(path, name.to_str().or_invalid()?)
     }
     fn setxattr(
         &self,
-        _req: fuse_mt::RequestInfo,
-        path: &Path,
+        _req: RequestInfo,
+        path: &ResolvedPath,
         name: &std::ffi::OsStr,
         value: &[u8],
         _flags: u32,
         _position: u32,
-    ) -> fuse_mt::ResultEmpty {
+    ) -> fuser_ng::ResultEmpty {
         debug!(
             "setxattr on path {:?} name: {:?} value: {}",
             path,
             name,
             String::from_utf8_lossy(value)
         );
-        let path = path.sanitize()?;
+        sanitize!(path);
         self.as_ref()
-            .set_xattr(path, name.to_str().or_libc_invalid()?, value)
-            .libc_err()
+            .set_xattr(path, name.to_str().or_invalid()?, value)
     }
 
-    fn readdir(&self, _req: fuse_mt::RequestInfo, path: &Path, _fh: u64) -> fuse_mt::ResultReaddir {
+    fn readdir(&self, _req: RequestInfo, path: &ResolvedPath, _fh: u64) -> fuser_ng::ResultReaddir {
         readdir(self, path)
     }
-    fn getattr(
-        &self,
-        req: fuse_mt::RequestInfo,
-        path: &Path,
-        _fh: Option<u64>,
-    ) -> fuse_mt::ResultEntry {
+    fn getattr(&self, req: RequestInfo, path: &EntryName, _fh: Option<u64>) -> fuser_ng::ResultEntry {
         getattr(self, req, path)
     }
-    fn access(&self, req: fuse_mt::RequestInfo, path: &Path, mask: u32) -> fuse_mt::ResultEmpty {
+    fn access(&self, req: RequestInfo, path: &ResolvedPath, mask: u32) -> fuser_ng::ResultEmpty {
         access(self, req, path, mask)
     }
 }
 
 fn readdir<T: ReadOnlyFileSystem + ?Sized>(
     fs: impl AsRef<T>,
-    path: &Path,
-) -> fuse_mt::ResultReaddir {
+    path: &ResolvedPath,
+) -> fuser_ng::ResultReaddir {
     debug!("readdir on path {:?}", path);
-    let path = path.sanitize()?;
+    sanitize!(path);
 
     let common_paths = [
-        fuse_mt::DirectoryEntry {
+        fuser_ng::DirectoryEntry {
             name: ".".into(),
-            kind: fuse_mt::FileType::Directory,
+            kind: fuser_ng::FileType::Directory,
         },
-        fuse_mt::DirectoryEntry {
+        fuser_ng::DirectoryEntry {
             name: "..".into(),
-            kind: fuse_mt::FileType::Directory,
+            kind: fuser_ng::FileType::Directory,
         },
     ];
 
     let result = common_paths
         .into_iter()
-        .chain(fs.as_ref().read_dir(path).libc_err()?.filter_map(|entry| {
+        .chain(fs.as_ref().read_dir(path)?.filter_map(|entry| {
             let name: OsString = entry.file_name.into();
             let kind = match entry.file_type? {
-                FileType::File => Some(fuse_mt::FileType::RegularFile),
-                FileType::Directory => Some(fuse_mt::FileType::Directory),
-                FileType::SymLink => Some(fuse_mt::FileType::Symlink),
+                FileType::File => Some(fuser_ng::FileType::RegularFile),
+                FileType::Directory => Some(fuser_ng::FileType::Directory),
+                FileType::SymLink => Some(fuser_ng::FileType::Symlink),
                 _ => None, // ignore anything that isnt a regular file or a directory
             };
-            Some(fuse_mt::DirectoryEntry { name, kind: kind? })
+            Some(fuser_ng::DirectoryEntry { name, kind: kind? })
         }))
         .collect();
     debug!("readdir ok for path {:?}", path);
@@ -551,15 +498,14 @@ fn readdir<T: ReadOnlyFileSystem + ?Sized>(
 
 fn getattr<T: ReadOnlyFileSystem + ?Sized>(
     fs: impl AsRef<T>,
-    _req: fuse_mt::RequestInfo,
-    path: &Path,
-) -> fuse_mt::ResultEntry {
+    _req: RequestInfo,
+    path: &EntryName,
+) -> fuser_ng::ResultEntry {
     debug!("gettatr on path {:?}", path);
-    let path = path.sanitize()?;
+    sanitize!(path);
     let attr: (_, FileAttr) = fs
         .as_ref()
         .metadata(path)
-        .libc_err()
         .inspect(|m| {
             debug!("metadata ok for path {:?} {m}", path);
         })
@@ -577,13 +523,13 @@ fn check_access(
     file_gid: Option<u32>,
     mode: u16,
     mask: u32,
-) -> Result<(), i32> {
+) -> std::io::Result<()> {
     if mask == libc::F_OK as u32 {
         return Ok(());
     }
     if req_uid == 0 {
         if mask & libc::X_OK as u32 != 0 && mode & 0o111 == 0 {
-            return Err(libc::EACCES);
+            return Err(std::io::Error::from_raw_os_error(libc::EACCES));
         }
         return Ok(());
     }
@@ -596,13 +542,13 @@ fn check_access(
     };
 
     if mask & libc::R_OK as u32 != 0 && perm_bits & 0o4 == 0 {
-        return Err(libc::EACCES);
+        return Err(std::io::Error::from_raw_os_error(libc::EACCES));
     }
     if mask & libc::W_OK as u32 != 0 && perm_bits & 0o2 == 0 {
-        return Err(libc::EACCES);
+        return Err(std::io::Error::from_raw_os_error(libc::EACCES));
     }
     if mask & libc::X_OK as u32 != 0 && perm_bits & 0o1 == 0 {
-        return Err(libc::EACCES);
+        return Err(std::io::Error::from_raw_os_error(libc::EACCES));
     }
 
     Ok(())
@@ -610,13 +556,13 @@ fn check_access(
 
 fn access<T: ReadOnlyFileSystem + ?Sized>(
     fs: impl AsRef<T>,
-    req: fuse_mt::RequestInfo,
-    path: &Path,
+    req: RequestInfo,
+    path: &ResolvedPath,
     mask: u32,
-) -> fuse_mt::ResultEmpty {
+) -> fuser_ng::ResultEmpty {
     debug!("access on {:?} with mask {mask}", path);
-    let path = path.sanitize()?;
-    let metadata = fs.as_ref().metadata(path).libc_err()?;
+    sanitize!(path);
+    let metadata = fs.as_ref().metadata(path)?;
     check_access(
         req.uid,
         req.gid,
@@ -630,12 +576,12 @@ fn access<T: ReadOnlyFileSystem + ?Sized>(
 
 fn read<C: OpenCache + 'static>(
     cache: &C,
-    path: &Path,
+    path: &ResolvedPath,
     fh: u64,
     offset: u64,
     size: u32,
-    callback: impl FnOnce(fuse_mt::ResultSlice<'_>) -> fuse_mt::CallbackResult,
-) -> fuse_mt::CallbackResult {
+    callback: impl FnOnce(fuser_ng::ResultSlice<'_>) -> fuser_ng::CallbackResult,
+) -> fuser_ng::CallbackResult {
     debug!(
         "read on path {:?} with fh {fh} at offset {offset} for size {size}",
         path
@@ -648,19 +594,16 @@ fn read<C: OpenCache + 'static>(
         callback(Ok(&buffer[0..bytes_read]))
     } else {
         debug!("read ko!");
-        callback(Err(libc::EBADFD))
+        callback(Err(std::io::Error::from_raw_os_error(libc::EBADFD)))
     }
 }
 
 trait Sanitize {
-    fn sanitize(&self) -> Result<&str, i32>;
+    fn sanitize(&self) -> std::io::Result<&str>;
 }
 
 impl Sanitize for Path {
-    fn sanitize(&self) -> Result<&str, i32> {
-        self.strip_prefix("/")
-            .or_libc_invalid()?
-            .to_str()
-            .or_libc_invalid()
+    fn sanitize(&self) -> std::io::Result<&str> {
+        self.strip_prefix("/").or_invalid()?.to_str().or_invalid()
     }
 }

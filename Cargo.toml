@@ -40,7 +40,7 @@ linkme = "0.3.35"
 paste = "1.0.15"
 
 [target.'cfg(unix)'.dependencies]
-fuse_mt = "0.6.2"
+fuser-ng = "0.7"
 xattr = "1.6.1"
 
 [target.'cfg(windows)'.dependencies]

@@ -9,8 +9,6 @@ use rcryptfs::core::{
     is_dir_empty,
 };
 use rcryptfs::{is_background_child, platform, respawn_in_background};
-#[cfg(unix)]
-use std::ffi::OsStr;
 use std::io::{IsTerminal, Write};
 
 mod cli;
@@ -261,21 +259,26 @@ fn run_mount(mount_args: &MountArgs, is_background_child: bool) -> Result<()> {
             .num_threads
             .as_ref()
             .and_then(|v| parse_number_of_threads(v))
-            .unwrap_or_default(); // default is 0
+            .filter(|v| *v > 0)
+            .map(fuser_ng::ThreadCount::from)
+            .unwrap_or_default();
 
-        log::debug!("num threads is {num_threads}");
-        let mut fuse_args = Vec::with_capacity(mount_args.fuse_opts.len() * 2 + 2);
-        fuse_args.push(OsStr::new("-o"));
-        fuse_args.push(OsStr::new("fsname=rcryptfs"));
-        for o in &mount_args.fuse_opts {
-            fuse_args.push(OsStr::new("-o"));
-            fuse_args.push(OsStr::new(o));
-        }
+        log::debug!("num threads is {num_threads:?}");
+        let mut fuse_args = Vec::with_capacity(mount_args.fuse_opts.len() + 1);
+        fuse_args.push(fuser_ng::MountOption::FSName("rcryptfs".into()));
+        fuse_args.extend(
+            mount_args
+                .fuse_opts
+                .iter()
+                .cloned()
+                .map(fuser_ng::MountOption::CUSTOM),
+        );
 
-        fuse_mt::mount(
-            fuse_mt::FuseMT::new(handler, num_threads),
+        fuser_ng::mount(
+            fuser_ng::FuserNG::new(handler),
             &mount_args.mount_point,
             &fuse_args,
+            num_threads,
         )?;
     }
     Ok(())

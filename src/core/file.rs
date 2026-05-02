@@ -6,6 +6,16 @@ use log::{debug, error};
 use parking_lot::RwLock;
 use std::{fs::OpenOptions, sync::Arc};
 
+enum LenChange {
+    BeforeWrite,
+    Resize,
+}
+
+struct PlainEnd {
+    block_no: u64,
+    offset: usize,
+}
+
 /// Wraps a cipher file and exposes plain-text block I/O.
 pub struct CryptFsFile<T: EncryptionTranslator> {
     backend: Arc<T>,
@@ -135,96 +145,114 @@ impl<T: EncryptionTranslator> CryptFsFile<T> {
         Ok(plain_data.len())
     }
 
-    /// Re-encodes the boundary block when a resize changes authenticated block contents.
-    fn re_encode_last_block(
+    fn plain_end(len: u64) -> Option<PlainEnd> {
+        if len == 0 {
+            return None;
+        }
+
+        let mut offset = (len % T::PLAIN_BLOCK_LEN) as usize;
+        if offset == 0 {
+            offset = T::PLAIN_BLOCK_LEN as usize;
+        }
+
+        Some(PlainEnd {
+            block_no: (len - 1) / T::PLAIN_BLOCK_LEN,
+            offset,
+        })
+    }
+
+    fn write_zero_blocks(
+        &self,
+        header: &[u8],
+        start_block: u64,
+        end: PlainEnd,
+    ) -> std::io::Result<()> {
+        let zero_block = vec![0; T::PLAIN_BLOCK_LEN as usize];
+        for block_no in start_block..end.block_no {
+            self.write_block(block_no, header, &zero_block)?;
+        }
+
+        if end.offset == T::PLAIN_BLOCK_LEN as usize {
+            self.write_block(end.block_no, header, &zero_block)?;
+        } else {
+            self.write_block(end.block_no, header, &zero_block[..end.offset])?;
+        }
+
+        Ok(())
+    }
+
+    fn zero_fill_block(
+        &self,
+        block_no: u64,
+        header: &[u8],
+        target_len: usize,
+    ) -> std::io::Result<()> {
+        let mut read_buffer = vec![0; T::PLAIN_BLOCK_LEN as usize];
+        let bytes_read = self.read_block(block_no, header, &mut read_buffer)?;
+        if target_len > bytes_read {
+            read_buffer[bytes_read..target_len].fill(0);
+        }
+        self.write_block(block_no, header, &read_buffer[..target_len])?;
+        Ok(())
+    }
+
+    fn prepare_extension(
         &self,
         current_plain_len: u64,
         target_plain_len: u64,
         header: &[u8],
-        set_len: bool,
+        change: LenChange,
     ) -> std::io::Result<()> {
-        // When extending the file:
-        // - Pad the current last plaintext block with zeros and re-encrypt it.
-        // - Extend beyond with zero blocks (no encryption needed: OS sparse set_len).
-        //
-        // When truncating:
-        // - Truncate the new last plaintext block and re-encrypt it (updates the auth tag).
-        // - If new length is exact block multiple (new_offset % BLOCK_LEN == 0), no re-encrypt: just truncate cipher file.
-        if target_plain_len == 0 || current_plain_len == target_plain_len {
-            // no re-encoding needed.
-            return Ok(());
-        }
+        let target_end = Self::plain_end(target_plain_len).or_io_error(libc::EINVAL)?;
 
-        let mut target_end_offset = (target_plain_len % T::PLAIN_BLOCK_LEN) as usize;
-        if target_end_offset == 0 {
-            target_end_offset = T::PLAIN_BLOCK_LEN as usize;
-        }
-
-        if current_plain_len == 0 {
-            if !T::ENCRYPT_SPARSE_PARTS {
+        if let Some(current_end) = Self::plain_end(current_plain_len) {
+            if matches!(change, LenChange::BeforeWrite)
+                && current_end.block_no == target_end.block_no
+                && target_end.offset != T::PLAIN_BLOCK_LEN as usize
+            {
                 return Ok(());
             }
 
-            let target_block = (target_plain_len - 1) / T::PLAIN_BLOCK_LEN;
-            let zero_block = vec![0; T::PLAIN_BLOCK_LEN as usize];
-
-            for block_no in 0..target_block {
-                self.write_block(block_no, header, &zero_block)?;
+            if current_end.offset != T::PLAIN_BLOCK_LEN as usize {
+                self.zero_fill_block(current_end.block_no, header, T::PLAIN_BLOCK_LEN as usize)?;
             }
-            self.write_block(target_block, header, &zero_block[..target_end_offset])?;
+
+            if T::ENCRYPT_SPARSE_PARTS && target_end.block_no > current_end.block_no {
+                self.write_zero_blocks(header, current_end.block_no + 1, target_end)?;
+            }
 
             return Ok(());
         }
 
-        let current_end_offset = (current_plain_len % T::PLAIN_BLOCK_LEN) as usize;
-        if current_end_offset == 0 && target_plain_len < current_plain_len {
-            // no re-encoding needed.
-            return Ok(());
-        }
-
-        let last_block = (current_plain_len.min(target_plain_len) - 1) / T::PLAIN_BLOCK_LEN;
-        let target_block = (target_plain_len - 1) / T::PLAIN_BLOCK_LEN;
-
-        if !set_len && last_block == target_block {
-            return Ok(());
-        }
-
-        if target_end_offset == T::PLAIN_BLOCK_LEN as usize && target_plain_len > current_plain_len
-        {
-            if T::ENCRYPT_SPARSE_PARTS && target_block > last_block {
-                let read_buffer = vec![0; T::PLAIN_BLOCK_LEN as usize];
-                for block_no in last_block + 1..=target_block {
-                    self.write_block(block_no, header, &read_buffer)?;
-                }
-            }
-            return Ok(());
-        }
-
-        let mut read_buffer = vec![0; T::PLAIN_BLOCK_LEN as usize];
-        let bytes_read = self.read_block(last_block, header, &mut read_buffer)?;
-
-        log::debug!(
-            "re-encoding last block {last_block} bytes_read {bytes_read} current_len {current_plain_len} target_len {target_plain_len}"
-        );
-
-        if target_block > last_block {
-            read_buffer[bytes_read..].fill(0);
-            self.write_block(last_block, header, &read_buffer)?;
-            if T::ENCRYPT_SPARSE_PARTS {
-                read_buffer.fill(0);
-                for block_no in last_block + 1..target_block {
-                    self.write_block(block_no, header, &read_buffer)?;
-                }
-                self.write_block(target_block, header, &read_buffer[..target_end_offset])?;
-            }
-        } else {
-            // target_block == last_block
-            if target_end_offset > bytes_read {
-                read_buffer[bytes_read..target_end_offset].fill(0);
-            }
-            self.write_block(last_block, header, &read_buffer[..target_end_offset])?;
+        if T::ENCRYPT_SPARSE_PARTS {
+            self.write_zero_blocks(header, 0, target_end)?;
         }
         Ok(())
+    }
+
+    fn prepare_truncation(&self, target_plain_len: u64, header: &[u8]) -> std::io::Result<()> {
+        let target_end = Self::plain_end(target_plain_len).or_io_error(libc::EINVAL)?;
+        if target_end.offset != T::PLAIN_BLOCK_LEN as usize {
+            self.zero_fill_block(target_end.block_no, header, target_end.offset)?;
+        }
+        Ok(())
+    }
+
+    /// Re-encodes boundary blocks when a logical length transition changes block contents.
+    fn prepare_len_change(
+        &self,
+        current_plain_len: u64,
+        target_plain_len: u64,
+        header: &[u8],
+        change: LenChange,
+    ) -> std::io::Result<()> {
+        match target_plain_len.cmp(&current_plain_len) {
+            std::cmp::Ordering::Equal => Ok(()),
+            std::cmp::Ordering::Greater => {
+                self.prepare_extension(current_plain_len, target_plain_len, header, change)
+            }
+            std::cmp::Ordering::Less => self.prepare_truncation(target_plain_len, header),
+        }
     }
 }
 
@@ -331,7 +359,7 @@ impl<T: EncryptionTranslator> WriteAt for CryptFsFile<T> {
             .cipher_size_to_plain(current_cipher_len)
             .or_invalid()?;
         if current_plain_len < offset {
-            self.re_encode_last_block(current_plain_len, offset, &header, false)?;
+            self.prepare_len_change(current_plain_len, offset, &header, LenChange::BeforeWrite)?;
         }
 
         let plain_start = offset;
@@ -431,7 +459,7 @@ impl<T: EncryptionTranslator> SetLen for CryptFsFile<T> {
                 self.create_header()?;
             }
             let header = self.header.read();
-            self.re_encode_last_block(current_plain_len, target_plain_len, &header, true)?;
+            self.prepare_len_change(current_plain_len, target_plain_len, &header, LenChange::Resize)?;
         }
         self.cipher_file
             .set_len(self.backend.plain_size_to_cipher(target_plain_len))?;
@@ -549,6 +577,52 @@ mod tests {
     }
 
     #[test]
+    fn gocryptfs_aligned_extension_to_next_block_reencodes_previous_last_block() {
+        let (_temp_dir, file) = open_gocryptfs_test_file();
+        let block_len = <GoCryptFs<FsBackend> as EncryptionTranslator>::PLAIN_BLOCK_LEN as usize;
+        let offset_in_block = 64usize;
+        let first = sample_data(728);
+        let tail = b"tail";
+
+        file.write_all_at(offset_in_block as u64, &first).unwrap();
+        file.write_all_at(block_len as u64, tail).unwrap();
+
+        let mut first_block = vec![0u8; block_len];
+        let bytes_read = file.read_at(0, &mut first_block).unwrap();
+
+        assert_eq!(bytes_read, block_len);
+        assert!(first_block[..offset_in_block].iter().all(|&b| b == 0));
+        assert_eq!(
+            &first_block[offset_in_block..offset_in_block + first.len()],
+            first.as_slice()
+        );
+        assert!(first_block[offset_in_block + first.len()..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn gocryptfs_aligned_gap_extension_reencodes_previous_last_block() {
+        let (_temp_dir, file) = open_gocryptfs_test_file();
+        let block_len = <GoCryptFs<FsBackend> as EncryptionTranslator>::PLAIN_BLOCK_LEN as usize;
+        let offset_in_block = 64usize;
+        let first = sample_data(728);
+        let tail = b"tail";
+
+        file.write_all_at(offset_in_block as u64, &first).unwrap();
+        file.write_all_at((2 * block_len) as u64, tail).unwrap();
+
+        let mut first_block = vec![0u8; block_len];
+        let bytes_read = file.read_at(0, &mut first_block).unwrap();
+
+        assert_eq!(bytes_read, block_len);
+        assert!(first_block[..offset_in_block].iter().all(|&b| b == 0));
+        assert_eq!(
+            &first_block[offset_in_block..offset_in_block + first.len()],
+            first.as_slice()
+        );
+        assert!(first_block[offset_in_block + first.len()..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
     fn truncate_preserves_prefix() {
         let (_temp_dir, file) = open_gocryptfs_test_file();
         let full = sample_data(6000);
@@ -562,6 +636,23 @@ mod tests {
 
         assert_eq!(bytes_read, truncated_len);
         assert_eq!(&read_back[..truncated_len], &full[..truncated_len]);
+    }
+
+    #[test]
+    fn truncate_from_exact_block_boundary_reencodes_new_partial_last_block() {
+        let (_temp_dir, file) = open_gocryptfs_test_file();
+        let block_len = <GoCryptFs<FsBackend> as EncryptionTranslator>::PLAIN_BLOCK_LEN as usize;
+        let full = sample_data(2 * block_len);
+        let truncated_len = block_len + 100;
+
+        file.write_all_at(0, &full).unwrap();
+        file.set_len(truncated_len as u64).unwrap();
+
+        let mut read_back = vec![0u8; truncated_len];
+        let bytes_read = file.read_at(0, &mut read_back).unwrap();
+
+        assert_eq!(bytes_read, truncated_len);
+        assert_eq!(read_back, full[..truncated_len]);
     }
 
     #[test]

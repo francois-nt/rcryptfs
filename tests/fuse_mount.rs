@@ -222,7 +222,6 @@ fn mount_respects_create_new_for_all_backends() {
     }
 }
 
-#[ignore]
 #[test]
 fn mount_supports_directory_listing_rename_and_removal_for_all_backends() {
     let password = "test-password";
