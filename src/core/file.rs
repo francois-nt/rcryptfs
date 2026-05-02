@@ -459,7 +459,12 @@ impl<T: EncryptionTranslator> SetLen for CryptFsFile<T> {
                 self.create_header()?;
             }
             let header = self.header.read();
-            self.prepare_len_change(current_plain_len, target_plain_len, &header, LenChange::Resize)?;
+            self.prepare_len_change(
+                current_plain_len,
+                target_plain_len,
+                &header,
+                LenChange::Resize,
+            )?;
         }
         self.cipher_file
             .set_len(self.backend.plain_size_to_cipher(target_plain_len))?;
@@ -596,7 +601,11 @@ mod tests {
             &first_block[offset_in_block..offset_in_block + first.len()],
             first.as_slice()
         );
-        assert!(first_block[offset_in_block + first.len()..].iter().all(|&b| b == 0));
+        assert!(
+            first_block[offset_in_block + first.len()..]
+                .iter()
+                .all(|&b| b == 0)
+        );
     }
 
     #[test]
@@ -619,7 +628,11 @@ mod tests {
             &first_block[offset_in_block..offset_in_block + first.len()],
             first.as_slice()
         );
-        assert!(first_block[offset_in_block + first.len()..].iter().all(|&b| b == 0));
+        assert!(
+            first_block[offset_in_block + first.len()..]
+                .iter()
+                .all(|&b| b == 0)
+        );
     }
 
     #[test]

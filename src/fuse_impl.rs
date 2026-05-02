@@ -307,10 +307,9 @@ impl<C: OpenCache + 'static> Filesystem for FileSystemHandler<C> {
         _flags: u32,
     ) -> fuser_ng::ResultWrite {
         //log::error!("writing to {:?} at {offset} len {}", _path, data.len());
-        self.as_cache()
-            .access(fh, |file| {
-                file.write_all_at(offset, &data).map(|_| data.len() as u32)
-            })
+        self.as_cache().access(fh, |file| {
+            file.write_all_at(offset, &data).map(|_| data.len() as u32)
+        })
     }
     fn rmdir(&self, _req: RequestInfo, path: &EntryName) -> fuser_ng::ResultEmpty {
         debug!("rmdir on {:?}", path);
@@ -352,8 +351,7 @@ impl<C: OpenCache + 'static> Filesystem for FileSystemHandler<C> {
     ) -> fuser_ng::ResultEmpty {
         log::debug!("sync on path {:?} with fh {fh} datasync {datasync}", path);
 
-        self.as_cache()
-            .access(fh, |file| file.sync(datasync))
+        self.as_cache().access(fh, |file| file.sync(datasync))
     }
     fn flush(
         &self,
@@ -375,8 +373,7 @@ impl<C: OpenCache + 'static> Filesystem for FileSystemHandler<C> {
     ) -> fuser_ng::ResultEmpty {
         log::debug!("truncate on path {:?} with fh {:?} size {size}", path, fh);
         if let Some(fh) = fh {
-            self.as_cache()
-                .access(fh, |file| file.set_len(size))
+            self.as_cache().access(fh, |file| file.set_len(size))
         } else {
             sanitize!(path);
             self.as_ref().truncate(path, size)
@@ -391,9 +388,7 @@ impl<C: OpenCache + 'static> Filesystem for FileSystemHandler<C> {
     ) -> fuser_ng::ResultXattr {
         debug!("getxattr on path {:?} name: {:?} size: {size}", path, name);
         sanitize!(path);
-        let value = self
-            .as_ref()
-            .get_xattr(path, name.to_str().or_invalid()?);
+        let value = self.as_ref().get_xattr(path, name.to_str().or_invalid()?);
         if size == 0 {
             value.map(|s| fuser_ng::Xattr::Size(s.len() as u32))
         } else {
@@ -453,7 +448,12 @@ impl<C: OpenCache + 'static> Filesystem for FileSystemHandler<C> {
     fn readdir(&self, _req: RequestInfo, path: &ResolvedPath, _fh: u64) -> fuser_ng::ResultReaddir {
         readdir(self, path)
     }
-    fn getattr(&self, req: RequestInfo, path: &EntryName, _fh: Option<u64>) -> fuser_ng::ResultEntry {
+    fn getattr(
+        &self,
+        req: RequestInfo,
+        path: &EntryName,
+        _fh: Option<u64>,
+    ) -> fuser_ng::ResultEntry {
         getattr(self, req, path)
     }
     fn access(&self, req: RequestInfo, path: &ResolvedPath, mask: u32) -> fuser_ng::ResultEmpty {
