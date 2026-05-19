@@ -473,9 +473,9 @@ dependencies = [
 
 [[package]]
 name = "fuser-ng"
-version = "0.7.1"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a2e31b4f2463cb7d291699a07e551954c17805bda481db3b0273a0fc8072c35"
+checksum = "1c4dd7326f2700f7f1b19a299305fff7e22b16ae43af24ed8c3c44494c526ee5"
 dependencies = [
  "fuser",
  "libc",

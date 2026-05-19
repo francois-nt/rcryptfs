@@ -222,7 +222,12 @@ fn read_password(cli_mode: bool, is_background_child: bool) -> Result<String> {
             read_password_from_stdin(is_background_child)
         }
     } else {
-        input_password("Enter password: ")
+        // password in env is useful for local tests - do not use it in production
+        if let Ok(password) = std::env::var("RCRYPTFS_PASSWORD") {
+            Ok(password)
+        } else {
+            input_password("Enter password: ")
+        }
     }
 }
 

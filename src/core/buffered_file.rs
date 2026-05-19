@@ -1,46 +1,35 @@
 use super::{OrIoError, ReadAt, ReadWrite, SetLen, SetSync, WriteAt, file::ModifiedTime};
 use parking_lot::Mutex;
 
-const BLOCK_LEN: usize = 4096;
-
 struct State {
     // next expected position if sequential writing
     sequential_end: Option<u64>,
 
     buffer_offset: u64,
     buffer_len: usize,
-    buffer: [u8; BLOCK_LEN],
-}
-
-impl Default for State {
-    fn default() -> Self {
-        Self {
-            sequential_end: None,
-            buffer_offset: 0,
-            buffer_len: 0,
-            buffer: [0; BLOCK_LEN],
-        }
-    }
+    buffer: Vec<u8>,
 }
 
 /// Buffers sequential plain-text writes so full encryption blocks can be flushed together.
 pub struct BufferedFile<W> {
     inner: W,
     state: Mutex<State>,
+    block_len: usize,
 }
 
 impl<W> BufferedFile<W> {
-    pub fn new(inner: W) -> Self {
+    pub fn new(inner: W, block_len: usize) -> Self {
         Self {
             inner,
-            state: Default::default(),
+            state: State {
+                sequential_end: None,
+                buffer_offset: 0,
+                buffer_len: 0,
+                buffer: vec![0; block_len],
+            }
+            .into(),
+            block_len,
         }
-    }
-}
-
-impl<W: ReadWrite> From<W> for BufferedFile<W> {
-    fn from(value: W) -> Self {
-        Self::new(value)
     }
 }
 
@@ -66,16 +55,48 @@ impl<W: WriteAt + ModifiedTime> BufferedFile<W> {
     }
 
     #[inline]
-    fn block_end(pos: u64) -> u64 {
-        let base = (pos / BLOCK_LEN as u64) * BLOCK_LEN as u64;
-        base + BLOCK_LEN as u64
+    fn block_end(&self, pos: u64) -> u64 {
+        let base = (pos / self.block_len as u64) * self.block_len as u64;
+        base + self.block_len as u64
     }
 }
 
 impl<W: ReadWrite + ModifiedTime> ReadAt for BufferedFile<W> {
     fn read_at(&self, pos: u64, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.flush_staging()?;
-        self.inner.read_at(pos, buf)
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        let state = self.state.lock();
+        if state.buffer_len == 0 {
+            return self.inner.read_at(pos, buf);
+        }
+
+        let read_end = pos.saturating_add(buf.len() as u64);
+        let staged_start = state.buffer_offset;
+        let staged_end = staged_start + state.buffer_len as u64;
+
+        // If the requested range does not touch staged data, read directly from the inner file.
+        if read_end <= staged_start || staged_end <= pos {
+            return self.inner.read_at(pos, buf);
+        }
+
+        let bytes_read = self.inner.read_at(pos, buf)?;
+
+        // Overlay the staged bytes on top of the physical read result.
+        let overlap_start = pos.max(staged_start);
+        let overlap_end = read_end.min(staged_end);
+        let dst_start = (overlap_start - pos) as usize;
+        let dst_end = (overlap_end - pos) as usize;
+        let src_start = (overlap_start - staged_start) as usize;
+        let src_end = src_start + (dst_end - dst_start);
+
+        // Fill any sparse gap between the physical EOF and the staged range.
+        if bytes_read < dst_start {
+            buf[bytes_read..dst_start].fill(0);
+        }
+        buf[dst_start..dst_end].copy_from_slice(&state.buffer[src_start..src_end]);
+        Ok(bytes_read.max(dst_end))
     }
 }
 
@@ -113,19 +134,19 @@ impl<W: WriteAt + ModifiedTime> WriteAt for BufferedFile<W> {
             let cursor = state.sequential_end.or_invalid()?;
 
             if state.buffer_len == 0
-                && cursor.is_multiple_of(BLOCK_LEN as u64)
-                && data.len() >= BLOCK_LEN
+                && cursor.is_multiple_of(self.block_len as u64)
+                && data.len() >= self.block_len
             {
                 // Forward aligned full blocks directly to the inner file to avoid extra copies.
-                let full = (data.len() / BLOCK_LEN) * BLOCK_LEN;
+                let full = (data.len() / self.block_len) * self.block_len;
                 let mut off = cursor;
 
-                for chunk in data[..full].chunks_exact(BLOCK_LEN) {
+                for chunk in data[..full].chunks_exact(self.block_len) {
                     if let Err(e) = self.inner.write_all_at(off, chunk) {
                         return if done > 0 { Ok(done) } else { Err(e) };
                     }
                     has_written = true;
-                    off += BLOCK_LEN as u64;
+                    off += self.block_len as u64;
                 }
 
                 data = &data[full..];
@@ -140,12 +161,12 @@ impl<W: WriteAt + ModifiedTime> WriteAt for BufferedFile<W> {
 
             assert_eq!(state.buffer_offset + state.buffer_len as u64, cursor);
 
-            let end_block = Self::block_end(cursor);
+            let end_block = self.block_end(cursor);
             let max_in_this_block = (end_block - cursor) as usize;
             let take = data
                 .len()
                 .min(max_in_this_block)
-                .min(BLOCK_LEN - state.buffer_len);
+                .min(self.block_len - state.buffer_len);
 
             let prev_len = state.buffer_len;
             state.buffer[prev_len..prev_len + take].copy_from_slice(&data[..take]);

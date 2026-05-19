@@ -85,9 +85,10 @@ where
     T: EncryptionTranslator + Send + Sync + 'static,
 {
     if cache_policy.cache_write() {
-        Ok(Box::new(BufferedFile::from(CryptFsFile::<T>::try_open(
-            path, backend, options,
-        )?)))
+        Ok(Box::new(BufferedFile::new(
+            CryptFsFile::<T>::try_open(path, backend, options)?,
+            T::PLAIN_BLOCK_LEN as usize,
+        )))
     } else {
         Ok(Box::new(CryptFsFile::<T>::try_open(
             path, backend, options,
