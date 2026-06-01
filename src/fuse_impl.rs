@@ -2,7 +2,7 @@ use crate::core::{
     FileSystem, FileSystemHandler, FileType, GenericOpenOptions, Metadata, OpenCache, OrIoError,
     ReadOnlyFileSystem,
 };
-use fuser_ng::{EntryName, FileAttr, Filesystem, RequestInfo, ResolvedPath};
+use fuser_ng::{EntryName, EntryRef, FileAttr, Filesystem, RequestInfo, ResolvedPath};
 use log::debug;
 use std::{ffi::OsString, io::Write, path::Path, time::Duration};
 
@@ -196,15 +196,18 @@ impl<C: OpenCache + 'static> Filesystem for FileSystemHandler<C> {
     fn create(
         &self,
         req: RequestInfo,
-        path: &EntryName,
+        path: &ResolvedPath,
         mode: u32,
         flags: u32,
     ) -> fuser_ng::ResultCreate {
         debug!("create on path {:?} with flags {flags}", path);
         sanitize!(path, spath);
+        //let path = EntryRef::Resolved(path);
         let fh = open(self.as_ref(), self.as_cache(), spath, flags, Some(mode))?;
         debug!("got fh {fh}");
-        let attr = self.getattr(req, path, None)?.1;
+        let attr = self
+            .getattr(req, &EntryRef::Resolved(path.clone()), None)?
+            .1;
 
         debug!("got create attr {:?}", attr);
 
@@ -451,7 +454,7 @@ impl<C: OpenCache + 'static> Filesystem for FileSystemHandler<C> {
     fn getattr(
         &self,
         req: RequestInfo,
-        path: &EntryName,
+        path: &EntryRef,
         _fh: Option<u64>,
     ) -> fuser_ng::ResultEntry {
         getattr(self, req, path)
@@ -499,7 +502,7 @@ fn readdir<T: ReadOnlyFileSystem + ?Sized>(
 fn getattr<T: ReadOnlyFileSystem + ?Sized>(
     fs: impl AsRef<T>,
     _req: RequestInfo,
-    path: &EntryName,
+    path: &EntryRef,
 ) -> fuser_ng::ResultEntry {
     debug!("gettatr on path {:?}", path);
     sanitize!(path);
