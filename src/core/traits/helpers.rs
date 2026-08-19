@@ -2,7 +2,6 @@ use super::super::FileType;
 use super::{EncryptionLayout, MinimalFs, OrIoError};
 use super::{Metadata, Permissions, Utf8Path, Utf8PathBuf};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use filetime::set_symlink_file_times;
 use sha2::Digest;
 use std::time::SystemTime;
 
@@ -151,17 +150,7 @@ pub(super) fn default_set_time<T: EncryptionLayout + ?Sized>(
     mtime: Option<SystemTime>,
 ) -> std::io::Result<()> {
     let path = this.plain_path_to_cipher(path.into()).or_invalid()?;
-    if atime.is_none() && mtime.is_none() {
-        return Ok(());
-    }
-    if let Some((atime, mtime)) = atime.zip(mtime) {
-        set_symlink_file_times(path, atime.into(), mtime.into())
-    } else {
-        let meta = this.lower_fs().metadata(&path)?;
-        let atime = atime.unwrap_or(meta.accessed);
-        let mtime = mtime.unwrap_or(meta.modified);
-        set_symlink_file_times(path, atime.into(), mtime.into())
-    }
+    this.lower_fs().set_time(&path, atime, mtime)
 }
 
 pub(crate) fn temp_file_path(root: &Utf8Path, path: &str, is_dir_iv: bool) -> Utf8PathBuf {

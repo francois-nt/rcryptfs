@@ -1,4 +1,4 @@
-use super::{OrIoError, ReadAt, ReadWrite, SetLen, SetSync, WriteAt, file::ModifiedTime};
+use super::{ModifiedTime, OrIoError, ReadAt, ReadWrite, SetLen, SetSync, WriteAt};
 use parking_lot::Mutex;
 
 struct State {

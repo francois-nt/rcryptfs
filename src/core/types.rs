@@ -1,4 +1,7 @@
-use super::{Backend, CacheAccess, MinimalFs, OrIoError, ReadAt, WriteAt};
+use super::{
+    Backend, CacheAccess, MinimalFs, ModifiedTime, OrIoError, ReadAt, SetLen, SetSync, Size,
+    WriteAt,
+};
 pub use camino::{Utf8Path, Utf8PathBuf};
 use chrono::{DateTime, Utc};
 use derive_more::derive::{From, Into};
@@ -8,44 +11,157 @@ use strum_macros::Display;
 
 pub type FsCacheEntry = (Vec<u8>, Utf8PathBuf);
 /// Backend configuration with cipher root path.
-pub struct FsBackend {
+pub struct FsBackend<F: MinimalFs = DefaultFs> {
     pub cipher_root: Utf8PathBuf,
+    fs: F,
     cache: Mutex<BTreeMap<String, FsCacheEntry>>,
 }
 
-impl CacheAccess for FsBackend {
+impl<F: MinimalFs> FsBackend<F> {
+    /// Creates a rooted backend backed by the provided storage implementation.
+    pub fn new(cipher_root: Utf8PathBuf, fs: F) -> Self {
+        Self {
+            cipher_root,
+            fs,
+            cache: Default::default(),
+        }
+    }
+}
+
+impl<F: MinimalFs> CacheAccess for FsBackend<F> {
     /// Gives temporary mutable access to the plain-to-cipher path cache.
-    fn access<Res, F: FnOnce(&mut BTreeMap<String, FsCacheEntry>) -> Res>(&self, f: F) -> Res {
+    fn access<Res, Op: FnOnce(&mut BTreeMap<String, FsCacheEntry>) -> Res>(&self, f: Op) -> Res {
         f(&mut self.cache.lock())
     }
 }
 
 impl From<Utf8PathBuf> for FsBackend {
     fn from(value: Utf8PathBuf) -> Self {
-        Self {
-            cipher_root: value,
-            cache: Default::default(),
-        }
+        Self::new(value, DefaultFs)
     }
 }
 
 impl From<&Utf8Path> for FsBackend {
     fn from(value: &Utf8Path) -> Self {
-        Self {
-            cipher_root: value.into(),
-            cache: Default::default(),
-        }
+        Self::new(value.into(), DefaultFs)
     }
 }
 
 pub struct DefaultFs;
 
+/// Iterates over entries returned by the local filesystem.
+pub struct FsDirentryIterator(std::fs::ReadDir);
+
+impl Iterator for FsDirentryIterator {
+    type Item = std::io::Result<FsDirEntry>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|entry| entry.map(|v| v.into()))
+    }
+}
+
+impl ModifiedTime for std::fs::File {
+    fn get_modified(&self) -> std::io::Result<SystemTime> {
+        self.metadata()?.modified()
+    }
+
+    fn set_modified_time(&self, modified_time: SystemTime) -> std::io::Result<()> {
+        self.set_times(std::fs::FileTimes::default().set_modified(modified_time))
+    }
+}
+
+impl Size for std::fs::File {
+    fn size(&self) -> std::io::Result<Option<u64>> {
+        let metadata = self.metadata()?;
+        Ok(metadata.is_file().then_some(metadata.len()))
+    }
+}
+
+impl ReadAt for std::fs::File {
+    fn read_at(&self, pos: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+        #[cfg(unix)]
+        return std::os::unix::fs::FileExt::read_at(self, buf, pos);
+        #[cfg(windows)]
+        return std::os::windows::fs::FileExt::seek_read(self, buf, pos);
+    }
+}
+
+impl WriteAt for std::fs::File {
+    fn write_at(&self, pos: u64, buf: &[u8]) -> std::io::Result<usize> {
+        #[cfg(unix)]
+        return std::os::unix::fs::FileExt::write_at(self, buf, pos);
+        #[cfg(windows)]
+        return std::os::windows::fs::FileExt::seek_write(self, buf, pos);
+    }
+}
+
+impl SetLen for std::fs::File {
+    fn set_len(&self, new_size: u64) -> std::io::Result<()> {
+        std::fs::File::set_len(self, new_size)
+    }
+}
+
+impl SetSync for std::fs::File {
+    fn sync(&self, datasync: bool) -> std::io::Result<()> {
+        if datasync {
+            std::fs::File::sync_data(self)
+        } else {
+            std::fs::File::sync_all(self)
+        }
+    }
+}
+
 impl MinimalFs for DefaultFs {
+    type DirEntry = FsDirentryIterator;
+    type File = std::fs::File;
+
+    fn open_file_with(
+        &self,
+        path: &Utf8Path,
+        options: GenericOpenOptions,
+    ) -> std::io::Result<Self::File> {
+        let options: OpenOptions = options.into();
+        options.open(path)
+    }
+
+    fn set_time(
+        &self,
+        path: &Utf8Path,
+        atime: Option<SystemTime>,
+        mtime: Option<SystemTime>,
+    ) -> std::io::Result<()> {
+        if atime.is_none() && mtime.is_none() {
+            return Ok(());
+        }
+
+        if let Some((atime, mtime)) = atime.zip(mtime) {
+            filetime::set_symlink_file_times(path, atime.into(), mtime.into())
+        } else {
+            let metadata = std::fs::symlink_metadata(path)?;
+            let atime = atime.unwrap_or(metadata.accessed()?);
+            let mtime = mtime.unwrap_or(metadata.modified()?);
+            filetime::set_symlink_file_times(path, atime.into(), mtime.into())
+        }
+    }
+
+    fn chown(&self, path: &Utf8Path, uid: Option<u32>, gid: Option<u32>) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::chown(path, uid, gid)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (path, uid, gid);
+            Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
+        }
+    }
+
     fn list_dir(
         &self,
         path: &str,
-    ) -> std::io::Result<impl Iterator<Item = std::io::Result<FsDirEntry>> + '_ + use<'_>> {
-        Ok(std::fs::read_dir(path)?.map(|entry| entry.map(|v| v.into())))
+        // impl Iterator<Item = std::io::Result<FsDirEntry>> + '_ + use<'_>
+    ) -> std::io::Result<Self::DirEntry> {
+        Ok(FsDirentryIterator(std::fs::read_dir(path)?))
     }
     fn metadata(&self, path: &Utf8Path) -> std::io::Result<Metadata> {
         Ok(std::fs::symlink_metadata(path)?.into())
@@ -72,21 +188,6 @@ impl MinimalFs for DefaultFs {
         } else {
             std::fs::remove_dir(path)
         }
-    }
-    fn put(&self, path: &Utf8Path, data: &[u8]) -> std::io::Result<()> {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .create(true)
-            .open(path)?
-            .write_all_at(0, data)
-    }
-    fn read_at(&self, path: &Utf8Path, offset: u64, buffer: &mut [u8]) -> std::io::Result<usize> {
-        // not all but a buffer limited to 8196
-        std::fs::OpenOptions::new()
-            .read(true)
-            .open(path)?
-            .read_at(offset, buffer)
     }
     fn set_permissions(
         &self,
@@ -172,10 +273,10 @@ impl MinimalFs for DefaultFs {
 
 /// In-memory backend for testing.
 pub struct MemoryBackend;
-impl Backend for FsBackend {
-    type LowerFs = DefaultFs;
-    fn get_fs(&self) -> &DefaultFs {
-        &DefaultFs
+impl<F: MinimalFs> Backend for FsBackend<F> {
+    type LowerFs = F;
+    fn get_fs(&self) -> &F {
+        &self.fs
     }
 }
 impl Backend for MemoryBackend {

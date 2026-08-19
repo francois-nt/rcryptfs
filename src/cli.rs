@@ -137,5 +137,5 @@ fn format_entry(entry: &FsDirEntry) -> String {
     } else {
         String::default()
     };
-    format!("{} {} {}", &file_type, &entry.file_name, &rsize)
+    format!("{} {} {}", file_type, entry.file_name, rsize)
 }

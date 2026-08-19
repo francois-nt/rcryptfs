@@ -1,7 +1,7 @@
 use super::GoCryptFs;
 use crate::core::{
-    BackendProvider, EncryptedFileTranslator, FileCachePolicy, FileSystem, FsBackend, MasterKey,
-    Result,
+    Backend, BackendProvider, EncryptedFileTranslator, FileCachePolicy, FileSystem, FsBackend,
+    MasterKey, MinimalFs, Result,
 };
 use crate::{Utf8Path, register_provider};
 
@@ -16,12 +16,45 @@ impl MasterKey for GoCryptFSMasterKey {
 pub struct GoCryptFsBuilder;
 register_provider!(GoCryptFsBuilder);
 
+impl GoCryptFsBuilder {
+    /// Checks whether a storage backend contains a GoCryptFS repository.
+    pub fn probe_backend<F: MinimalFs>(backend: &FsBackend<F>) -> bool {
+        backend
+            .get_fs()
+            .exists(&backend.cipher_root.join("gocryptfs.conf"))
+            .unwrap_or(false)
+    }
+
+    /// Builds a GoCryptFS filesystem on an arbitrary storage backend.
+    pub fn try_build_with_backend<F: MinimalFs>(
+        backend: FsBackend<F>,
+        password: &str,
+        cache_policy: Box<dyn FileCachePolicy>,
+    ) -> Result<Box<dyn FileSystem>> {
+        let cryptfs: EncryptedFileTranslator<GoCryptFs<FsBackend<F>>> = (
+            GoCryptFs::try_new_with_backend(backend, password)?,
+            cache_policy,
+        )
+            .into();
+        Ok(Box::new(cryptfs))
+    }
+
+    /// Initializes a GoCryptFS repository on an arbitrary storage backend.
+    pub fn init_with_backend<F: MinimalFs>(
+        backend: &FsBackend<F>,
+        password: &str,
+    ) -> Result<Box<dyn MasterKey>> {
+        GoCryptFs::init_with_backend(backend, password)
+            .map(|key| -> Box<dyn MasterKey> { Box::new(GoCryptFSMasterKey(key)) })
+    }
+}
+
 impl BackendProvider for GoCryptFsBuilder {
     fn name(&self) -> &'static str {
         "gocryptfs"
     }
     fn probe(&self, root: &Utf8Path) -> bool {
-        std::fs::exists(root.join("gocryptfs.conf")).unwrap_or(false)
+        Self::probe_backend(&root.into())
     }
     fn try_build(
         &self,
@@ -29,19 +62,13 @@ impl BackendProvider for GoCryptFsBuilder {
         password: &str,
         cache_policy: Box<dyn FileCachePolicy>,
     ) -> Result<Box<dyn FileSystem>> {
-        let cryptfs: EncryptedFileTranslator<GoCryptFs<FsBackend>> = (
-            GoCryptFs::<FsBackend>::try_new(root, password)?,
-            cache_policy,
-        )
-            .into();
-        Ok(Box::new(cryptfs))
+        Self::try_build_with_backend(root.into(), password, cache_policy)
     }
     fn init_with_default_params(
         &self,
         root: &Utf8Path,
         password: &str,
     ) -> Result<Box<dyn MasterKey>> {
-        GoCryptFs::<FsBackend>::init_with_default_params(root, password)
-            .map(|key| -> Box<dyn MasterKey> { Box::new(GoCryptFSMasterKey(key)) })
+        Self::init_with_backend(&root.into(), password)
     }
 }

@@ -1,6 +1,6 @@
 use crate::core::{
-    Backend, CipherPathLayout, EncryptionTranslator, FsBackend, MasterKey, MinimalFs, OrIoError,
-    Result, Utf8Path, Utf8PathBuf, XattrLayout, is_dir_empty,
+    Backend, CipherPathLayout, EncryptionTranslator, FsBackend, MasterKey, MinimalFs, Result,
+    Utf8Path, Utf8PathBuf, XattrLayout,
 };
 use aes_gcm::{
     Aes256Gcm,
@@ -17,7 +17,6 @@ use scrypt::{Params as ScryptParams, scrypt};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
-use std::io::Write;
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 type HmacSha256 = Hmac<Sha256>;
@@ -249,61 +248,60 @@ impl CryptoMator<FsBackend> {
         root_path: &Utf8Path,
         password: &str,
     ) -> Result<CryptomatorMasterKeys> {
-        if !is_dir_empty(root_path)? {
+        let backend = root_path.into();
+        Self::init_with_backend(&backend, password)
+    }
+
+    /// Opens a Cryptomator repository from a local cipher root path.
+    pub fn try_new(root_path: &Utf8Path, password: &str) -> Result<Self> {
+        Self::try_new_with_backend(root_path.into(), password)
+    }
+}
+
+impl<F: MinimalFs> CryptoMator<FsBackend<F>> {
+    /// Initializes a Cryptomator repository on the provided storage backend.
+    pub fn init_with_backend(
+        backend: &FsBackend<F>,
+        password: &str,
+    ) -> Result<CryptomatorMasterKeys> {
+        let root_path = &backend.cipher_root;
+        let fs = backend.get_fs();
+        if !fs.is_dir_empty(root_path)? {
             bail!("Directory {root_path} must be empty!");
         }
 
         let rollback = |_: &std::io::Error| {
-            let _ = std::fs::remove_file(root_path.join("masterkey.cryptomator"));
-            let _ = std::fs::remove_file(root_path.join("vault.cryptomator"));
-            let _ = std::fs::remove_dir_all(root_path.join("d"));
+            let _ = fs.remove_file(&root_path.join("masterkey.cryptomator"));
+            let _ = fs.remove_file(&root_path.join("vault.cryptomator"));
+            let _ = fs.remove_dir(&root_path.join("d"), true);
         };
 
         let (config, master_keys) = CryptoMatorConfig::try_new(password)?;
-
-        std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(root_path.join("masterkey.cryptomator"))
-            .and_then(|mut file| {
-                let json_config = serde_json::to_vec_pretty(&config)?;
-                file.write_all(&json_config)
-            })
+        let json_config = serde_json::to_vec_pretty(&config)?;
+        fs.put_new(&root_path.join("masterkey.cryptomator"), &json_config)
             .inspect_err(rollback)?;
 
-        std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(root_path.join("vault.cryptomator"))
-            .and_then(|mut file| {
-                let vault =
-                    generate_vault_cryptomator(&master_keys, "SIV_GCM", 220).or_invalid()?;
-                file.write_all(vault.as_bytes())
-            })
+        let vault = generate_vault_cryptomator(&master_keys, "SIV_GCM", 220)?;
+        fs.put_new(&root_path.join("vault.cryptomator"), vault.as_bytes())
             .inspect_err(rollback)?;
 
         let siv_key = master_keys.siv_key();
-        let backend = CryptoMator {
-            backend: root_path.into(),
-            siv_key,
-        };
-        std::fs::create_dir_all(backend.dir_id_to_storage_path("")?).inspect_err(rollback)?;
+        let storage_path = dir_id_to_storage_path(root_path, &siv_key, "")?;
+        fs.mkdir_all(&storage_path).inspect_err(rollback)?;
 
         Ok(master_keys)
     }
 
-    /// Creates a new GoCryptFs instance from a cipher root path and password.
-    pub fn try_new(root_path: &Utf8Path, password: &str) -> Result<Self> {
-        let file_path = root_path.join("masterkey.cryptomator");
-        let json_str = std::fs::read_to_string(file_path)?;
-        let config: CryptoMatorConfig = serde_json::from_str(&json_str)?;
+    /// Opens a Cryptomator repository from the provided storage backend.
+    pub fn try_new_with_backend(backend: FsBackend<F>, password: &str) -> Result<Self> {
+        let config_data = backend
+            .get_fs()
+            .read_all(&backend.cipher_root.join("masterkey.cryptomator"))?;
+        let config: CryptoMatorConfig = serde_json::from_slice(&config_data)?;
 
         let keys = derive_keys(password, &config)?;
         let siv_key = keys.siv_key();
-        Ok(CryptoMator {
-            backend: root_path.into(),
-            siv_key,
-        })
+        Ok(CryptoMator { backend, siv_key })
     }
 
     pub(super) fn mkdir_storage_path(&self, dir_id: &str) -> Result<()> {
@@ -315,28 +313,26 @@ impl CryptoMator<FsBackend> {
     }
 
     pub(super) fn dir_id_to_storage_path(&self, dir_id: &str) -> Result<Utf8PathBuf> {
-        // Key material for AES-SIV-512 (RFC 5297): 64 bytes split into two halves.
-        // We concatenate mac_master_key || master_key.
-        use aes_siv::aead::KeyInit;
-        let mut siv = Aes256Siv::new_from_slice(&self.siv_key)?;
-
-        // associated data = null => empty iterator
-        let enc_dir_id = siv
-            .encrypt(std::iter::empty::<&[u8]>(), dir_id.as_bytes())
-            .map_err(|_| anyhow!("AES-SIV encryption should not fail for small inputs"))?;
-
-        // SHA-1 over encrypted dirId
-        let digest = Sha1::digest(&enc_dir_id);
-
-        // Base32 without padding, uppercase alphabet (matches Cryptomator doc)
-        let b32 = BASE32_NOPAD.encode(digest.as_slice());
-        debug_assert_eq!(b32.len(), 32, "base32(sha1(..)) should be 32 chars");
-
-        let (pfx, rest) = b32.split_at(2); // 2 + 30 chars
-        let rest = &rest[..30];
-
-        Ok(self.backend.cipher_root.join("d").join(pfx).join(rest))
+        dir_id_to_storage_path(&self.backend.cipher_root, &self.siv_key, dir_id)
     }
+}
+
+/// Computes the storage directory for a Cryptomator directory identifier.
+fn dir_id_to_storage_path(
+    root_path: &Utf8Path,
+    siv_key: &[u8; 64],
+    dir_id: &str,
+) -> Result<Utf8PathBuf> {
+    use aes_siv::aead::KeyInit;
+    let mut siv = Aes256Siv::new_from_slice(siv_key)?;
+    let enc_dir_id = siv
+        .encrypt(std::iter::empty::<&[u8]>(), dir_id.as_bytes())
+        .map_err(|_| anyhow!("AES-SIV encryption should not fail for small inputs"))?;
+    let digest = Sha1::digest(&enc_dir_id);
+    let b32 = BASE32_NOPAD.encode(digest.as_slice());
+    debug_assert_eq!(b32.len(), 32, "base32(sha1(..)) should be 32 chars");
+    let (prefix, rest) = b32.split_at(2);
+    Ok(root_path.join("d").join(prefix).join(&rest[..30]))
 }
 
 const HEADER_NONCE_LEN: usize = 12;

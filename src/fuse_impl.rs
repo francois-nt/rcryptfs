@@ -119,7 +119,7 @@ fn open<T: FileSystem + ?Sized, C: OpenCache>(
         options.permissions(mode.into());
     }
 
-    debug!("open options are {:?}", &options);
+    debug!("open options are {:?}", options);
 
     let file = if options.is_readonly() {
         backend.open_readonly(path)?

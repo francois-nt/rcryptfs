@@ -45,48 +45,10 @@ pub trait Size {
     fn size(&self) -> std::io::Result<Option<u64>>;
 }
 
-impl Size for std::fs::File {
-    fn size(&self) -> std::io::Result<Option<u64>> {
-        let md = self.metadata()?;
-        if md.is_file() {
-            Ok(Some(md.len()))
-        } else {
-            Ok(None)
-        }
-    }
-}
-
-impl ReadAt for std::fs::File {
-    fn read_at(&self, pos: u64, buf: &mut [u8]) -> std::io::Result<usize> {
-        #[cfg(unix)]
-        return std::os::unix::fs::FileExt::read_at(self, buf, pos);
-        #[cfg(windows)]
-        return std::os::windows::fs::FileExt::seek_read(self, buf, pos);
-    }
-}
-
-impl WriteAt for std::fs::File {
-    fn write_at(&self, pos: u64, buf: &[u8]) -> std::io::Result<usize> {
-        #[cfg(unix)]
-        return std::os::unix::fs::FileExt::write_at(self, buf, pos);
-        #[cfg(windows)]
-        return std::os::windows::fs::FileExt::seek_write(self, buf, pos);
-    }
-}
-
-impl SetLen for std::fs::File {
-    fn set_len(&self, new_size: u64) -> std::io::Result<()> {
-        std::fs::File::set_len(self, new_size)
-    }
-}
-impl SetSync for std::fs::File {
-    fn sync(&self, datasync: bool) -> std::io::Result<()> {
-        if datasync {
-            std::fs::File::sync_data(self)
-        } else {
-            std::fs::File::sync_all(self)
-        }
-    }
+/// Provides access to a file's modification time.
+pub trait ModifiedTime {
+    fn get_modified(&self) -> std::io::Result<SystemTime>;
+    fn set_modified_time(&self, modified_time: SystemTime) -> std::io::Result<()>;
 }
 
 /// Provides positioned writes without changing a shared file cursor.

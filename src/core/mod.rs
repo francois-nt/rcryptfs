@@ -19,5 +19,5 @@ pub use types::*;
 
 /// Returns whether a directory contains no entries.
 pub fn is_dir_empty(path: &Utf8Path) -> std::io::Result<bool> {
-    Ok(std::fs::read_dir(path)?.next().is_none())
+    DefaultFs.is_dir_empty(path)
 }

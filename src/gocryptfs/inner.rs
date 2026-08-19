@@ -1,6 +1,6 @@
 use super::GoCryptFs;
 use crate::Utf8Path;
-use crate::core::{Backend, FsBackend, Result, is_dir_empty};
+use crate::core::{Backend, FsBackend, MinimalFs, Result};
 use aes::{Aes256, cipher::generic_array::GenericArray};
 use aes_gcm::{
     Aes256Gcm, AesGcm, KeyInit,
@@ -12,7 +12,6 @@ use hkdf::Hkdf;
 use scrypt::{Params as ScryptParams, scrypt};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use std::io::Write;
 
 /// Derives encryption keys from master key and feature flags.
 fn derive_keys<T: Backend>(
@@ -249,46 +248,51 @@ impl<T: Backend> GoCryptFs<T> {
 impl GoCryptFs<FsBackend> {
     /// Initializes a new GoCryptFS-compatible backend with default parameters.
     pub fn init_with_default_params(root_path: &Utf8Path, password: &str) -> Result<Vec<u8>> {
-        if !is_dir_empty(root_path)? {
+        let backend = root_path.into();
+        Self::init_with_backend(&backend, password)
+    }
+    /// Creates a new GoCryptFs instance from a local cipher root path and password.
+    pub fn try_new(root_path: &Utf8Path, password: &str) -> Result<Self> {
+        Self::try_new_with_backend(root_path.into(), password)
+    }
+}
+
+impl<F: MinimalFs> GoCryptFs<FsBackend<F>> {
+    /// Initializes a GoCryptFS-compatible repository on the provided storage backend.
+    pub fn init_with_backend(backend: &FsBackend<F>, password: &str) -> Result<Vec<u8>> {
+        let root_path = &backend.cipher_root;
+        let fs = backend.get_fs();
+        if !fs.is_dir_empty(root_path)? {
             bail!("Directory {root_path} must be empty!");
         }
         // Best effort rollback in case of error
         let rollback = |_: &std::io::Error| {
-            let _ = std::fs::remove_file(root_path.join("gocryptfs.conf"));
-            let _ = std::fs::remove_file(root_path.join("gocryptfs.diriv"));
+            let _ = fs.remove_file(&root_path.join("gocryptfs.conf"));
+            let _ = fs.remove_file(&root_path.join("gocryptfs.diriv"));
         };
         let (config, master_key) = GoCryptfsConfig::try_new(password)?;
-        std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(root_path.join("gocryptfs.conf"))
-            .and_then(|mut file| {
-                let json_config = serde_json::to_vec_pretty(&config)?;
-                file.write_all(&json_config)
-            })
+        let json_config = serde_json::to_vec_pretty(&config)?;
+        fs.put_new(&root_path.join("gocryptfs.conf"), &json_config)
             .inspect_err(rollback)?;
 
         // The root directory uses its own DirIV file just like any other directory.
         let mut root_dir_iv = [0u8; 16];
         rand::fill(&mut root_dir_iv);
-        std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(root_path.join("gocryptfs.diriv"))
-            .and_then(|mut file| file.write_all(&root_dir_iv))
+        fs.put_new(&root_path.join("gocryptfs.diriv"), &root_dir_iv)
             .inspect_err(rollback)?;
 
         Ok(master_key)
     }
-    /// Creates a new GoCryptFs instance from a cipher root path and password.
-    pub fn try_new(root_path: &Utf8Path, password: &str) -> Result<Self> {
-        let file_path = root_path.join("gocryptfs.conf");
-        let json_str = std::fs::read_to_string(file_path)?;
-        let config: GoCryptfsConfig = serde_json::from_str(&json_str)?;
+    /// Opens a GoCryptFS repository from the provided storage backend.
+    pub fn try_new_with_backend(backend: FsBackend<F>, password: &str) -> Result<Self> {
+        let config_data = backend
+            .get_fs()
+            .read_all(&backend.cipher_root.join("gocryptfs.conf"))?;
+        let config: GoCryptfsConfig = serde_json::from_slice(&config_data)?;
 
         let master_key = get_master_key(password, &config)?;
         derive_keys(
-            root_path.into(),
+            backend,
             master_key.as_slice().try_into()?,
             &config.feature_flags,
         )

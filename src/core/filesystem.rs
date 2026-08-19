@@ -2,7 +2,8 @@ use crate::core::XattrLayout;
 
 use super::{
     BufferedFile, CryptFsFile, EncryptionLayout, EncryptionTranslator, FileSystem, FsDirEntry,
-    GenericOpenOptions, Metadata, OrIoError, Permissions, ReadOnlyFileSystem, ReadWrite, Utf8Path,
+    GenericOpenOptions, Metadata, MinimalFs, OrIoError, Permissions, ReadOnlyFileSystem, ReadWrite,
+    Utf8Path,
 };
 
 use std::sync::Arc;
@@ -78,21 +79,27 @@ impl<T> From<(T, Box<dyn FileCachePolicy>)> for EncryptedFileTranslator<T> {
 fn try_open_crypt_file<T>(
     path: &Utf8Path,
     backend: Arc<T>,
-    options: GenericOpenOptions,
+    mut options: GenericOpenOptions,
     cache_policy: &dyn FileCachePolicy,
 ) -> std::io::Result<Box<dyn ReadWrite>>
 where
-    T: EncryptionTranslator + Send + Sync + 'static,
+    T: EncryptionTranslator + EncryptionLayout + Send + Sync + 'static,
 {
+    if options.append {
+        options.write = true;
+    }
+    let readonly = options.is_readonly();
+    options.read(true).append(false);
+    let cipher_file = backend.lower_fs().open_file_with(path, options)?;
+    let crypt_file = CryptFsFile::try_from_file(cipher_file, backend, readonly)?;
+
     if cache_policy.cache_write() {
         Ok(Box::new(BufferedFile::new(
-            CryptFsFile::<T>::try_open(path, backend, options)?,
+            crypt_file,
             T::PLAIN_BLOCK_LEN as usize,
         )))
     } else {
-        Ok(Box::new(CryptFsFile::<T>::try_open(
-            path, backend, options,
-        )?))
+        Ok(Box::new(crypt_file))
     }
 }
 
@@ -191,16 +198,8 @@ where
         Ok(())
     }
     fn chown(&self, path: &str, uid: Option<u32>, gid: Option<u32>) -> std::io::Result<()> {
-        #[cfg(unix)]
-        {
-            let cipher_path = self.fs.plain_path_to_cipher(path.into()).or_invalid()?;
-            std::os::unix::fs::chown(cipher_path, uid, gid)
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (path, uid, gid);
-            Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
-        }
+        let cipher_path = self.fs.plain_path_to_cipher(path.into()).or_invalid()?;
+        self.fs.lower_fs().chown(&cipher_path, uid, gid)
     }
     fn create_symlink(&self, path: &str, target_path: &str) -> std::io::Result<Metadata> {
         self.fs.create_symlink(path, target_path)

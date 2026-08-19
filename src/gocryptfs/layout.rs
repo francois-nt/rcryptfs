@@ -6,8 +6,8 @@ use crate::core::{
 };
 use anyhow::{Context, anyhow};
 
-impl CipherPathLayout for GoCryptFs<FsBackend> {
-    type LowerFs = <FsBackend as Backend>::LowerFs;
+impl<F: MinimalFs> CipherPathLayout for GoCryptFs<FsBackend<F>> {
+    type LowerFs = F;
     fn lower_fs(&self) -> &Self::LowerFs {
         self.backend.get_fs()
     }
@@ -41,7 +41,7 @@ impl CipherPathLayout for GoCryptFs<FsBackend> {
                             let cipher_part = self.plain_name_to_cipher(dir_iv, plain_part)?;
                             absolute_path = cipher_parent.join(cipher_part);
                         } else {
-                            let dir_iv = read_diriv(&absolute_path)?;
+                            let dir_iv = read_diriv(self.lower_fs(), &absolute_path)?;
 
                             cache.insert(
                                 partial_plain_path.as_str().into(),
@@ -78,16 +78,16 @@ impl CipherPathLayout for GoCryptFs<FsBackend> {
     }
 }
 
-impl EncryptionLayout for GoCryptFs<FsBackend> {
+impl<F: MinimalFs> EncryptionLayout for GoCryptFs<FsBackend<F>> {
     /// Lists directory entries with plain names.
     fn list_dir_plain_names(
         &self,
         plain_path: &Utf8Path,
-    ) -> std::io::Result<impl Iterator<Item = Result<(FsDirEntry, Utf8PathBuf)>> + '_ + use<'_>>
+    ) -> std::io::Result<impl Iterator<Item = Result<(FsDirEntry, Utf8PathBuf)>> + '_ + use<'_, F>>
     {
         let plain_path: Utf8PathBuf = plain_path.into();
         let cipher_path = self.plain_path_to_cipher(&plain_path).or_invalid()?;
-        let dir_iv = read_diriv(&cipher_path).or_invalid()?;
+        let dir_iv = read_diriv(self.lower_fs(), &cipher_path).or_invalid()?;
 
         Ok(self
             .lower_fs()
@@ -112,9 +112,9 @@ impl EncryptionLayout for GoCryptFs<FsBackend> {
 }
 
 /// Reads the directory initialization vector from a cipher directory.
-fn read_diriv(cipher_dir: &Utf8Path) -> Result<[u8; 16]> {
+fn read_diriv(fs: &impl MinimalFs, cipher_dir: &Utf8Path) -> Result<[u8; 16]> {
     let p = cipher_dir.join("gocryptfs.diriv");
-    let data = std::fs::read(&p).context(format!("read {:?}", p))?;
+    let data = fs.read(&p, 0, 17).context(format!("read {:?}", p))?;
     if data.len() != 16 {
         return Err(anyhow!("diriv has len {}, expected 16", data.len()));
     }

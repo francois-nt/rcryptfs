@@ -1,10 +1,9 @@
 use super::{
-    EncryptionTranslator, GenericOpenOptions, OrIoError, ReadAt, SetLen, SetSync, Size, Utf8Path,
-    WriteAt,
+    EncryptionTranslator, ModifiedTime, OrIoError, ReadAt, SetLen, SetSync, StorageFile, WriteAt,
 };
 use log::{debug, error};
 use parking_lot::RwLock;
-use std::{fs::OpenOptions, sync::Arc};
+use std::sync::Arc;
 
 enum LenChange {
     BeforeWrite,
@@ -17,31 +16,15 @@ struct PlainEnd {
 }
 
 /// Wraps a cipher file and exposes plain-text block I/O.
-pub struct CryptFsFile<T: EncryptionTranslator> {
+pub struct CryptFsFile<T: EncryptionTranslator, F: StorageFile> {
     backend: Arc<T>,
-    cipher_file: std::fs::File,
+    cipher_file: F,
     header: RwLock<Vec<u8>>,
 }
 
-impl<T: EncryptionTranslator> CryptFsFile<T> {
-    /// Opens the backing cipher file and eagerly loads the file header when present.
-    pub fn try_open(
-        cipher_path: &Utf8Path,
-        backend: Arc<T>,
-        mut options: GenericOpenOptions,
-    ) -> std::io::Result<Self> {
-        if options.append {
-            options.write = true;
-        }
-        let readonly = options.is_readonly();
-        let mut options: OpenOptions = options.into();
-
-        let cipher_file = options
-            .read(true)
-            .append(false)
-            .open(cipher_path)
-            .or_invalid()?;
-
+impl<T: EncryptionTranslator, F: StorageFile> CryptFsFile<T, F> {
+    /// Wraps an opened cipher file and eagerly loads its header when present.
+    pub fn try_from_file(cipher_file: F, backend: Arc<T>, readonly: bool) -> std::io::Result<Self> {
         let mut cipher_file_size = cipher_file.size()?.or_invalid()?;
         if T::EMPTY_FILE_HAS_HEADER && !readonly && cipher_file_size == 0 {
             cipher_file.write_all_at(0, &backend.generate_cipher_header().or_invalid()?)?;
@@ -61,7 +44,7 @@ impl<T: EncryptionTranslator> CryptFsFile<T> {
         })
     }
     /// Reads the fixed-size file header from the beginning of the cipher file.
-    fn read_header(cipher_file: &std::fs::File) -> std::io::Result<Vec<u8>> {
+    fn read_header(cipher_file: &F) -> std::io::Result<Vec<u8>> {
         let mut buffer: Vec<u8> = vec![0; T::HEADER_LEN];
         cipher_file.read_exact_at(0, &mut buffer)?;
         Ok(buffer)
@@ -256,7 +239,7 @@ impl<T: EncryptionTranslator> CryptFsFile<T> {
     }
 }
 
-impl<T: EncryptionTranslator> ReadAt for CryptFsFile<T> {
+impl<T: EncryptionTranslator, F: StorageFile> ReadAt for CryptFsFile<T, F> {
     /// Reads plain bytes across encrypted block boundaries.
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
         if buf.is_empty() {
@@ -335,7 +318,7 @@ impl<T: EncryptionTranslator> ReadAt for CryptFsFile<T> {
     }
 }
 
-impl<T: EncryptionTranslator> WriteAt for CryptFsFile<T> {
+impl<T: EncryptionTranslator, F: StorageFile> WriteAt for CryptFsFile<T, F> {
     /// Writes plain bytes across encrypted block boundaries.
     fn write_at(&self, offset: u64, data: &[u8]) -> std::io::Result<usize> {
         // debug!(
@@ -414,38 +397,25 @@ impl<T: EncryptionTranslator> WriteAt for CryptFsFile<T> {
     }
 }
 
-/// Preserves modification time while buffered writes are staged.
-pub trait ModifiedTime {
-    /// Returns the current modification time of the backing file.
-    fn get_modified(&self) -> std::io::Result<std::time::SystemTime>;
-    /// Restores or updates the modification time of the backing file.
-    fn set_modified_time(&self, modified_time: std::time::SystemTime) -> std::io::Result<()>;
-}
-
-impl<T: EncryptionTranslator> ModifiedTime for CryptFsFile<T> {
+impl<T: EncryptionTranslator, F: StorageFile> ModifiedTime for CryptFsFile<T, F> {
     /// Returns the modification time of the underlying cipher file.
     fn get_modified(&self) -> std::io::Result<std::time::SystemTime> {
-        self.cipher_file.metadata()?.modified()
+        self.cipher_file.get_modified()
     }
     /// Sets the modification time of the underlying cipher file.
     fn set_modified_time(&self, modified_time: std::time::SystemTime) -> std::io::Result<()> {
-        self.cipher_file
-            .set_times(std::fs::FileTimes::default().set_modified(modified_time))
+        self.cipher_file.set_modified_time(modified_time)
     }
 }
 
-impl<T: EncryptionTranslator> SetSync for CryptFsFile<T> {
+impl<T: EncryptionTranslator, F: StorageFile> SetSync for CryptFsFile<T, F> {
     /// Flushes the underlying cipher file with the requested durability level.
     fn sync(&self, datasync: bool) -> std::io::Result<()> {
-        if datasync {
-            self.cipher_file.sync_data()
-        } else {
-            self.cipher_file.sync_all()
-        }
+        self.cipher_file.sync(datasync)
     }
 }
 
-impl<T: EncryptionTranslator> SetLen for CryptFsFile<T> {
+impl<T: EncryptionTranslator, F: StorageFile> SetLen for CryptFsFile<T, F> {
     /// Resizes the plain file while keeping the final encrypted block consistent.
     fn set_len(&self, target_plain_len: u64) -> std::io::Result<()> {
         if target_plain_len > 0 {
@@ -480,7 +450,10 @@ mod tests {
     use tempfile::tempdir;
 
     /// Creates a test file backed by a freshly initialized GoCryptFS repository.
-    fn open_gocryptfs_test_file() -> (tempfile::TempDir, CryptFsFile<GoCryptFs<FsBackend>>) {
+    fn open_gocryptfs_test_file() -> (
+        tempfile::TempDir,
+        CryptFsFile<GoCryptFs<FsBackend>, std::fs::File>,
+    ) {
         let temp_dir = tempdir().unwrap();
         let root = Utf8Path::from_path(temp_dir.path()).unwrap();
         GoCryptFs::<FsBackend>::init_with_default_params(root, "password").unwrap();
@@ -488,13 +461,20 @@ mod tests {
 
         let mut options = GenericOpenOptions::default();
         options.read(true).write(true).create(true);
-        let file = CryptFsFile::try_open(&root.join("cipher.bin"), backend, options).unwrap();
+        let cipher_file = backend
+            .lower_fs()
+            .open_file_with(&root.join("cipher.bin"), options)
+            .unwrap();
+        let file = CryptFsFile::try_from_file(cipher_file, backend, false).unwrap();
 
         (temp_dir, file)
     }
 
     /// Creates a test file backed by a freshly initialized Cryptomator repository.
-    fn open_cryptomator_test_file() -> (tempfile::TempDir, CryptFsFile<CryptoMator<FsBackend>>) {
+    fn open_cryptomator_test_file() -> (
+        tempfile::TempDir,
+        CryptFsFile<CryptoMator<FsBackend>, std::fs::File>,
+    ) {
         let temp_dir = tempdir().unwrap();
         let root = Utf8Path::from_path(temp_dir.path()).unwrap();
         CryptoMator::<FsBackend>::init_with_default_params(root, "password").unwrap();
@@ -502,7 +482,11 @@ mod tests {
 
         let mut options = GenericOpenOptions::default();
         options.read(true).write(true).create(true);
-        let file = CryptFsFile::try_open(&root.join("cipher.bin"), backend, options).unwrap();
+        let cipher_file = backend
+            .lower_fs()
+            .open_file_with(&root.join("cipher.bin"), options)
+            .unwrap();
+        let file = CryptFsFile::try_from_file(cipher_file, backend, false).unwrap();
 
         (temp_dir, file)
     }
@@ -677,7 +661,11 @@ mod tests {
 
         let mut options = GenericOpenOptions::default();
         options.read(true).write(true).create(true);
-        let _file = CryptFsFile::try_open(&root.join("cipher.bin"), backend, options).unwrap();
+        let cipher_file = backend
+            .lower_fs()
+            .open_file_with(&root.join("cipher.bin"), options)
+            .unwrap();
+        let _file = CryptFsFile::try_from_file(cipher_file, backend, false).unwrap();
 
         let raw_len = std::fs::metadata(root.join("cipher.bin")).unwrap().len();
         assert_eq!(raw_len, CryptoMator::<FsBackend>::HEADER_LEN as u64);

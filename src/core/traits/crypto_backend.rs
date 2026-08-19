@@ -1,5 +1,8 @@
 use super::super::FsCacheEntry;
-use super::{FsDirEntry, Metadata, Permissions, Result, Utf8Path, Utf8PathBuf};
+use super::{
+    FsDirEntry, GenericOpenOptions, Metadata, ModifiedTime, Permissions, ReadAt, Result, SetLen,
+    SetSync, Size, Utf8Path, Utf8PathBuf, WriteAt,
+};
 use super::{
     default_create_symlink, default_metadata, default_mkdir, default_mknode, default_read_symlink,
     default_remove, default_remove_dir, default_rename, default_set_permissions, default_set_time,
@@ -158,7 +161,33 @@ pub trait EncryptionLayout: CipherPathLayout {
     }
 }
 
-pub trait MinimalFs {
+pub trait StorageFile:
+    ReadAt + WriteAt + SetLen + SetSync + Size + ModifiedTime + Send + Sync + 'static
+{
+}
+
+impl<T> StorageFile for T where
+    T: ReadAt + WriteAt + SetLen + SetSync + Size + ModifiedTime + Send + Sync + 'static
+{
+}
+
+pub trait MinimalFs: Send + Sync + 'static {
+    type File: StorageFile;
+    type DirEntry: Iterator<Item = std::io::Result<FsDirEntry>>;
+    fn open_file_with(
+        &self,
+        path: &Utf8Path,
+        options: GenericOpenOptions,
+    ) -> std::io::Result<Self::File>;
+
+    fn set_time(
+        &self,
+        path: &Utf8Path,
+        atime: Option<SystemTime>,
+        mtime: Option<SystemTime>,
+    ) -> std::io::Result<()>;
+
+    fn chown(&self, path: &Utf8Path, uid: Option<u32>, gid: Option<u32>) -> std::io::Result<()>;
     fn metadata(&self, path: &Utf8Path) -> std::io::Result<Metadata>;
     fn exists(&self, path: &Utf8Path) -> std::io::Result<bool>;
     fn mkdir(&self, path: &Utf8Path) -> std::io::Result<()>;
@@ -166,13 +195,60 @@ pub trait MinimalFs {
     fn rename(&self, old_path: &Utf8Path, new_path: &Utf8Path) -> std::io::Result<()>;
     fn remove_file(&self, path: &Utf8Path) -> std::io::Result<()>;
     fn remove_dir(&self, path: &Utf8Path, all: bool) -> std::io::Result<()>;
-    fn put(&self, path: &Utf8Path, data: &[u8]) -> std::io::Result<()>;
-    fn read_at(&self, path: &Utf8Path, offset: u64, buffer: &mut [u8]) -> std::io::Result<usize>;
+    fn put(&self, path: &Utf8Path, data: &[u8]) -> std::io::Result<()> {
+        let mut options = GenericOpenOptions::default();
+        options.write(true).truncate(true).create(true);
+        self.open_file_with(path, options)?.write_all_at(0, data)
+    }
+    fn put_new(&self, path: &Utf8Path, data: &[u8]) -> std::io::Result<()> {
+        let mut options = GenericOpenOptions::default();
+        options.write(true).create_new(true);
+        self.open_file_with(path, options)?.write_all_at(0, data)
+    }
+    fn read_at(&self, path: &Utf8Path, offset: u64, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let mut options = GenericOpenOptions::default();
+        options.read(true);
+        self.open_file_with(path, options)?.read_at(offset, buffer)
+    }
     fn read(&self, path: &Utf8Path, offset: u64, size: usize) -> std::io::Result<Vec<u8>> {
         let mut buffer = vec![0; size];
         let bytes_read = self.read_at(path, offset, &mut buffer)?;
         buffer.truncate(bytes_read);
         Ok(buffer)
+    }
+    fn read_all(&self, path: &Utf8Path) -> std::io::Result<Vec<u8>> {
+        let mut options = GenericOpenOptions::default();
+        options.read(true);
+        let file = self.open_file_with(path, options)?;
+        let size = file
+            .size()?
+            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EISDIR))?;
+        let size =
+            usize::try_from(size).map_err(|_| std::io::Error::from_raw_os_error(libc::EFBIG))?;
+        let mut buffer = vec![0; size];
+        file.read_exact_at(0, &mut buffer)?;
+        Ok(buffer)
+    }
+    fn is_dir_empty(&self, path: &Utf8Path) -> std::io::Result<bool> {
+        self.list_dir(path.as_str())?
+            .next()
+            .transpose()
+            .map(|entry| entry.is_none())
+    }
+    fn mkdir_all(&self, path: &Utf8Path) -> std::io::Result<()> {
+        if self.exists(path)? {
+            return Ok(());
+        }
+        if let Some(parent) = path.parent()
+            && !parent.as_str().is_empty()
+        {
+            self.mkdir_all(parent)?;
+        }
+        match self.mkdir(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(error) => Err(error),
+        }
     }
     fn set_permissions(
         &self,
@@ -185,8 +261,5 @@ pub trait MinimalFs {
     fn set_xattr(&self, path: &str, name: &str, value: &[u8]) -> std::io::Result<()>;
     fn read_symlink(&self, path: &str) -> std::io::Result<Utf8PathBuf>;
     fn create_symlink(&self, path: &str, target_path: &str) -> std::io::Result<Metadata>;
-    fn list_dir(
-        &self,
-        path: &str,
-    ) -> std::io::Result<impl Iterator<Item = std::io::Result<FsDirEntry>> + '_ + use<'_, Self>>;
+    fn list_dir(&self, path: &str) -> std::io::Result<Self::DirEntry>;
 }
