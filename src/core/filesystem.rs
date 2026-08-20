@@ -3,7 +3,7 @@ use crate::core::XattrLayout;
 use super::{
     BufferedFile, CryptFsFile, EncryptionLayout, EncryptionTranslator, FileHandle, FileSystem,
     FsDirEntry, GenericOpenOptions, Metadata, MinimalFs, OrIoError, Permissions,
-    ReadOnlyFileSystem, Utf8Path, VirtualPath,
+    ReadOnlyFileSystem, VirtualPath,
 };
 
 use std::sync::Arc;
@@ -77,7 +77,7 @@ impl<T> From<(T, Box<dyn FileCachePolicy>)> for EncryptedFileTranslator<T> {
 
 /// Opens an encrypted file and wraps it with the requested cache policy.
 fn try_open_crypt_file<T>(
-    path: &Utf8Path,
+    path: &VirtualPath,
     backend: Arc<T>,
     mut options: GenericOpenOptions,
     cache_policy: &dyn FileCachePolicy,

@@ -1,6 +1,6 @@
 use super::super::FileType;
 use super::{EncryptionLayout, MinimalFs, OrIoError};
-use super::{Metadata, Permissions, Utf8Path, Utf8PathBuf, VirtualPath};
+use super::{Metadata, Permissions, VirtualPath, VirtualPathBuf};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::Digest;
 use std::time::SystemTime;
@@ -47,8 +47,8 @@ pub(super) fn default_mkdir<T: EncryptionLayout + ?Sized>(
 /// Creates a directory with an initialization vector file.
 fn create_diriv(
     sub_fs: &impl MinimalFs,
-    path: impl AsRef<Utf8Path>,
-    diriv_path: impl AsRef<Utf8Path>,
+    path: impl AsRef<VirtualPath>,
+    diriv_path: impl AsRef<VirtualPath>,
     iv: &[u8],
 ) -> std::io::Result<()> {
     // Temporary paths are owned exclusively by the current process. Reusing the
@@ -103,8 +103,7 @@ pub(super) fn default_create_symlink<T: EncryptionLayout + ?Sized>(
         .or_invalid()?;
     let cipher_target = str::from_utf8(&cipher_target).or_invalid()?;
 
-    this.lower_fs()
-        .create_symlink(&cipher_path, Utf8Path::new(cipher_target))
+    this.lower_fs().create_symlink(&cipher_path, cipher_target)
 }
 pub(super) fn default_read_symlink<T: EncryptionLayout + ?Sized>(
     this: &T,
@@ -113,7 +112,7 @@ pub(super) fn default_read_symlink<T: EncryptionLayout + ?Sized>(
     let cipher_path = this.plain_path_to_cipher(plain_path).or_invalid()?;
     let cipher_target = this.lower_fs().read_symlink(&cipher_path)?;
     let plain_value = this
-        .cipher_metavalue_to_plain(cipher_target.as_str().as_bytes())
+        .cipher_metavalue_to_plain(cipher_target.as_bytes())
         .or_invalid()?;
 
     String::from_utf8(plain_value).or_invalid()
@@ -153,7 +152,7 @@ pub(super) fn default_set_time<T: EncryptionLayout + ?Sized>(
     this.lower_fs().set_time(&path, atime, mtime)
 }
 
-pub(crate) fn temp_file_path(root: &Utf8Path, path: &str, is_dir_iv: bool) -> Utf8PathBuf {
+pub(crate) fn temp_file_path(path: &str, is_dir_iv: bool) -> VirtualPathBuf {
     // Temporary names are deterministic on purpose. This assumes a single
     // rcryptfs process owns a backend at a time; concurrent multi-process
     // access to the same encrypted root is undefined behavior.
@@ -161,9 +160,8 @@ pub(crate) fn temp_file_path(root: &Utf8Path, path: &str, is_dir_iv: bool) -> Ut
     let mut new_name = String::from("temp.");
     new_name.push_str(&path_digest);
 
-    let mut result = root.join(new_name);
     if is_dir_iv {
-        result.add_extension("diriv");
+        new_name.push_str(".diriv");
     }
-    result
+    new_name.into()
 }

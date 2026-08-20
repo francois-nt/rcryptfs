@@ -1,4 +1,5 @@
-use std::{borrow::Borrow, fmt, ops::Deref};
+use camino::{Utf8Path, Utf8PathBuf};
+use std::{borrow::Borrow, fmt, ops::Deref, str::FromStr};
 
 /// Borrowed UTF-8 path whose only separator is the Unix slash.
 #[repr(transparent)]
@@ -6,10 +7,15 @@ use std::{borrow::Borrow, fmt, ops::Deref};
 pub struct VirtualPath(str);
 
 impl VirtualPath {
+    /// Returns the virtual filesystem root.
+    pub fn root<'a>() -> &'a Self {
+        Self::new("")
+    }
+
     /// Reinterprets a UTF-8 string as a Unix path without platform-dependent parsing.
-    pub fn new(path: &str) -> &Self {
+    pub fn new<S: AsRef<str> + ?Sized>(path: &S) -> &Self {
         // SAFETY: VirtualPath has the same representation as str.
-        unsafe { &*(path as *const str as *const Self) }
+        unsafe { &*(path.as_ref() as *const str as *const Self) }
     }
 
     /// Returns the underlying UTF-8 representation.
@@ -53,6 +59,58 @@ impl VirtualPath {
         let mut result = self.to_owned();
         result.push(path);
         result
+    }
+}
+
+/// Joins virtual paths below native UTF-8 roots.
+pub trait JoinVirtualPath {
+    /// Converts a virtual path into a native path below this root.
+    ///
+    /// Leading slashes refer to the virtual root. Parent components are
+    /// normalized, and paths escaping above the root are rejected. This
+    /// operation is lexical and does not resolve native symlinks.
+    fn join_virtual_path(&self, path: &VirtualPath) -> std::io::Result<Utf8PathBuf>;
+}
+
+impl JoinVirtualPath for Utf8Path {
+    fn join_virtual_path(&self, path: &VirtualPath) -> std::io::Result<Utf8PathBuf> {
+        let mut result = self.to_owned();
+        let mut depth = 0usize;
+        for component in path.components() {
+            if component == "." {
+                continue;
+            }
+            if component == ".." {
+                if depth == 0 {
+                    return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+                }
+                result.pop();
+                depth -= 1;
+                continue;
+            }
+            if component.contains('\0') {
+                return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+            }
+            let native_component = Utf8Path::new(component);
+            if native_component.file_name() != Some(component) {
+                return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+            }
+            result.push(native_component);
+            depth += 1;
+        }
+        Ok(result)
+    }
+}
+
+impl AsRef<VirtualPath> for VirtualPath {
+    fn as_ref(&self) -> &VirtualPath {
+        self
+    }
+}
+
+impl<'a> From<&'a str> for &'a VirtualPath {
+    fn from(s: &'a str) -> &'a VirtualPath {
+        VirtualPath::new(s)
     }
 }
 
@@ -124,15 +182,16 @@ impl AsRef<VirtualPath> for VirtualPathBuf {
     }
 }
 
-impl AsRef<VirtualPath> for VirtualPath {
-    fn as_ref(&self) -> &VirtualPath {
-        self
-    }
-}
-
 impl From<String> for VirtualPathBuf {
     fn from(path: String) -> Self {
         Self(path)
+    }
+}
+
+impl FromStr for VirtualPathBuf {
+    type Err = core::convert::Infallible;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(VirtualPathBuf::from(s))
     }
 }
 
@@ -163,6 +222,7 @@ impl fmt::Display for VirtualPathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn backslash_is_not_a_separator() {
@@ -186,5 +246,41 @@ mod tests {
         let path = VirtualPath::new("parent").join("child");
 
         assert_eq!(path.as_str(), "parent/child");
+    }
+
+    #[test]
+    fn root_is_empty() {
+        assert!(VirtualPath::root().is_empty());
+    }
+
+    #[test]
+    fn join_virtual_path_normalizes_root_and_parent_components() {
+        let temp_dir = tempdir().unwrap();
+        let root = Utf8Path::from_path(temp_dir.path()).unwrap().to_owned();
+
+        assert_eq!(
+            root.join_virtual_path(VirtualPath::new("/hello")).unwrap(),
+            root.join("hello")
+        );
+        assert_eq!(
+            root.join_virtual_path(VirtualPath::new("a/b/../hello"))
+                .unwrap(),
+            root.join("a/hello")
+        );
+    }
+
+    #[test]
+    fn join_virtual_path_rejects_parent_components_above_root() {
+        let temp_dir = tempdir().unwrap();
+        let root = Utf8Path::from_path(temp_dir.path()).unwrap().to_owned();
+
+        assert!(
+            root.join_virtual_path(VirtualPath::new("../hello"))
+                .is_err()
+        );
+        assert!(
+            root.join_virtual_path(VirtualPath::new("a/../../hello"))
+                .is_err()
+        );
     }
 }

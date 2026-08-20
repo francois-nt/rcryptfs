@@ -1,6 +1,6 @@
 use super::{
-    Backend, CacheAccess, MinimalFs, ModifiedTime, OrIoError, ReadAt, SetLen, SetSync, Size,
-    WriteAt,
+    Backend, CacheAccess, JoinVirtualPath, MinimalFs, ModifiedTime, OrIoError, ReadAt, SetLen,
+    SetSync, Size, VirtualPath, VirtualPathBuf, WriteAt,
 };
 pub use camino::{Utf8Path, Utf8PathBuf};
 use chrono::{DateTime, Utc};
@@ -9,19 +9,17 @@ use parking_lot::Mutex;
 use std::{collections::BTreeMap, fmt::Display, fs::OpenOptions, time::SystemTime};
 use strum_macros::Display;
 
-pub type FsCacheEntry = (Vec<u8>, Utf8PathBuf);
-/// Backend configuration with cipher root path.
+pub type FsCacheEntry = (Vec<u8>, VirtualPathBuf);
+/// Backend state shared by one encrypted layout.
 pub struct FsBackend<F: MinimalFs = DefaultFs> {
-    pub cipher_root: Utf8PathBuf,
     fs: F,
     cache: Mutex<BTreeMap<String, FsCacheEntry>>,
 }
 
 impl<F: MinimalFs> FsBackend<F> {
-    /// Creates a rooted backend backed by the provided storage implementation.
-    pub fn new(cipher_root: Utf8PathBuf, fs: F) -> Self {
+    /// Creates a backend backed by the provided rooted storage implementation.
+    pub fn new(fs: F) -> Self {
         Self {
-            cipher_root,
             fs,
             cache: Default::default(),
         }
@@ -37,17 +35,33 @@ impl<F: MinimalFs> CacheAccess for FsBackend<F> {
 
 impl From<Utf8PathBuf> for FsBackend {
     fn from(value: Utf8PathBuf) -> Self {
-        Self::new(value, DefaultFs)
+        Self::new(DefaultFs::new(value))
     }
 }
 
 impl From<&Utf8Path> for FsBackend {
     fn from(value: &Utf8Path) -> Self {
-        Self::new(value.into(), DefaultFs)
+        Self::new(DefaultFs::new(value.into()))
     }
 }
 
-pub struct DefaultFs;
+/// Local filesystem implementation rooted at one native UTF-8 directory.
+#[derive(Default)]
+pub struct DefaultFs {
+    root: Utf8PathBuf,
+}
+
+impl DefaultFs {
+    /// Creates a local filesystem rooted at the provided native directory.
+    pub fn new(root: Utf8PathBuf) -> Self {
+        Self { root }
+    }
+
+    /// Resolves a virtual storage path below the configured native root.
+    fn resolve(&self, path: &VirtualPath) -> std::io::Result<Utf8PathBuf> {
+        self.root.join_virtual_path(path)
+    }
+}
 
 /// Iterates over entries returned by the local filesystem.
 pub struct FsDirentryIterator(std::fs::ReadDir);
@@ -121,16 +135,16 @@ impl MinimalFs for DefaultFs {
 
     fn open_file_with(
         &self,
-        path: &Utf8Path,
+        path: &VirtualPath,
         options: GenericOpenOptions,
     ) -> std::io::Result<Self::OpenHandle> {
         let options: OpenOptions = options.into();
-        options.open(path)
+        options.open(self.resolve(path)?)
     }
 
     fn set_time(
         &self,
-        path: &Utf8Path,
+        path: &VirtualPath,
         atime: Option<SystemTime>,
         mtime: Option<SystemTime>,
     ) -> std::io::Result<()> {
@@ -138,20 +152,22 @@ impl MinimalFs for DefaultFs {
             return Ok(());
         }
 
+        let path = self.resolve(path)?;
         if let Some((atime, mtime)) = atime.zip(mtime) {
-            filetime::set_symlink_file_times(path, atime.into(), mtime.into())
+            filetime::set_symlink_file_times(&path, atime.into(), mtime.into())
         } else {
-            let metadata = std::fs::symlink_metadata(path)?;
+            let metadata = std::fs::symlink_metadata(&path)?;
             let atime = atime.unwrap_or(metadata.accessed()?);
             let mtime = mtime.unwrap_or(metadata.modified()?);
-            filetime::set_symlink_file_times(path, atime.into(), mtime.into())
+            filetime::set_symlink_file_times(&path, atime.into(), mtime.into())
         }
     }
 
-    fn chown(&self, path: &Utf8Path, uid: Option<u32>, gid: Option<u32>) -> std::io::Result<()> {
+    fn chown(&self, path: &VirtualPath, uid: Option<u32>, gid: Option<u32>) -> std::io::Result<()> {
+        let path = self.resolve(path)?;
         #[cfg(unix)]
         {
-            std::os::unix::fs::chown(path, uid, gid)
+            std::os::unix::fs::chown(&path, uid, gid)
         }
         #[cfg(not(unix))]
         {
@@ -162,43 +178,45 @@ impl MinimalFs for DefaultFs {
 
     fn read_dir(
         &self,
-        path: &Utf8Path,
+        path: &VirtualPath,
         // impl Iterator<Item = std::io::Result<FsDirEntry>> + '_ + use<'_>
     ) -> std::io::Result<Self::DirEntries> {
-        Ok(FsDirentryIterator(std::fs::read_dir(path)?))
+        Ok(FsDirentryIterator(std::fs::read_dir(self.resolve(path)?)?))
     }
-    fn metadata(&self, path: &Utf8Path) -> std::io::Result<Metadata> {
-        Ok(std::fs::symlink_metadata(path)?.into())
+    fn metadata(&self, path: &VirtualPath) -> std::io::Result<Metadata> {
+        Ok(std::fs::symlink_metadata(self.resolve(path)?)?.into())
     }
-    fn exists(&self, path: &Utf8Path) -> std::io::Result<bool> {
-        std::fs::exists(path)
+    fn exists(&self, path: &VirtualPath) -> std::io::Result<bool> {
+        std::fs::exists(self.resolve(path)?)
     }
-    fn mkdir(&self, path: &Utf8Path) -> std::io::Result<()> {
-        std::fs::create_dir(path)
+    fn mkdir(&self, path: &VirtualPath) -> std::io::Result<()> {
+        std::fs::create_dir(self.resolve(path)?)
     }
-    fn mknode(&self, path: &Utf8Path) -> std::io::Result<()> {
-        std::fs::File::create_new(path)?;
+    fn mknode(&self, path: &VirtualPath) -> std::io::Result<()> {
+        std::fs::File::create_new(self.resolve(path)?)?;
         Ok(())
     }
-    fn rename(&self, old_path: &Utf8Path, new_path: &Utf8Path) -> std::io::Result<()> {
-        std::fs::rename(old_path, new_path)
+    fn rename(&self, old_path: &VirtualPath, new_path: &VirtualPath) -> std::io::Result<()> {
+        std::fs::rename(self.resolve(old_path)?, self.resolve(new_path)?)
     }
-    fn remove_file(&self, path: &Utf8Path) -> std::io::Result<()> {
-        std::fs::remove_file(path)
+    fn remove_file(&self, path: &VirtualPath) -> std::io::Result<()> {
+        std::fs::remove_file(self.resolve(path)?)
     }
-    fn remove_dir(&self, path: &Utf8Path, all: bool) -> std::io::Result<()> {
+    fn remove_dir(&self, path: &VirtualPath, all: bool) -> std::io::Result<()> {
+        let path = self.resolve(path)?;
         if all {
-            std::fs::remove_dir_all(path)
+            std::fs::remove_dir_all(&path)
         } else {
-            std::fs::remove_dir(path)
+            std::fs::remove_dir(&path)
         }
     }
     fn set_permissions(
         &self,
-        path: &Utf8Path,
+        path: &VirtualPath,
         permissions: Permissions,
     ) -> std::io::Result<Metadata> {
-        let metadata = std::fs::symlink_metadata(path)?;
+        let path = self.resolve(path)?;
+        let metadata = std::fs::symlink_metadata(&path)?;
         log::debug!("metadata {:?}", metadata);
         let mut file_permissions = metadata.permissions();
         let new_mode: u16 = permissions.into();
@@ -209,13 +227,14 @@ impl MinimalFs for DefaultFs {
         std::os::unix::fs::PermissionsExt::set_mode(&mut file_permissions, new_mode as u32);
 
         log::debug!("setting permissions {:?}", file_permissions);
-        std::fs::set_permissions(path, file_permissions)?;
+        std::fs::set_permissions(&path, file_permissions)?;
         let mut metadata: Metadata = metadata.into();
         metadata.permissions = new_mode.into();
         log::debug!("metadata are {metadata}");
         Ok(metadata)
     }
-    fn get_xattr(&self, path: &Utf8Path, name: &str) -> std::io::Result<Vec<u8>> {
+    fn get_xattr(&self, path: &VirtualPath, name: &str) -> std::io::Result<Vec<u8>> {
+        let path = self.resolve(path)?;
         #[cfg(not(unix))]
         {
             let _ = (path, name);
@@ -223,10 +242,11 @@ impl MinimalFs for DefaultFs {
         }
         #[cfg(unix)]
         {
-            xattr::get(path, name)?.or_io_error(libc::ENODATA)
+            xattr::get(&path, name)?.or_io_error(libc::ENODATA)
         }
     }
-    fn list_xattr(&self, path: &Utf8Path) -> std::io::Result<Vec<String>> {
+    fn list_xattr(&self, path: &VirtualPath) -> std::io::Result<Vec<String>> {
+        let path = self.resolve(path)?;
         #[cfg(not(unix))]
         {
             let _ = path;
@@ -234,12 +254,13 @@ impl MinimalFs for DefaultFs {
         }
         #[cfg(unix)]
         {
-            Ok(xattr::list(path)?
+            Ok(xattr::list(&path)?
                 .flat_map(move |s| s.to_str().map(|s| s.to_string()))
                 .collect())
         }
     }
-    fn remove_xattr(&self, path: &Utf8Path, name: &str) -> std::io::Result<()> {
+    fn remove_xattr(&self, path: &VirtualPath, name: &str) -> std::io::Result<()> {
+        let path = self.resolve(path)?;
         #[cfg(not(unix))]
         {
             let _ = (path, name);
@@ -247,10 +268,11 @@ impl MinimalFs for DefaultFs {
         }
         #[cfg(unix)]
         {
-            xattr::remove(path, name)
+            xattr::remove(&path, name)
         }
     }
-    fn set_xattr(&self, path: &Utf8Path, name: &str, value: &[u8]) -> std::io::Result<()> {
+    fn set_xattr(&self, path: &VirtualPath, name: &str, value: &[u8]) -> std::io::Result<()> {
+        let path = self.resolve(path)?;
         #[cfg(not(unix))]
         {
             let _ = (path, name, value);
@@ -258,25 +280,32 @@ impl MinimalFs for DefaultFs {
         }
         #[cfg(unix)]
         {
-            xattr::set(path, name, value)
+            xattr::set(&path, name, value)
         }
     }
-    fn read_symlink(&self, path: &Utf8Path) -> std::io::Result<Utf8PathBuf> {
-        std::fs::read_link(path)?.try_into().or_invalid()
+    fn read_symlink(&self, path: &VirtualPath) -> std::io::Result<String> {
+        let target: Utf8PathBuf = std::fs::read_link(self.resolve(path)?)?
+            .try_into()
+            .or_invalid()?;
+        Ok(target.into_string())
     }
-    fn create_symlink(&self, path: &Utf8Path, target_path: &Utf8Path) -> std::io::Result<Metadata> {
+    fn create_symlink(&self, path: &VirtualPath, target: &str) -> std::io::Result<Metadata> {
+        let path = self.resolve(path)?;
         #[cfg(unix)]
-        std::os::unix::fs::symlink(target_path, path)?;
+        std::os::unix::fs::symlink(target, &path)?;
         #[cfg(not(unix))]
-        std::os::windows::fs::symlink_file(target_path, path)?;
+        std::os::windows::fs::symlink_file(target, &path)?;
 
-        let metadata: Metadata = std::fs::symlink_metadata(path)?.into();
+        let metadata: Metadata = std::fs::symlink_metadata(&path)?.into();
         Ok(metadata)
     }
 }
 
 /// In-memory backend for testing.
-pub struct MemoryBackend;
+#[derive(Default)]
+pub struct MemoryBackend {
+    fs: DefaultFs,
+}
 impl<F: MinimalFs> Backend for FsBackend<F> {
     type LowerFs = F;
     fn get_fs(&self) -> &F {
@@ -286,7 +315,7 @@ impl<F: MinimalFs> Backend for FsBackend<F> {
 impl Backend for MemoryBackend {
     type LowerFs = DefaultFs;
     fn get_fs(&self) -> &DefaultFs {
-        &DefaultFs
+        &self.fs
     }
 }
 
@@ -618,5 +647,24 @@ impl Display for Metadata {
         display_system_time(f, "\tmodification_time:", self.modified)?;
         write!(f, "\tmode: {}", self.permissions)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[cfg(unix)]
+    #[test]
+    fn default_fs_keeps_symlink_targets_opaque() {
+        let temp_dir = tempdir().unwrap();
+        let root = Utf8Path::from_path(temp_dir.path()).unwrap().to_owned();
+        let fs = DefaultFs::new(root);
+        let target = "/opaque/../target";
+
+        fs.create_symlink(VirtualPath::new("link"), target).unwrap();
+
+        assert_eq!(fs.read_symlink(VirtualPath::new("link")).unwrap(), target);
     }
 }

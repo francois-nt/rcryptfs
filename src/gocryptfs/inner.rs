@@ -1,6 +1,6 @@
 use super::GoCryptFs;
-use crate::Utf8Path;
 use crate::core::{Backend, FsBackend, MinimalFs, Result};
+use crate::{Utf8Path, VirtualPath};
 use aes::{Aes256, cipher::generic_array::GenericArray};
 use aes_gcm::{
     Aes256Gcm, AesGcm, KeyInit,
@@ -260,7 +260,7 @@ impl GoCryptFs<FsBackend> {
 impl<F: MinimalFs> GoCryptFs<FsBackend<F>> {
     /// Initializes a GoCryptFS-compatible repository on the provided storage backend.
     pub fn init_with_backend(backend: &FsBackend<F>, password: &str) -> Result<Vec<u8>> {
-        let root_path = &backend.cipher_root;
+        let root_path = VirtualPath::root();
         let fs = backend.get_fs();
         if !fs.is_dir_empty(root_path)? {
             bail!("Directory {root_path} must be empty!");
@@ -285,9 +285,7 @@ impl<F: MinimalFs> GoCryptFs<FsBackend<F>> {
     }
     /// Opens a GoCryptFS repository from the provided storage backend.
     pub fn try_new_with_backend(backend: FsBackend<F>, password: &str) -> Result<Self> {
-        let config_data = backend
-            .get_fs()
-            .read_all(&backend.cipher_root.join("gocryptfs.conf"))?;
+        let config_data = backend.get_fs().read_all("gocryptfs.conf".into())?;
         let config: GoCryptfsConfig = serde_json::from_slice(&config_data)?;
 
         let master_key = get_master_key(password, &config)?;
@@ -316,7 +314,7 @@ mod tests {
             "LongNames".to_string(),
             "Raw64".to_string(),
         ];
-        derive_keys(MemoryBackend, &master_key, &feature_flags).unwrap()
+        derive_keys(MemoryBackend::default(), &master_key, &feature_flags).unwrap()
     }
 
     #[test]

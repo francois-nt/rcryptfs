@@ -21,7 +21,7 @@ impl GoCryptFsBuilder {
     pub fn probe_backend<F: MinimalFs>(backend: &FsBackend<F>) -> bool {
         backend
             .get_fs()
-            .exists(&backend.cipher_root.join("gocryptfs.conf"))
+            .exists("gocryptfs.conf".into())
             .unwrap_or(false)
     }
 

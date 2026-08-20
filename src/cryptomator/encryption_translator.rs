@@ -258,7 +258,7 @@ mod tests {
         }
 
         CryptoMator {
-            backend: MemoryBackend,
+            backend: MemoryBackend::default(),
             siv_key,
         }
     }

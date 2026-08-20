@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use filetime::{FileTime, set_file_times};
-use rcryptfs::core::{FsBackend, Utf8Path, is_dir_empty};
+use rcryptfs::core::{FsBackend, Utf8Path, is_native_dir_empty};
 use rcryptfs::{CryptoMator, GoCryptFs, SetBackgroundChild, wait_child_mounted};
 use std::fmt::Debug;
 use std::fs::OpenOptions;
@@ -179,7 +179,7 @@ fn mount_allows_basic_file_roundtrip_for_all_backends() {
 
         assert_eq!(read_back, payload, "backend={}", backend.name());
         assert!(
-            is_dir_empty(mount_dir.path().try_into().unwrap()).unwrap(),
+            is_native_dir_empty(mount_dir.path().try_into().unwrap()).unwrap(),
             "backend={}",
             backend.name()
         );
@@ -215,7 +215,7 @@ fn mount_respects_create_new_for_all_backends() {
             backend.name()
         );
         assert!(
-            is_dir_empty(mount_dir.path().try_into().unwrap()).unwrap(),
+            is_native_dir_empty(mount_dir.path().try_into().unwrap()).unwrap(),
             "backend={}",
             backend.name()
         );
@@ -270,7 +270,7 @@ fn mount_supports_directory_listing_rename_and_removal_for_all_backends() {
 
         drop(mounted);
         assert!(
-            is_dir_empty(mount_dir.path().try_into().unwrap()).unwrap(),
+            is_native_dir_empty(mount_dir.path().try_into().unwrap()).unwrap(),
             "backend={}",
             backend.name()
         );
@@ -323,7 +323,7 @@ fn mount_supports_symlink_roundtrip_and_rename_for_all_backends() {
 
         drop(mounted);
         assert!(
-            is_dir_empty(mount_dir.path().try_into().unwrap()).unwrap(),
+            is_native_dir_empty(mount_dir.path().try_into().unwrap()).unwrap(),
             "backend={}",
             backend.name()
         );
@@ -375,7 +375,7 @@ fn mount_supports_truncate_chmod_and_utimens_for_all_backends() {
 
         drop(mounted);
         assert!(
-            is_dir_empty(mount_dir.path().try_into().unwrap()).unwrap(),
+            is_native_dir_empty(mount_dir.path().try_into().unwrap()).unwrap(),
             "backend={}",
             backend.name()
         );
@@ -436,7 +436,7 @@ fn mount_supports_backend_specific_xattr_behavior_for_all_backends() {
 
         drop(mounted);
         assert!(
-            is_dir_empty(mount_dir.path().try_into().unwrap()).unwrap(),
+            is_native_dir_empty(mount_dir.path().try_into().unwrap()).unwrap(),
             "backend={}",
             backend.name()
         );

@@ -17,9 +17,9 @@ pub use filesystem::{EncryptedFileTranslator, FileCache, FileCachePolicy, NoCach
 pub(crate) use traits::temp_file_path;
 pub use traits::*;
 pub use types::*;
-pub use virtual_path::{VirtualPath, VirtualPathBuf};
+pub use virtual_path::{JoinVirtualPath, VirtualPath, VirtualPathBuf};
 
 /// Returns whether a directory contains no entries.
-pub fn is_dir_empty(path: &Utf8Path) -> std::io::Result<bool> {
-    DefaultFs.is_dir_empty(path)
+pub fn is_native_dir_empty(path: &Utf8Path) -> std::io::Result<bool> {
+    DefaultFs::new(path.to_owned()).is_dir_empty(VirtualPath::root())
 }

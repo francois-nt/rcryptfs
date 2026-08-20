@@ -1,5 +1,6 @@
 use super::{
     FsDirEntry, GenericOpenOptions, Metadata, Permissions, Result, UnsafeCache, VirtualPath,
+    VirtualPathBuf,
 };
 pub use camino::{Utf8Path, Utf8PathBuf};
 use log::error;

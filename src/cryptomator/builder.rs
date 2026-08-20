@@ -15,7 +15,7 @@ impl CryptoMatorBuilder {
     pub fn probe_backend<F: MinimalFs>(backend: &FsBackend<F>) -> bool {
         backend
             .get_fs()
-            .exists(&backend.cipher_root.join("vault.cryptomator"))
+            .exists("vault.cryptomator".into())
             .unwrap_or(false)
     }
 

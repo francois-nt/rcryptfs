@@ -1,7 +1,7 @@
 use super::super::FsCacheEntry;
 use super::{
     FileHandle, FsDirEntry, GenericOpenOptions, Metadata, ModifiedTime, Permissions, ReadAt,
-    Result, Size, Utf8Path, Utf8PathBuf, VirtualPath, WriteAt,
+    Result, Size, VirtualPath, VirtualPathBuf, WriteAt,
 };
 use super::{
     default_create_symlink, default_metadata, default_mkdir, default_mknode, default_read_symlink,
@@ -109,15 +109,15 @@ pub trait CipherPathLayout: EncryptionTranslator {
     type LowerFs: MinimalFs;
     fn lower_fs(&self) -> &Self::LowerFs;
     /// Creates a temporary name for a given path.
-    fn create_temp_name(&self, path: &str, is_dir_iv: bool) -> Utf8PathBuf;
+    fn create_temp_name(&self, path: &str, is_dir_iv: bool) -> VirtualPathBuf;
     /// Converts a plain path to its cipher text equivalent.
-    fn plain_path_to_cipher(&self, plain_path: &VirtualPath) -> Result<Utf8PathBuf>;
+    fn plain_path_to_cipher(&self, plain_path: &VirtualPath) -> Result<VirtualPathBuf>;
 
     /// Invalidates one cached plain path and its cached descendants.
     fn remove_cached_plain_path(&self, plain_path: &VirtualPath);
 
     /// Returns the path of the per-directory IV file for a cipher directory.
-    fn get_dir_iv_file(&self, cipher_folder_path: &Utf8Path) -> Utf8PathBuf;
+    fn get_dir_iv_file(&self, cipher_folder_path: &VirtualPath) -> VirtualPathBuf;
 }
 pub trait EncryptionLayout: CipherPathLayout {
     /// Lists directory entries with plain names.
@@ -125,7 +125,7 @@ pub trait EncryptionLayout: CipherPathLayout {
         &self,
         plain_path: &VirtualPath,
     ) -> std::io::Result<
-        impl Iterator<Item = std::io::Result<(FsDirEntry, Utf8PathBuf)>> + '_ + use<'_, Self>,
+        impl Iterator<Item = std::io::Result<(FsDirEntry, VirtualPathBuf)>> + '_ + use<'_, Self>,
     >;
 
     fn metadata(&self, plain_path: &VirtualPath) -> std::io::Result<Metadata> {
@@ -187,47 +187,52 @@ pub trait MinimalFs: Send + Sync + 'static {
     type DirEntries: Iterator<Item = std::io::Result<FsDirEntry>>;
     fn open_file_with(
         &self,
-        path: &Utf8Path,
+        path: &VirtualPath,
         options: GenericOpenOptions,
     ) -> std::io::Result<Self::OpenHandle>;
 
     fn set_time(
         &self,
-        path: &Utf8Path,
+        path: &VirtualPath,
         atime: Option<SystemTime>,
         mtime: Option<SystemTime>,
     ) -> std::io::Result<()>;
 
-    fn chown(&self, path: &Utf8Path, uid: Option<u32>, gid: Option<u32>) -> std::io::Result<()>;
-    fn metadata(&self, path: &Utf8Path) -> std::io::Result<Metadata>;
-    fn exists(&self, path: &Utf8Path) -> std::io::Result<bool>;
-    fn mkdir(&self, path: &Utf8Path) -> std::io::Result<()>;
-    fn mknode(&self, path: &Utf8Path) -> std::io::Result<()>;
-    fn rename(&self, old_path: &Utf8Path, new_path: &Utf8Path) -> std::io::Result<()>;
-    fn remove_file(&self, path: &Utf8Path) -> std::io::Result<()>;
-    fn remove_dir(&self, path: &Utf8Path, all: bool) -> std::io::Result<()>;
-    fn put(&self, path: &Utf8Path, data: &[u8]) -> std::io::Result<()> {
+    fn chown(&self, path: &VirtualPath, uid: Option<u32>, gid: Option<u32>) -> std::io::Result<()>;
+    fn metadata(&self, path: &VirtualPath) -> std::io::Result<Metadata>;
+    fn exists(&self, path: &VirtualPath) -> std::io::Result<bool>;
+    fn mkdir(&self, path: &VirtualPath) -> std::io::Result<()>;
+    fn mknode(&self, path: &VirtualPath) -> std::io::Result<()>;
+    fn rename(&self, old_path: &VirtualPath, new_path: &VirtualPath) -> std::io::Result<()>;
+    fn remove_file(&self, path: &VirtualPath) -> std::io::Result<()>;
+    fn remove_dir(&self, path: &VirtualPath, all: bool) -> std::io::Result<()>;
+    fn put(&self, path: &VirtualPath, data: &[u8]) -> std::io::Result<()> {
         let mut options = GenericOpenOptions::default();
         options.write(true).truncate(true).create(true);
         self.open_file_with(path, options)?.write_all_at(0, data)
     }
-    fn put_new(&self, path: &Utf8Path, data: &[u8]) -> std::io::Result<()> {
+    fn put_new(&self, path: &VirtualPath, data: &[u8]) -> std::io::Result<()> {
         let mut options = GenericOpenOptions::default();
         options.write(true).create_new(true);
         self.open_file_with(path, options)?.write_all_at(0, data)
     }
-    fn read_at(&self, path: &Utf8Path, offset: u64, buffer: &mut [u8]) -> std::io::Result<usize> {
+    fn read_at(
+        &self,
+        path: &VirtualPath,
+        offset: u64,
+        buffer: &mut [u8],
+    ) -> std::io::Result<usize> {
         let mut options = GenericOpenOptions::default();
         options.read(true);
         self.open_file_with(path, options)?.read_at(offset, buffer)
     }
-    fn read(&self, path: &Utf8Path, offset: u64, size: usize) -> std::io::Result<Vec<u8>> {
+    fn read(&self, path: &VirtualPath, offset: u64, size: usize) -> std::io::Result<Vec<u8>> {
         let mut buffer = vec![0; size];
         let bytes_read = self.read_at(path, offset, &mut buffer)?;
         buffer.truncate(bytes_read);
         Ok(buffer)
     }
-    fn read_all(&self, path: &Utf8Path) -> std::io::Result<Vec<u8>> {
+    fn read_all(&self, path: &VirtualPath) -> std::io::Result<Vec<u8>> {
         let mut options = GenericOpenOptions::default();
         options.read(true);
         let file = self.open_file_with(path, options)?;
@@ -238,13 +243,13 @@ pub trait MinimalFs: Send + Sync + 'static {
         file.read_exact_at(0, &mut buffer)?;
         Ok(buffer)
     }
-    fn is_dir_empty(&self, path: &Utf8Path) -> std::io::Result<bool> {
+    fn is_dir_empty(&self, path: &VirtualPath) -> std::io::Result<bool> {
         self.read_dir(path)?
             .next()
             .transpose()
             .map(|entry| entry.is_none())
     }
-    fn mkdir_all(&self, path: &Utf8Path) -> std::io::Result<()> {
+    fn mkdir_all(&self, path: &VirtualPath) -> std::io::Result<()> {
         if self.exists(path)? {
             return Ok(());
         }
@@ -261,14 +266,14 @@ pub trait MinimalFs: Send + Sync + 'static {
     }
     fn set_permissions(
         &self,
-        path: &Utf8Path,
+        path: &VirtualPath,
         permissions: Permissions,
     ) -> std::io::Result<Metadata>;
-    fn get_xattr(&self, path: &Utf8Path, name: &str) -> std::io::Result<Vec<u8>>;
-    fn list_xattr(&self, path: &Utf8Path) -> std::io::Result<Vec<String>>;
-    fn remove_xattr(&self, path: &Utf8Path, name: &str) -> std::io::Result<()>;
-    fn set_xattr(&self, path: &Utf8Path, name: &str, value: &[u8]) -> std::io::Result<()>;
-    fn read_symlink(&self, path: &Utf8Path) -> std::io::Result<Utf8PathBuf>;
-    fn create_symlink(&self, path: &Utf8Path, target_path: &Utf8Path) -> std::io::Result<Metadata>;
-    fn read_dir(&self, path: &Utf8Path) -> std::io::Result<Self::DirEntries>;
+    fn get_xattr(&self, path: &VirtualPath, name: &str) -> std::io::Result<Vec<u8>>;
+    fn list_xattr(&self, path: &VirtualPath) -> std::io::Result<Vec<String>>;
+    fn remove_xattr(&self, path: &VirtualPath, name: &str) -> std::io::Result<()>;
+    fn set_xattr(&self, path: &VirtualPath, name: &str, value: &[u8]) -> std::io::Result<()>;
+    fn read_symlink(&self, path: &VirtualPath) -> std::io::Result<String>;
+    fn create_symlink(&self, path: &VirtualPath, target: &str) -> std::io::Result<Metadata>;
+    fn read_dir(&self, path: &VirtualPath) -> std::io::Result<Self::DirEntries>;
 }

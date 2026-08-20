@@ -1,13 +1,13 @@
 use super::CryptoMator;
 use crate::core::{
     Backend, CacheAccess, CipherPathLayout, EncryptionLayout, EncryptionTranslator, FileType,
-    FsBackend, FsDirEntry, Metadata, MinimalFs, OrIoError, Permissions, Result, Utf8Path,
-    Utf8PathBuf, VirtualPath, VirtualPathBuf, default_remove_cached_plain_path, temp_file_path,
+    FsBackend, FsDirEntry, Metadata, MinimalFs, OrIoError, Permissions, Result, VirtualPath,
+    VirtualPathBuf, default_remove_cached_plain_path, temp_file_path,
 };
 use anyhow::{Context, anyhow};
 
 /// Reads the directory id vector from a cipher directory.
-fn read_dirid(fs: &impl MinimalFs, cipher_dir: &Utf8Path, is_root: bool) -> Result<String> {
+fn read_dirid(fs: &impl MinimalFs, cipher_dir: &VirtualPath, is_root: bool) -> Result<String> {
     if is_root {
         return Ok(String::default());
     }
@@ -23,7 +23,7 @@ fn read_dirid(fs: &impl MinimalFs, cipher_dir: &Utf8Path, is_root: bool) -> Resu
 fn folder_path_to_cipher_and_dirid<F: MinimalFs>(
     this: &CryptoMator<FsBackend<F>>,
     plain_path: &VirtualPath,
-) -> Result<(Utf8PathBuf, Vec<u8>)> {
+) -> Result<(VirtualPathBuf, Vec<u8>)> {
     this.backend.access(|cache| {
         if let Some((dir_id, cipher_path)) = cache.get(plain_path.as_str()) {
             Ok((cipher_path.to_owned(), dir_id.clone()))
@@ -35,7 +35,7 @@ fn folder_path_to_cipher_and_dirid<F: MinimalFs>(
             }
 
             let mut partial_plain_path = VirtualPathBuf::from("");
-            let mut absolute_path = Utf8PathBuf::default();
+            let mut absolute_path = VirtualPathBuf::default();
             let mut is_root = true;
             for plain_part in plain_path.iter() {
                 if let Some((dir_id, cipher_parent)) = cache.get(partial_plain_path.as_str()) {
@@ -77,27 +77,27 @@ impl<F: MinimalFs> CipherPathLayout for CryptoMator<FsBackend<F>> {
         self.backend.get_fs()
     }
     /// Resolves one logical path to its visible storage entry inside the parent storage directory.
-    fn plain_path_to_cipher(&self, plain_path: &VirtualPath) -> Result<Utf8PathBuf> {
+    fn plain_path_to_cipher(&self, plain_path: &VirtualPath) -> Result<VirtualPathBuf> {
         if plain_path.as_str().is_empty() {
             return Ok(folder_path_to_cipher_and_dirid(self, plain_path)?.0);
         }
 
-        let parent = plain_path.parent().unwrap_or_else(|| VirtualPath::new(""));
+        let parent = plain_path.parent().unwrap_or_else(VirtualPath::root);
         let name = plain_path.file_name().or_invalid()?;
         let (cipher_parent_path, dir_id) = folder_path_to_cipher_and_dirid(self, parent)?;
         let cipher_name = self.plain_name_to_cipher(&dir_id, name)?;
         Ok(cipher_parent_path.join(cipher_name))
     }
     /// Creates a temporary path inside the cipher root for rename-based updates.
-    fn create_temp_name(&self, path: &str, is_dir_iv: bool) -> Utf8PathBuf {
-        temp_file_path(&self.backend.cipher_root, path, is_dir_iv)
+    fn create_temp_name(&self, path: &str, is_dir_iv: bool) -> VirtualPathBuf {
+        temp_file_path(path, is_dir_iv)
     }
     /// Drops one cached plain path and all cached descendants derived from it.
     fn remove_cached_plain_path(&self, plain_path: &VirtualPath) {
         default_remove_cached_plain_path(&self.backend, plain_path);
     }
     /// Returns the marker file that makes a visible entry behave like a logical directory.
-    fn get_dir_iv_file(&self, cipher_folder_path: &Utf8Path) -> Utf8PathBuf {
+    fn get_dir_iv_file(&self, cipher_folder_path: &VirtualPath) -> VirtualPathBuf {
         cipher_folder_path.join("dir.c9r")
     }
 }
@@ -107,7 +107,7 @@ impl<F: MinimalFs> EncryptionLayout for CryptoMator<FsBackend<F>> {
         &self,
         plain_path: &VirtualPath,
     ) -> std::io::Result<
-        impl Iterator<Item = std::io::Result<(FsDirEntry, Utf8PathBuf)>> + '_ + use<'_, F>,
+        impl Iterator<Item = std::io::Result<(FsDirEntry, VirtualPathBuf)>> + '_ + use<'_, F>,
     > {
         // Directory listings come from the storage directory identified by the folder dir id.
         let (cipher_path, dir_id) =
@@ -165,7 +165,7 @@ impl<F: MinimalFs> EncryptionLayout for CryptoMator<FsBackend<F>> {
         log::debug!("mkdir on {plain_path}");
         // A logical directory is represented twice: once as a visible entry with dir.c9r,
         // and once as its storage directory addressed by the generated dir id.
-        let parent = plain_path.parent().unwrap_or_else(|| VirtualPath::new(""));
+        let parent = plain_path.parent().unwrap_or_else(VirtualPath::root);
         let name = plain_path.file_name().or_invalid()?;
 
         log::debug!("parent {parent} - name {name}");
@@ -298,7 +298,7 @@ trait AdujstMetadata {
     fn adjust<T: EncryptionLayout>(
         &mut self,
         this: &T,
-        path: &Utf8Path,
+        path: &VirtualPath,
         is_root: bool,
     ) -> Result<()>;
 }
@@ -307,7 +307,7 @@ impl AdujstMetadata for Metadata {
     fn adjust<T: EncryptionLayout>(
         &mut self,
         this: &T,
-        path: &Utf8Path,
+        path: &VirtualPath,
         is_root: bool,
     ) -> Result<()> {
         if self.file_type == FileType::File {
@@ -336,10 +336,10 @@ impl AdujstMetadata for Metadata {
 /// Maps one storage entry to its plain directory entry when it should be visible.
 fn map_dir_entry(
     this: &impl EncryptionLayout,
-    cipher_path: &Utf8Path,
+    cipher_path: &VirtualPath,
     dir_iv: &[u8],
     entry: std::io::Result<FsDirEntry>,
-) -> std::io::Result<Option<(FsDirEntry, Utf8PathBuf)>> {
+) -> std::io::Result<Option<(FsDirEntry, VirtualPathBuf)>> {
     match entry {
         Ok(mut entry) => {
             let cipher_name = entry.file_name.clone();
@@ -360,7 +360,7 @@ fn map_dir_entry(
                     .or_invalid()?;
                 Ok(Some((
                     entry.with_name(plain_name),
-                    cipher_path.join(Utf8Path::new(&cipher_name)),
+                    cipher_path.join(&cipher_name),
                 )))
             }
         }

@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, FromArgMatches, Parser, builder::PossibleValuesParser};
 use rcryptfs::core::{
     CacheLock, FileSystemHandler, NoCache, build_filesystem, get_providers_name, init_filesystem,
-    is_dir_empty,
+    is_native_dir_empty,
 };
 use rcryptfs::{is_background_child, platform, respawn_in_background};
 use std::io::{IsTerminal, Write};
@@ -232,7 +232,7 @@ fn read_password(cli_mode: bool, is_background_child: bool) -> Result<String> {
 }
 
 fn run_mount(mount_args: &MountArgs, is_background_child: bool) -> Result<()> {
-    if !is_dir_empty(mount_args.mount_point.as_str().into())? {
+    if !is_native_dir_empty(mount_args.mount_point.as_str().into())? {
         bail!(
             "Invalid mountpoint: directory {} not empty",
             mount_args.mount_point

@@ -459,7 +459,7 @@ mod tests {
         options.read(true).write(true).create(true);
         let cipher_file = backend
             .lower_fs()
-            .open_file_with(&root.join("cipher.bin"), options)
+            .open_file_with("cipher.bin".into(), options)
             .unwrap();
         let file = CryptFsFile::try_from_file(cipher_file, backend, false).unwrap();
 
@@ -480,7 +480,7 @@ mod tests {
         options.read(true).write(true).create(true);
         let cipher_file = backend
             .lower_fs()
-            .open_file_with(&root.join("cipher.bin"), options)
+            .open_file_with("cipher.bin".into(), options)
             .unwrap();
         let file = CryptFsFile::try_from_file(cipher_file, backend, false).unwrap();
 
@@ -659,7 +659,7 @@ mod tests {
         options.read(true).write(true).create(true);
         let cipher_file = backend
             .lower_fs()
-            .open_file_with(&root.join("cipher.bin"), options)
+            .open_file_with("cipher.bin".into(), options)
             .unwrap();
         let _file = CryptFsFile::try_from_file(cipher_file, backend, false).unwrap();
 
