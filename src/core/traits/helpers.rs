@@ -1,15 +1,15 @@
 use super::super::FileType;
 use super::{EncryptionLayout, MinimalFs, OrIoError};
-use super::{Metadata, Permissions, Utf8Path, Utf8PathBuf};
+use super::{Metadata, Permissions, VirtualPath, Utf8Path, Utf8PathBuf};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::Digest;
 use std::time::SystemTime;
 
 pub(super) fn default_metadata<T: EncryptionLayout + ?Sized>(
     this: &T,
-    plain_path: &str,
+    plain_path: &VirtualPath,
 ) -> std::io::Result<Metadata> {
-    let cipher_path = this.plain_path_to_cipher(plain_path.into()).or_invalid()?;
+    let cipher_path = this.plain_path_to_cipher(plain_path).or_invalid()?;
     let mut res: Metadata = this.lower_fs().metadata(&cipher_path)?;
     if res.file_type == FileType::File {
         res.len = this.cipher_size_to_plain(res.len).or_invalid()?;
@@ -19,20 +19,20 @@ pub(super) fn default_metadata<T: EncryptionLayout + ?Sized>(
 
 pub(super) fn default_mknode<T: EncryptionLayout + ?Sized>(
     this: &T,
-    plain_path: &str,
+    plain_path: &VirtualPath,
     permissions: Permissions,
 ) -> std::io::Result<Metadata> {
-    let cipher_path = this.plain_path_to_cipher(plain_path.into()).or_invalid()?;
+    let cipher_path = this.plain_path_to_cipher(plain_path).or_invalid()?;
     this.lower_fs().mknode(&cipher_path)?;
     this.lower_fs().set_permissions(&cipher_path, permissions)
 }
 
 pub(super) fn default_mkdir<T: EncryptionLayout + ?Sized>(
     this: &T,
-    plain_path: &str,
+    plain_path: &VirtualPath,
     permissions: Permissions,
 ) -> std::io::Result<Metadata> {
-    let cipher_path = this.plain_path_to_cipher(plain_path.into()).or_invalid()?;
+    let cipher_path = this.plain_path_to_cipher(plain_path).or_invalid()?;
     let temp_path = this.create_temp_name(cipher_path.as_str(), false);
     let dir_iv_path = this.get_dir_iv_file(&temp_path);
 
@@ -62,17 +62,17 @@ fn create_diriv(
 
 pub(super) fn default_remove<T: EncryptionLayout + ?Sized>(
     this: &T,
-    plain_path: &str,
+    plain_path: &VirtualPath,
 ) -> std::io::Result<()> {
-    let cipher_path = this.plain_path_to_cipher(plain_path.into()).or_invalid()?;
+    let cipher_path = this.plain_path_to_cipher(plain_path).or_invalid()?;
     this.lower_fs().remove_file(&cipher_path)
 }
 
 pub(super) fn default_remove_dir<T: EncryptionLayout + ?Sized>(
     this: &T,
-    plain_path: &str,
+    plain_path: &VirtualPath,
 ) -> std::io::Result<()> {
-    let cipher_path = this.plain_path_to_cipher(plain_path.into()).or_invalid()?;
+    let cipher_path = this.plain_path_to_cipher(plain_path).or_invalid()?;
     let iv_path = this.get_dir_iv_file(&cipher_path);
     let temp_path = this.create_temp_name(iv_path.as_str(), true);
 
@@ -94,10 +94,10 @@ pub(super) fn default_remove_dir<T: EncryptionLayout + ?Sized>(
 }
 pub(super) fn default_create_symlink<T: EncryptionLayout + ?Sized>(
     this: &T,
-    plain_path: &str,
+    plain_path: &VirtualPath,
     target: &str,
 ) -> std::io::Result<Metadata> {
-    let cipher_path = this.plain_path_to_cipher(plain_path.into()).or_invalid()?;
+    let cipher_path = this.plain_path_to_cipher(plain_path).or_invalid()?;
     let cipher_target = this
         .plain_metavalue_to_cipher(target.as_bytes())
         .or_invalid()?;
@@ -108,9 +108,9 @@ pub(super) fn default_create_symlink<T: EncryptionLayout + ?Sized>(
 }
 pub(super) fn default_read_symlink<T: EncryptionLayout + ?Sized>(
     this: &T,
-    plain_path: &str,
+    plain_path: &VirtualPath,
 ) -> std::io::Result<String> {
-    let cipher_path = this.plain_path_to_cipher(plain_path.into()).or_invalid()?;
+    let cipher_path = this.plain_path_to_cipher(plain_path).or_invalid()?;
     let cipher_target = this.lower_fs().read_symlink(cipher_path.as_str())?;
     let plain_value = this
         .cipher_metavalue_to_plain(cipher_target.as_str().as_bytes())
@@ -121,11 +121,11 @@ pub(super) fn default_read_symlink<T: EncryptionLayout + ?Sized>(
 
 pub(super) fn default_rename<T: EncryptionLayout + ?Sized>(
     this: &T,
-    old_path: &str,
-    new_path: &str,
+    old_path: &VirtualPath,
+    new_path: &VirtualPath,
 ) -> std::io::Result<()> {
-    let old_cipher_path = this.plain_path_to_cipher(old_path.into()).or_invalid()?;
-    let new_cipher_path = this.plain_path_to_cipher(new_path.into()).or_invalid()?;
+    let old_cipher_path = this.plain_path_to_cipher(old_path).or_invalid()?;
+    let new_cipher_path = this.plain_path_to_cipher(new_path).or_invalid()?;
     this.lower_fs().rename(&old_cipher_path, &new_cipher_path)?;
     this.remove_cached_plain_path(old_path);
     this.remove_cached_plain_path(new_path);
@@ -134,10 +134,10 @@ pub(super) fn default_rename<T: EncryptionLayout + ?Sized>(
 
 pub(super) fn default_set_permissions<T: EncryptionLayout + ?Sized>(
     this: &T,
-    plain_path: &str,
+    plain_path: &VirtualPath,
     permissions: Permissions,
 ) -> std::io::Result<Metadata> {
-    let path = this.plain_path_to_cipher(plain_path.into()).or_invalid()?;
+    let path = this.plain_path_to_cipher(plain_path).or_invalid()?;
     let metadata = this.lower_fs().set_permissions(&path, permissions)?;
 
     Ok(metadata)
@@ -145,11 +145,11 @@ pub(super) fn default_set_permissions<T: EncryptionLayout + ?Sized>(
 /// Sets access and modification times.
 pub(super) fn default_set_time<T: EncryptionLayout + ?Sized>(
     this: &T,
-    path: &str,
+    path: &VirtualPath,
     atime: Option<SystemTime>,
     mtime: Option<SystemTime>,
 ) -> std::io::Result<()> {
-    let path = this.plain_path_to_cipher(path.into()).or_invalid()?;
+    let path = this.plain_path_to_cipher(path).or_invalid()?;
     this.lower_fs().set_time(&path, atime, mtime)
 }
 

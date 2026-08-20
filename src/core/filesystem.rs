@@ -1,9 +1,9 @@
 use crate::core::XattrLayout;
 
 use super::{
-    BufferedFile, CryptFsFile, EncryptionLayout, EncryptionTranslator, FileSystem, FsDirEntry,
-    GenericOpenOptions, Metadata, MinimalFs, OrIoError, Permissions, ReadOnlyFileSystem, ReadWrite,
-    Utf8Path,
+    BufferedFile, CryptFsFile, EncryptionLayout, EncryptionTranslator, FileHandle, FileSystem,
+    FsDirEntry, GenericOpenOptions, Metadata, MinimalFs, OrIoError, Permissions,
+    ReadOnlyFileSystem, VirtualPath, Utf8Path,
 };
 
 use std::sync::Arc;
@@ -81,7 +81,7 @@ fn try_open_crypt_file<T>(
     backend: Arc<T>,
     mut options: GenericOpenOptions,
     cache_policy: &dyn FileCachePolicy,
-) -> std::io::Result<Box<dyn ReadWrite>>
+) -> std::io::Result<Box<dyn FileHandle>>
 where
     T: EncryptionTranslator + EncryptionLayout + Send + Sync + 'static,
 {
@@ -107,8 +107,8 @@ impl<T> ReadOnlyFileSystem for EncryptedFileTranslator<T>
 where
     T: EncryptionTranslator + EncryptionLayout + XattrLayout + Send + Sync + 'static,
 {
-    fn open_readonly(&self, path: &str) -> std::io::Result<Box<dyn ReadWrite>> {
-        let cipher_path = self.fs.plain_path_to_cipher(path.into()).or_invalid()?;
+    fn open_readonly(&self, path: &VirtualPath) -> std::io::Result<Box<dyn FileHandle>> {
+        let cipher_path = self.fs.plain_path_to_cipher(path).or_invalid()?;
         let mut options = GenericOpenOptions::default();
         options.read(true);
         try_open_crypt_file(
@@ -118,24 +118,27 @@ where
             self.cache_policy.as_ref(),
         )
     }
-    fn metadata(&self, path: &str) -> std::io::Result<Metadata> {
+    fn metadata(&self, path: &VirtualPath) -> std::io::Result<Metadata> {
         self.fs.metadata(path)
     }
-    fn read_dir(&self, path: &str) -> std::io::Result<Box<dyn Iterator<Item = FsDirEntry> + '_>> {
+    fn read_dir(
+        &self,
+        path: &VirtualPath,
+    ) -> std::io::Result<Box<dyn Iterator<Item = FsDirEntry> + '_>> {
         let it = self
             .fs
-            .list_dir_plain_names(path.into())
+            .list_dir_plain_names(path)
             .or_invalid()?
             .filter_map(|it| Some(it.ok()?.0));
         Ok(Box::new(it))
     }
-    fn read_symlink(&self, path: &str) -> std::io::Result<String> {
+    fn read_symlink(&self, path: &VirtualPath) -> std::io::Result<String> {
         self.fs.read_symlink(path)
     }
-    fn get_xattr(&self, path: &str, name: &str) -> std::io::Result<Vec<u8>> {
+    fn get_xattr(&self, path: &VirtualPath, name: &str) -> std::io::Result<Vec<u8>> {
         self.fs.get_xattr(path, name)
     }
-    fn list_xattr(&self, path: &str) -> std::io::Result<Vec<String>> {
+    fn list_xattr(&self, path: &VirtualPath) -> std::io::Result<Vec<String>> {
         self.fs.list_xattr(path)
     }
 }
@@ -147,10 +150,10 @@ where
     /// Opens a file with the specified options.
     fn open_file_with(
         &self,
-        path: &str,
+        path: &VirtualPath,
         options: GenericOpenOptions,
-    ) -> std::io::Result<Box<dyn ReadWrite>> {
-        let cipher_path = self.fs.plain_path_to_cipher(path.into()).or_invalid()?;
+    ) -> std::io::Result<Box<dyn FileHandle>> {
+        let cipher_path = self.fs.plain_path_to_cipher(path).or_invalid()?;
         try_open_crypt_file(
             &cipher_path,
             self.fs.clone(),
@@ -159,36 +162,40 @@ where
         )
     }
     /// Creates a new directory with given permissions.
-    fn mkdir(&self, path: &str, permissions: Permissions) -> std::io::Result<Metadata> {
+    fn mkdir(&self, path: &VirtualPath, permissions: Permissions) -> std::io::Result<Metadata> {
         self.fs.mkdir(path, permissions)
     }
-    fn mknode(&self, path: &str, permissions: Permissions) -> std::io::Result<Metadata> {
+    fn mknode(&self, path: &VirtualPath, permissions: Permissions) -> std::io::Result<Metadata> {
         self.fs.mknode(path, permissions)
     }
-    fn remove(&self, path: &str) -> std::io::Result<()> {
+    fn remove(&self, path: &VirtualPath) -> std::io::Result<()> {
         self.fs.remove(path)
     }
-    fn remove_dir(&self, path: &str) -> std::io::Result<()> {
+    fn remove_dir(&self, path: &VirtualPath) -> std::io::Result<()> {
         if path.is_empty() {
             return Err(std::io::Error::from_raw_os_error(libc::ENOTEMPTY));
         }
         self.fs.remove_dir(path)
     }
-    fn rename(&self, old_path: &str, new_path: &str) -> std::io::Result<()> {
+    fn rename(&self, old_path: &VirtualPath, new_path: &VirtualPath) -> std::io::Result<()> {
         self.fs.rename(old_path, new_path)
     }
-    fn set_permissions(&self, path: &str, permissions: Permissions) -> std::io::Result<Metadata> {
+    fn set_permissions(
+        &self,
+        path: &VirtualPath,
+        permissions: Permissions,
+    ) -> std::io::Result<Metadata> {
         self.fs.set_permissions(path, permissions)
     }
     fn set_time(
         &self,
-        path: &str,
+        path: &VirtualPath,
         atime: Option<std::time::SystemTime>,
         mtime: Option<std::time::SystemTime>,
     ) -> std::io::Result<()> {
         self.fs.set_time(path, atime, mtime)
     }
-    fn truncate(&self, path: &str, new_size: u64) -> std::io::Result<()> {
+    fn truncate(&self, path: &VirtualPath, new_size: u64) -> std::io::Result<()> {
         let mut options = GenericOpenOptions::default();
         options.read(true).write(true).append(false);
         let file = self.open_file_with(path, options)?;
@@ -197,18 +204,23 @@ where
 
         Ok(())
     }
-    fn chown(&self, path: &str, uid: Option<u32>, gid: Option<u32>) -> std::io::Result<()> {
-        let cipher_path = self.fs.plain_path_to_cipher(path.into()).or_invalid()?;
+    fn chown(
+        &self,
+        path: &VirtualPath,
+        uid: Option<u32>,
+        gid: Option<u32>,
+    ) -> std::io::Result<()> {
+        let cipher_path = self.fs.plain_path_to_cipher(path).or_invalid()?;
         self.fs.lower_fs().chown(&cipher_path, uid, gid)
     }
-    fn create_symlink(&self, path: &str, target_path: &str) -> std::io::Result<Metadata> {
+    fn create_symlink(&self, path: &VirtualPath, target_path: &str) -> std::io::Result<Metadata> {
         self.fs.create_symlink(path, target_path)
     }
 
-    fn remove_xattr(&self, path: &str, name: &str) -> std::io::Result<()> {
+    fn remove_xattr(&self, path: &VirtualPath, name: &str) -> std::io::Result<()> {
         self.fs.remove_xattr(path, name)
     }
-    fn set_xattr(&self, path: &str, name: &str, value: &[u8]) -> std::io::Result<()> {
+    fn set_xattr(&self, path: &VirtualPath, name: &str, value: &[u8]) -> std::io::Result<()> {
         self.fs.set_xattr(path, name, value)
     }
 }

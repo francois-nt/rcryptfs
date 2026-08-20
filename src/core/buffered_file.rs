@@ -1,4 +1,4 @@
-use super::{ModifiedTime, OrIoError, ReadAt, ReadWrite, SetLen, SetSync, WriteAt};
+use super::{FileHandle, ModifiedTime, OrIoError, ReadAt, SetLen, SetSync, WriteAt};
 use parking_lot::Mutex;
 
 struct State {
@@ -61,7 +61,7 @@ impl<W: WriteAt + ModifiedTime> BufferedFile<W> {
     }
 }
 
-impl<W: ReadWrite + ModifiedTime> ReadAt for BufferedFile<W> {
+impl<W: FileHandle + ModifiedTime> ReadAt for BufferedFile<W> {
     fn read_at(&self, pos: u64, buf: &mut [u8]) -> std::io::Result<usize> {
         if buf.is_empty() {
             return Ok(0);
@@ -100,14 +100,14 @@ impl<W: ReadWrite + ModifiedTime> ReadAt for BufferedFile<W> {
     }
 }
 
-impl<W: ReadWrite + ModifiedTime> SetLen for BufferedFile<W> {
+impl<W: FileHandle + ModifiedTime> SetLen for BufferedFile<W> {
     fn set_len(&self, new_size: u64) -> std::io::Result<()> {
         self.flush_staging()?;
         self.inner.set_len(new_size)
     }
 }
 
-impl<W: ReadWrite + ModifiedTime> SetSync for BufferedFile<W> {
+impl<W: FileHandle + ModifiedTime> SetSync for BufferedFile<W> {
     fn sync(&self, datasync: bool) -> std::io::Result<()> {
         self.flush()?;
         self.inner.sync(datasync)

@@ -1,8 +1,8 @@
 use super::CryptoMator;
 use crate::core::{
     Backend, CacheAccess, CipherPathLayout, EncryptionLayout, EncryptionTranslator, FileType,
-    FsBackend, FsDirEntry, Metadata, MinimalFs, OrIoError, Permissions, Result, Utf8Path,
-    Utf8PathBuf, default_remove_cached_plain_path, temp_file_path,
+    FsBackend, FsDirEntry, Metadata, MinimalFs, OrIoError, Permissions, Result, VirtualPath,
+    VirtualPathBuf, Utf8Path, Utf8PathBuf, default_remove_cached_plain_path, temp_file_path,
 };
 use anyhow::{Context, anyhow};
 
@@ -22,7 +22,7 @@ fn read_dirid(fs: &impl MinimalFs, cipher_dir: &Utf8Path, is_root: bool) -> Resu
 /// Resolves a plain folder path to its storage directory and dir id.
 fn folder_path_to_cipher_and_dirid<F: MinimalFs>(
     this: &CryptoMator<FsBackend<F>>,
-    plain_path: &Utf8Path,
+    plain_path: &VirtualPath,
 ) -> Result<(Utf8PathBuf, Vec<u8>)> {
     this.backend.access(|cache| {
         if let Some((dir_id, cipher_path)) = cache.get(plain_path.as_str()) {
@@ -34,7 +34,7 @@ fn folder_path_to_cipher_and_dirid<F: MinimalFs>(
                 return Ok((cipher_path, Vec::default()));
             }
 
-            let mut partial_plain_path = Utf8PathBuf::from("");
+            let mut partial_plain_path = VirtualPathBuf::from("");
             let mut absolute_path = Utf8PathBuf::default();
             let mut is_root = true;
             for plain_part in plain_path.iter() {
@@ -77,12 +77,12 @@ impl<F: MinimalFs> CipherPathLayout for CryptoMator<FsBackend<F>> {
         self.backend.get_fs()
     }
     /// Resolves one logical path to its visible storage entry inside the parent storage directory.
-    fn plain_path_to_cipher(&self, plain_path: &Utf8Path) -> Result<Utf8PathBuf> {
+    fn plain_path_to_cipher(&self, plain_path: &VirtualPath) -> Result<Utf8PathBuf> {
         if plain_path.as_str().is_empty() {
             return Ok(folder_path_to_cipher_and_dirid(self, plain_path)?.0);
         }
 
-        let parent = plain_path.parent().unwrap_or_else(|| "".into());
+        let parent = plain_path.parent().unwrap_or_else(|| VirtualPath::new(""));
         let name = plain_path.file_name().or_invalid()?;
         let (cipher_parent_path, dir_id) = folder_path_to_cipher_and_dirid(self, parent)?;
         let cipher_name = self.plain_name_to_cipher(&dir_id, name)?;
@@ -93,7 +93,7 @@ impl<F: MinimalFs> CipherPathLayout for CryptoMator<FsBackend<F>> {
         temp_file_path(&self.backend.cipher_root, path, is_dir_iv)
     }
     /// Drops one cached plain path and all cached descendants derived from it.
-    fn remove_cached_plain_path(&self, plain_path: &str) {
+    fn remove_cached_plain_path(&self, plain_path: &VirtualPath) {
         default_remove_cached_plain_path(&self.backend, plain_path);
     }
     /// Returns the marker file that makes a visible entry behave like a logical directory.
@@ -105,7 +105,7 @@ impl<F: MinimalFs> CipherPathLayout for CryptoMator<FsBackend<F>> {
 impl<F: MinimalFs> EncryptionLayout for CryptoMator<FsBackend<F>> {
     fn list_dir_plain_names(
         &self,
-        plain_path: &Utf8Path,
+        plain_path: &VirtualPath,
     ) -> std::io::Result<impl Iterator<Item = Result<(FsDirEntry, Utf8PathBuf)>> + '_ + use<'_, F>>
     {
         // Directory listings come from the storage directory identified by the folder dir id.
@@ -145,9 +145,9 @@ impl<F: MinimalFs> EncryptionLayout for CryptoMator<FsBackend<F>> {
         // }))
     }
 
-    fn metadata(&self, plain_path: &str) -> std::io::Result<Metadata> {
+    fn metadata(&self, plain_path: &VirtualPath) -> std::io::Result<Metadata> {
         // Metadata must be rewritten from the raw storage view to the logical Cryptomator view.
-        let cipher_path = self.plain_path_to_cipher(plain_path.into()).or_invalid()?;
+        let cipher_path = self.plain_path_to_cipher(plain_path).or_invalid()?;
         log::debug!("metadata on [{plain_path}] : {cipher_path}");
         let mut metadata = self.lower_fs().metadata(&cipher_path)?;
         metadata
@@ -156,12 +156,15 @@ impl<F: MinimalFs> EncryptionLayout for CryptoMator<FsBackend<F>> {
         Ok(metadata)
     }
 
-    fn mkdir(&self, plain_path: &str, permissions: Permissions) -> std::io::Result<Metadata> {
+    fn mkdir(
+        &self,
+        plain_path: &VirtualPath,
+        permissions: Permissions,
+    ) -> std::io::Result<Metadata> {
         log::debug!("mkdir on {plain_path}");
         // A logical directory is represented twice: once as a visible entry with dir.c9r,
         // and once as its storage directory addressed by the generated dir id.
-        let plain_path: &Utf8Path = plain_path.into();
-        let parent = plain_path.parent().unwrap_or_else(|| "".into());
+        let parent = plain_path.parent().unwrap_or_else(|| VirtualPath::new(""));
         let name = plain_path.file_name().or_invalid()?;
 
         log::debug!("parent {parent} - name {name}");
@@ -209,17 +212,21 @@ impl<F: MinimalFs> EncryptionLayout for CryptoMator<FsBackend<F>> {
             .or_invalid()?;
         self.lower_fs().set_permissions(&cipher_path, permissions)
     }
-    fn mknode(&self, plain_path: &str, permissions: Permissions) -> std::io::Result<Metadata> {
+    fn mknode(
+        &self,
+        plain_path: &VirtualPath,
+        permissions: Permissions,
+    ) -> std::io::Result<Metadata> {
         // Empty logical files are materialized with a header immediately.
-        let cipher_path = self.plain_path_to_cipher(plain_path.into()).or_invalid()?;
+        let cipher_path = self.plain_path_to_cipher(plain_path).or_invalid()?;
         self.lower_fs()
             .put(&cipher_path, &self.generate_cipher_header().or_invalid()?)
             .or_invalid()?;
         self.lower_fs().set_permissions(&cipher_path, permissions)
     }
-    fn remove_dir(&self, plain_path: &str) -> std::io::Result<()> {
+    fn remove_dir(&self, plain_path: &VirtualPath) -> std::io::Result<()> {
         // Removing a logical directory must remove both its visible entry and its storage directory.
-        let cipher_path = self.plain_path_to_cipher(plain_path.into()).or_invalid()?;
+        let cipher_path = self.plain_path_to_cipher(plain_path).or_invalid()?;
         let is_root = plain_path.is_empty();
         let dir_id = read_dirid(self.lower_fs(), &cipher_path, is_root).or_invalid()?;
 
@@ -233,18 +240,18 @@ impl<F: MinimalFs> EncryptionLayout for CryptoMator<FsBackend<F>> {
         self.remove_cached_plain_path(plain_path);
         Ok(())
     }
-    fn remove(&self, plain_path: &str) -> std::io::Result<()> {
+    fn remove(&self, plain_path: &VirtualPath) -> std::io::Result<()> {
         // Logical symlinks are stored as directories, so removal depends on the visible entry type.
-        let cipher_path = self.plain_path_to_cipher(plain_path.into()).or_invalid()?;
+        let cipher_path = self.plain_path_to_cipher(plain_path).or_invalid()?;
         let meta = self.lower_fs().metadata(&cipher_path)?;
         match meta.file_type {
             FileType::File => self.lower_fs().remove_file(&cipher_path),
             _ => self.lower_fs().remove_dir(&cipher_path, true),
         }
     }
-    fn read_symlink(&self, plain_path: &str) -> std::io::Result<String> {
+    fn read_symlink(&self, plain_path: &VirtualPath) -> std::io::Result<String> {
         // Logical symlink targets live in the symlink.c9r payload inside the visible entry.
-        let cipher_path = self.plain_path_to_cipher(plain_path.into()).or_invalid()?;
+        let cipher_path = self.plain_path_to_cipher(plain_path).or_invalid()?;
         let symlink_content = cipher_path.join("symlink.c9r");
         let data = self
             .lower_fs()
@@ -254,17 +261,21 @@ impl<F: MinimalFs> EncryptionLayout for CryptoMator<FsBackend<F>> {
         Ok(str::from_utf8(&target).or_invalid()?.into())
     }
     /// Ignores chmod on logical symlinks so the backing directory stays traversable.
-    fn set_permissions(&self, path: &str, permissions: Permissions) -> std::io::Result<Metadata> {
+    fn set_permissions(
+        &self,
+        path: &VirtualPath,
+        permissions: Permissions,
+    ) -> std::io::Result<Metadata> {
         let metadata = self.metadata(path)?;
         if metadata.file_type == FileType::SymLink {
             return Ok(metadata);
         }
-        let cipher_path = self.plain_path_to_cipher(path.into()).or_invalid()?;
+        let cipher_path = self.plain_path_to_cipher(path).or_invalid()?;
         self.lower_fs().set_permissions(&cipher_path, permissions)
     }
     /// Creates a logical symlink as a visible directory containing one encrypted target payload.
-    fn create_symlink(&self, plain_path: &str, target: &str) -> std::io::Result<Metadata> {
-        let cipher_path = self.plain_path_to_cipher(plain_path.into()).or_invalid()?;
+    fn create_symlink(&self, plain_path: &VirtualPath, target: &str) -> std::io::Result<Metadata> {
+        let cipher_path = self.plain_path_to_cipher(plain_path).or_invalid()?;
         let cipher_target = self
             .plain_metavalue_to_cipher(target.as_bytes())
             .or_invalid()?;
@@ -358,6 +369,11 @@ mod tests {
     use crate::core::{CipherPathLayout, EncryptionLayout, FileType, FsBackend, Utf8Path};
     use tempfile::tempdir;
 
+    /// Creates a borrowed plain path for tests.
+    fn p(path: &str) -> &VirtualPath {
+        VirtualPath::new(path)
+    }
+
     /// Creates a deterministic Cryptomator backend with a materialized root storage directory.
     fn test_backend() -> (tempfile::TempDir, CryptoMator<FsBackend>) {
         let temp_dir = tempdir().unwrap();
@@ -385,10 +401,10 @@ mod tests {
     fn create_and_read_symlink_roundtrip() {
         let (_temp_dir, backend) = test_backend();
 
-        backend.create_symlink("link", "../target.txt").unwrap();
+        backend.create_symlink(p("link"), "../target.txt").unwrap();
 
-        let target = backend.read_symlink("link").unwrap();
-        let metadata = backend.metadata("link").unwrap();
+        let target = backend.read_symlink(p("link")).unwrap();
+        let metadata = backend.metadata(p("link")).unwrap();
 
         assert_eq!(target, "../target.txt");
         assert!(metadata.file_type == FileType::SymLink);
@@ -398,10 +414,10 @@ mod tests {
     #[test]
     fn list_dir_plain_names_returns_symlink_entry() {
         let (_temp_dir, backend) = test_backend();
-        backend.create_symlink("link", "../target.txt").unwrap();
+        backend.create_symlink(p("link"), "../target.txt").unwrap();
 
         let entries: Vec<_> = backend
-            .list_dir_plain_names(Utf8Path::new(""))
+            .list_dir_plain_names(p(""))
             .unwrap()
             .map(|entry| entry.unwrap().0)
             .collect();
@@ -415,13 +431,11 @@ mod tests {
     fn metadata_reports_empty_plain_file_for_header_only_node() {
         let (_temp_dir, backend) = test_backend();
 
-        backend.mknode("empty.txt", 0o644_u16.into()).unwrap();
+        backend.mknode(p("empty.txt"), 0o644_u16.into()).unwrap();
 
-        let cipher_path = backend
-            .plain_path_to_cipher(Utf8Path::new("empty.txt"))
-            .unwrap();
+        let cipher_path = backend.plain_path_to_cipher(p("empty.txt")).unwrap();
         let raw_metadata = backend.lower_fs().metadata(&cipher_path).unwrap();
-        let plain_metadata = backend.metadata("empty.txt").unwrap();
+        let plain_metadata = backend.metadata(p("empty.txt")).unwrap();
 
         assert_eq!(
             raw_metadata.len,
@@ -435,9 +449,9 @@ mod tests {
     fn mkdir_creates_visible_and_storage_directories() {
         let (_temp_dir, backend) = test_backend();
 
-        backend.mkdir("docs", 0o755_u16.into()).unwrap();
+        backend.mkdir(p("docs"), 0o755_u16.into()).unwrap();
 
-        let cipher_path = backend.plain_path_to_cipher(Utf8Path::new("docs")).unwrap();
+        let cipher_path = backend.plain_path_to_cipher(p("docs")).unwrap();
         let dir_id = read_dirid(backend.lower_fs(), &cipher_path, false).unwrap();
         let storage_path = backend.dir_id_to_storage_path(&dir_id).unwrap();
 
@@ -449,19 +463,19 @@ mod tests {
                 .unwrap()
         );
         assert!(backend.lower_fs().exists(&storage_path).unwrap());
-        assert!(backend.metadata("docs").unwrap().file_type == FileType::Directory);
+        assert!(backend.metadata(p("docs")).unwrap().file_type == FileType::Directory);
     }
 
     #[test]
     fn remove_dir_removes_visible_and_storage_directories() {
         let (_temp_dir, backend) = test_backend();
 
-        backend.mkdir("docs", 0o755_u16.into()).unwrap();
-        let cipher_path = backend.plain_path_to_cipher(Utf8Path::new("docs")).unwrap();
+        backend.mkdir(p("docs"), 0o755_u16.into()).unwrap();
+        let cipher_path = backend.plain_path_to_cipher(p("docs")).unwrap();
         let dir_id = read_dirid(backend.lower_fs(), &cipher_path, false).unwrap();
         let storage_path = backend.dir_id_to_storage_path(&dir_id).unwrap();
 
-        backend.remove_dir("docs").unwrap();
+        backend.remove_dir(p("docs")).unwrap();
 
         assert!(!backend.lower_fs().exists(&cipher_path).unwrap());
         assert!(!backend.lower_fs().exists(&storage_path).unwrap());
@@ -471,16 +485,14 @@ mod tests {
     fn remove_deletes_file_and_symlink_entries() {
         let (_temp_dir, backend) = test_backend();
 
-        backend.mknode("file.txt", 0o644_u16.into()).unwrap();
-        let file_path = backend
-            .plain_path_to_cipher(Utf8Path::new("file.txt"))
-            .unwrap();
-        backend.remove("file.txt").unwrap();
+        backend.mknode(p("file.txt"), 0o644_u16.into()).unwrap();
+        let file_path = backend.plain_path_to_cipher(p("file.txt")).unwrap();
+        backend.remove(p("file.txt")).unwrap();
         assert!(!backend.lower_fs().exists(&file_path).unwrap());
 
-        backend.create_symlink("link", "../target.txt").unwrap();
-        let symlink_path = backend.plain_path_to_cipher(Utf8Path::new("link")).unwrap();
-        backend.remove("link").unwrap();
+        backend.create_symlink(p("link"), "../target.txt").unwrap();
+        let symlink_path = backend.plain_path_to_cipher(p("link")).unwrap();
+        backend.remove(p("link")).unwrap();
         assert!(!backend.lower_fs().exists(&symlink_path).unwrap());
     }
 
@@ -495,7 +507,7 @@ mod tests {
             .unwrap();
 
         let entries: Vec<_> = backend
-            .list_dir_plain_names(Utf8Path::new(""))
+            .list_dir_plain_names(p(""))
             .unwrap()
             .collect::<Result<Vec<_>>>()
             .unwrap();
@@ -507,57 +519,61 @@ mod tests {
     fn rename_moves_file_directory_and_symlink_entries() {
         let (_temp_dir, backend) = test_backend();
 
-        backend.mknode("file.txt", 0o644_u16.into()).unwrap();
-        backend.rename("file.txt", "file2.txt").unwrap();
-        assert!(backend.metadata("file.txt").is_err());
-        assert!(backend.metadata("file2.txt").is_ok());
-        assert!(backend.metadata("file2.txt").unwrap().file_type == FileType::File);
+        backend.mknode(p("file.txt"), 0o644_u16.into()).unwrap();
+        backend.rename(p("file.txt"), p("file2.txt")).unwrap();
+        assert!(backend.metadata(p("file.txt")).is_err());
+        assert!(backend.metadata(p("file2.txt")).is_ok());
+        assert!(backend.metadata(p("file2.txt")).unwrap().file_type == FileType::File);
 
-        backend.mkdir("docs", 0o755_u16.into()).unwrap();
-        backend.rename("docs", "docs2").unwrap();
-        assert!(backend.metadata("docs").is_err());
-        assert!(backend.metadata("docs2").is_ok());
-        assert!(backend.metadata("docs2").unwrap().file_type == FileType::Directory);
+        backend.mkdir(p("docs"), 0o755_u16.into()).unwrap();
+        backend.rename(p("docs"), p("docs2")).unwrap();
+        assert!(backend.metadata(p("docs")).is_err());
+        assert!(backend.metadata(p("docs2")).is_ok());
+        assert!(backend.metadata(p("docs2")).unwrap().file_type == FileType::Directory);
 
-        backend.create_symlink("link", "../target.txt").unwrap();
-        backend.rename("link", "link2").unwrap();
-        assert!(backend.metadata("link").is_err());
-        assert!(backend.metadata("link2").is_ok());
-        assert!(backend.metadata("link2").unwrap().file_type == FileType::SymLink);
-        assert_eq!(backend.read_symlink("link2").unwrap(), "../target.txt");
+        backend.create_symlink(p("link"), "../target.txt").unwrap();
+        backend.rename(p("link"), p("link2")).unwrap();
+        assert!(backend.metadata(p("link")).is_err());
+        assert!(backend.metadata(p("link2")).is_ok());
+        assert!(backend.metadata(p("link2")).unwrap().file_type == FileType::SymLink);
+        assert_eq!(backend.read_symlink(p("link2")).unwrap(), "../target.txt");
     }
 
     #[test]
     fn set_permissions_updates_file_directory_and_symlink_metadata() {
         let (_temp_dir, backend) = test_backend();
 
-        backend.mknode("file.txt", 0o644_u16.into()).unwrap();
+        backend.mknode(p("file.txt"), 0o644_u16.into()).unwrap();
         let file_metadata = backend
-            .set_permissions("file.txt", 0o600_u16.into())
+            .set_permissions(p("file.txt"), 0o600_u16.into())
             .unwrap();
         assert_eq!(u16::from(file_metadata.permissions), 0o600);
         assert_eq!(
-            u16::from(backend.metadata("file.txt").unwrap().permissions),
+            u16::from(backend.metadata(p("file.txt")).unwrap().permissions),
             0o600
         );
 
-        backend.mkdir("docs", 0o755_u16.into()).unwrap();
-        let dir_metadata = backend.set_permissions("docs", 0o700_u16.into()).unwrap();
+        backend.mkdir(p("docs"), 0o755_u16.into()).unwrap();
+        let dir_metadata = backend
+            .set_permissions(p("docs"), 0o700_u16.into())
+            .unwrap();
         assert_eq!(u16::from(dir_metadata.permissions), 0o700);
         assert_eq!(
-            u16::from(backend.metadata("docs").unwrap().permissions),
+            u16::from(backend.metadata(p("docs")).unwrap().permissions),
             0o700
         );
 
-        backend.create_symlink("link", "../target.txt").unwrap();
-        let symlink_after = backend.set_permissions("link", 0o600_u16.into()).unwrap();
+        backend.create_symlink(p("link"), "../target.txt").unwrap();
+        let symlink_after = backend
+            .set_permissions(p("link"), 0o600_u16.into())
+            .unwrap();
 
         assert!(symlink_after.file_type == FileType::SymLink);
-        assert_eq!(backend.read_symlink("link").unwrap(), "../target.txt");
-        assert!(backend.metadata("link").unwrap().file_type == FileType::SymLink);
+        assert_eq!(backend.read_symlink(p("link")).unwrap(), "../target.txt");
+        assert!(backend.metadata(p("link")).unwrap().file_type == FileType::SymLink);
         assert_eq!(u16::from(symlink_after.permissions), 0o777);
         assert_eq!(
-            u16::from(backend.metadata("link").unwrap().permissions),
+            u16::from(backend.metadata(p("link")).unwrap().permissions),
             0o777
         );
     }
@@ -570,32 +586,36 @@ mod tests {
         let mtime =
             std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_123);
 
-        backend.mknode("file.txt", 0o644_u16.into()).unwrap();
-        let file_before = backend.metadata("file.txt").unwrap();
+        backend.mknode(p("file.txt"), 0o644_u16.into()).unwrap();
+        let file_before = backend.metadata(p("file.txt")).unwrap();
         backend
-            .set_time("file.txt", Some(atime), Some(mtime))
+            .set_time(p("file.txt"), Some(atime), Some(mtime))
             .unwrap();
-        let file_after = backend.metadata("file.txt").unwrap();
+        let file_after = backend.metadata(p("file.txt")).unwrap();
         assert_ne!(file_before.accessed, file_after.accessed);
         assert_ne!(file_before.modified, file_after.modified);
         assert_eq!(file_after.accessed, atime);
         assert_eq!(file_after.modified, mtime);
 
-        backend.mkdir("docs", 0o755_u16.into()).unwrap();
-        let dir_before = backend.metadata("docs").unwrap();
-        backend.set_time("docs", Some(atime), Some(mtime)).unwrap();
-        let dir_after = backend.metadata("docs").unwrap();
+        backend.mkdir(p("docs"), 0o755_u16.into()).unwrap();
+        let dir_before = backend.metadata(p("docs")).unwrap();
+        backend
+            .set_time(p("docs"), Some(atime), Some(mtime))
+            .unwrap();
+        let dir_after = backend.metadata(p("docs")).unwrap();
         assert_ne!(dir_before.accessed, dir_after.accessed);
         assert_ne!(dir_before.modified, dir_after.modified);
         assert_eq!(dir_after.accessed, atime);
         assert_eq!(dir_after.modified, mtime);
 
-        backend.create_symlink("link", "../target.txt").unwrap();
-        let symlink_before = backend.metadata("link").unwrap();
-        backend.set_time("link", Some(atime), Some(mtime)).unwrap();
-        let symlink_after = backend.metadata("link").unwrap();
+        backend.create_symlink(p("link"), "../target.txt").unwrap();
+        let symlink_before = backend.metadata(p("link")).unwrap();
+        backend
+            .set_time(p("link"), Some(atime), Some(mtime))
+            .unwrap();
+        let symlink_after = backend.metadata(p("link")).unwrap();
         assert!(symlink_after.file_type == FileType::SymLink);
-        assert_eq!(backend.read_symlink("link").unwrap(), "../target.txt");
+        assert_eq!(backend.read_symlink(p("link")).unwrap(), "../target.txt");
         assert_eq!(symlink_after.accessed, atime);
         assert_eq!(symlink_after.modified, mtime);
         assert_ne!(symlink_before.accessed, symlink_after.accessed);

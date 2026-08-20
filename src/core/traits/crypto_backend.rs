@@ -1,7 +1,7 @@
 use super::super::FsCacheEntry;
 use super::{
-    FsDirEntry, GenericOpenOptions, Metadata, ModifiedTime, Permissions, ReadAt, Result, SetLen,
-    SetSync, Size, Utf8Path, Utf8PathBuf, WriteAt,
+    FileHandle, FsDirEntry, GenericOpenOptions, Metadata, ModifiedTime, Permissions, ReadAt,
+    Result, Size, VirtualPath, Utf8Path, Utf8PathBuf, WriteAt,
 };
 use super::{
     default_create_symlink, default_metadata, default_mkdir, default_mknode, default_read_symlink,
@@ -62,25 +62,25 @@ pub trait EncryptionTranslator {
 
 /// Trait for extended attribute name and value translation.
 pub trait XattrLayout: EncryptionTranslator {
-    fn get_xattr(&self, _path: &str, _name: &str) -> std::io::Result<Vec<u8>> {
+    fn get_xattr(&self, _path: &VirtualPath, _name: &str) -> std::io::Result<Vec<u8>> {
         #[cfg(not(unix))]
         return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
         #[cfg(unix)]
         return Err(std::io::Error::from_raw_os_error(libc::ENOSYS));
     }
-    fn list_xattr(&self, _path: &str) -> std::io::Result<Vec<String>> {
+    fn list_xattr(&self, _path: &VirtualPath) -> std::io::Result<Vec<String>> {
         #[cfg(not(unix))]
         return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
         #[cfg(unix)]
         return Err(std::io::Error::from_raw_os_error(libc::ENOSYS));
     }
-    fn remove_xattr(&self, _path: &str, _name: &str) -> std::io::Result<()> {
+    fn remove_xattr(&self, _path: &VirtualPath, _name: &str) -> std::io::Result<()> {
         #[cfg(not(unix))]
         return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
         #[cfg(unix)]
         return Err(std::io::Error::from_raw_os_error(libc::ENOSYS));
     }
-    fn set_xattr(&self, _path: &str, _name: &str, _value: &[u8]) -> std::io::Result<()> {
+    fn set_xattr(&self, _path: &VirtualPath, _name: &str, _value: &[u8]) -> std::io::Result<()> {
         #[cfg(not(unix))]
         return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
         #[cfg(unix)]
@@ -88,9 +88,12 @@ pub trait XattrLayout: EncryptionTranslator {
     }
 }
 
-pub(crate) fn default_remove_cached_plain_path<T: CacheAccess>(backend: &T, plain_path: &str) {
+pub(crate) fn default_remove_cached_plain_path<T: CacheAccess>(
+    backend: &T,
+    plain_path: &VirtualPath,
+) {
     backend.access(|cache| {
-        cache.remove(plain_path);
+        cache.remove(plain_path.as_str());
         // Remove cached descendants in one range operation.
         let prefix = format!("{plain_path}/");
         let end = format!("{plain_path}0"); // b'0' == b'/' + 1
@@ -108,10 +111,10 @@ pub trait CipherPathLayout: EncryptionTranslator {
     /// Creates a temporary name for a given path.
     fn create_temp_name(&self, path: &str, is_dir_iv: bool) -> Utf8PathBuf;
     /// Converts a plain path to its cipher text equivalent.
-    fn plain_path_to_cipher(&self, plain_path: &Utf8Path) -> Result<Utf8PathBuf>;
+    fn plain_path_to_cipher(&self, plain_path: &VirtualPath) -> Result<Utf8PathBuf>;
 
     /// Invalidates one cached plain path and its cached descendants.
-    fn remove_cached_plain_path(&self, plain_path: &str);
+    fn remove_cached_plain_path(&self, plain_path: &VirtualPath);
 
     /// Returns the path of the per-directory IV file for a cipher directory.
     fn get_dir_iv_file(&self, cipher_folder_path: &Utf8Path) -> Utf8PathBuf;
@@ -120,40 +123,52 @@ pub trait EncryptionLayout: CipherPathLayout {
     /// Lists directory entries with plain names.
     fn list_dir_plain_names(
         &self,
-        plain_path: &Utf8Path,
+        plain_path: &VirtualPath,
     ) -> std::io::Result<impl Iterator<Item = Result<(FsDirEntry, Utf8PathBuf)>> + '_ + use<'_, Self>>;
 
-    fn metadata(&self, plain_path: &str) -> std::io::Result<Metadata> {
+    fn metadata(&self, plain_path: &VirtualPath) -> std::io::Result<Metadata> {
         default_metadata(self, plain_path)
     }
-    fn mknode(&self, plain_path: &str, permissions: Permissions) -> std::io::Result<Metadata> {
+    fn mknode(
+        &self,
+        plain_path: &VirtualPath,
+        permissions: Permissions,
+    ) -> std::io::Result<Metadata> {
         default_mknode(self, plain_path, permissions)
     }
-    fn mkdir(&self, plain_path: &str, permissions: Permissions) -> std::io::Result<Metadata> {
+    fn mkdir(
+        &self,
+        plain_path: &VirtualPath,
+        permissions: Permissions,
+    ) -> std::io::Result<Metadata> {
         default_mkdir(self, plain_path, permissions)
     }
-    fn remove(&self, plain_path: &str) -> std::io::Result<()> {
+    fn remove(&self, plain_path: &VirtualPath) -> std::io::Result<()> {
         default_remove(self, plain_path)
     }
-    fn remove_dir(&self, plain_path: &str) -> std::io::Result<()> {
+    fn remove_dir(&self, plain_path: &VirtualPath) -> std::io::Result<()> {
         default_remove_dir(self, plain_path)
     }
-    fn create_symlink(&self, plain_path: &str, target: &str) -> std::io::Result<Metadata> {
+    fn create_symlink(&self, plain_path: &VirtualPath, target: &str) -> std::io::Result<Metadata> {
         default_create_symlink(self, plain_path, target)
     }
-    fn read_symlink(&self, plain_path: &str) -> std::io::Result<String> {
+    fn read_symlink(&self, plain_path: &VirtualPath) -> std::io::Result<String> {
         default_read_symlink(self, plain_path)
     }
-    fn rename(&self, old_path: &str, new_path: &str) -> std::io::Result<()> {
+    fn rename(&self, old_path: &VirtualPath, new_path: &VirtualPath) -> std::io::Result<()> {
         default_rename(self, old_path, new_path)
     }
-    fn set_permissions(&self, path: &str, permissions: Permissions) -> std::io::Result<Metadata> {
+    fn set_permissions(
+        &self,
+        path: &VirtualPath,
+        permissions: Permissions,
+    ) -> std::io::Result<Metadata> {
         default_set_permissions(self, path, permissions)
     }
     /// Sets access and modification times.
     fn set_time(
         &self,
-        path: &str,
+        path: &VirtualPath,
         atime: Option<SystemTime>,
         mtime: Option<SystemTime>,
     ) -> std::io::Result<()> {
@@ -161,24 +176,18 @@ pub trait EncryptionLayout: CipherPathLayout {
     }
 }
 
-pub trait StorageFile:
-    ReadAt + WriteAt + SetLen + SetSync + Size + ModifiedTime + Send + Sync + 'static
-{
-}
+pub trait StorageFile: FileHandle + Size + ModifiedTime + 'static {}
 
-impl<T> StorageFile for T where
-    T: ReadAt + WriteAt + SetLen + SetSync + Size + ModifiedTime + Send + Sync + 'static
-{
-}
+impl<T> StorageFile for T where T: FileHandle + Size + ModifiedTime + 'static {}
 
 pub trait MinimalFs: Send + Sync + 'static {
-    type File: StorageFile;
-    type DirEntry: Iterator<Item = std::io::Result<FsDirEntry>>;
+    type OpenHandle: StorageFile;
+    type DirEntries: Iterator<Item = std::io::Result<FsDirEntry>>;
     fn open_file_with(
         &self,
         path: &Utf8Path,
         options: GenericOpenOptions,
-    ) -> std::io::Result<Self::File>;
+    ) -> std::io::Result<Self::OpenHandle>;
 
     fn set_time(
         &self,
@@ -220,9 +229,7 @@ pub trait MinimalFs: Send + Sync + 'static {
         let mut options = GenericOpenOptions::default();
         options.read(true);
         let file = self.open_file_with(path, options)?;
-        let size = file
-            .size()?
-            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EISDIR))?;
+        let size = file.size()?;
         let size =
             usize::try_from(size).map_err(|_| std::io::Error::from_raw_os_error(libc::EFBIG))?;
         let mut buffer = vec![0; size];
@@ -261,5 +268,5 @@ pub trait MinimalFs: Send + Sync + 'static {
     fn set_xattr(&self, path: &str, name: &str, value: &[u8]) -> std::io::Result<()>;
     fn read_symlink(&self, path: &str) -> std::io::Result<Utf8PathBuf>;
     fn create_symlink(&self, path: &str, target_path: &str) -> std::io::Result<Metadata>;
-    fn list_dir(&self, path: &str) -> std::io::Result<Self::DirEntry>;
+    fn list_dir(&self, path: &str) -> std::io::Result<Self::DirEntries>;
 }

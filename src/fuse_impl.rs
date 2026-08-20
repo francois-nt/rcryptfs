@@ -1,6 +1,6 @@
 use crate::core::{
     FileSystem, FileSystemHandler, FileType, GenericOpenOptions, Metadata, OpenCache, OrIoError,
-    ReadOnlyFileSystem,
+    ReadOnlyFileSystem, VirtualPath,
 };
 use fuser_ng::{EntryName, EntryRef, FileAttr, Filesystem, RequestInfo, ResolvedPath};
 use log::debug;
@@ -96,7 +96,7 @@ impl HasFlag for u32 {
 fn open<T: FileSystem + ?Sized, C: OpenCache>(
     backend: &T,
     cache: &C,
-    path: &str,
+    path: &VirtualPath,
     flags: u32,
     mode: Option<u32>,
 ) -> std::io::Result<u64> {
@@ -602,11 +602,15 @@ fn read<C: OpenCache + 'static>(
 }
 
 trait Sanitize {
-    fn sanitize(&self) -> std::io::Result<&str>;
+    fn sanitize(&self) -> std::io::Result<&VirtualPath>;
 }
 
 impl Sanitize for Path {
-    fn sanitize(&self) -> std::io::Result<&str> {
-        self.strip_prefix("/").or_invalid()?.to_str().or_invalid()
+    fn sanitize(&self) -> std::io::Result<&VirtualPath> {
+        self.strip_prefix("/")
+            .or_invalid()?
+            .to_str()
+            .map(VirtualPath::new)
+            .or_invalid()
     }
 }

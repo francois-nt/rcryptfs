@@ -71,9 +71,13 @@ impl ModifiedTime for std::fs::File {
 }
 
 impl Size for std::fs::File {
-    fn size(&self) -> std::io::Result<Option<u64>> {
+    fn size(&self) -> std::io::Result<u64> {
         let metadata = self.metadata()?;
-        Ok(metadata.is_file().then_some(metadata.len()))
+        if metadata.is_file() {
+            Ok(metadata.len())
+        } else {
+            Err(std::io::Error::from_raw_os_error(libc::EISDIR))
+        }
     }
 }
 
@@ -112,14 +116,14 @@ impl SetSync for std::fs::File {
 }
 
 impl MinimalFs for DefaultFs {
-    type DirEntry = FsDirentryIterator;
-    type File = std::fs::File;
+    type DirEntries = FsDirentryIterator;
+    type OpenHandle = std::fs::File;
 
     fn open_file_with(
         &self,
         path: &Utf8Path,
         options: GenericOpenOptions,
-    ) -> std::io::Result<Self::File> {
+    ) -> std::io::Result<Self::OpenHandle> {
         let options: OpenOptions = options.into();
         options.open(path)
     }
@@ -160,7 +164,7 @@ impl MinimalFs for DefaultFs {
         &self,
         path: &str,
         // impl Iterator<Item = std::io::Result<FsDirEntry>> + '_ + use<'_>
-    ) -> std::io::Result<Self::DirEntry> {
+    ) -> std::io::Result<Self::DirEntries> {
         Ok(FsDirentryIterator(std::fs::read_dir(path)?))
     }
     fn metadata(&self, path: &Utf8Path) -> std::io::Result<Metadata> {
@@ -356,6 +360,16 @@ impl FsDirEntry {
     }
 }
 
+impl From<std::fs::DirEntry> for FsDirEntry {
+    fn from(value: std::fs::DirEntry) -> Self {
+        Self {
+            file_name: value.file_name().to_string_lossy().into_owned(),
+            file_type: value.file_type().ok().map(|v| v.into()),
+            metadata: value.metadata().ok().map(|v| v.into()),
+        }
+    }
+}
+
 impl Display for FsDirEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.file_name)?;
@@ -525,16 +539,6 @@ impl From<std::fs::Permissions> for Permissions {
     }
 }
 
-impl From<std::fs::DirEntry> for FsDirEntry {
-    fn from(value: std::fs::DirEntry) -> Self {
-        Self {
-            file_name: value.file_name().to_string_lossy().into_owned(),
-            file_type: value.file_type().ok().map(|v| v.into()),
-            metadata: value.metadata().ok().map(|v| v.into()),
-        }
-    }
-}
-
 impl From<SystemTime> for FsTime {
     /// Converts system time to a display-friendly timestamp and clamps pre-epoch values.
     fn from(value: SystemTime) -> Self {
@@ -614,78 +618,5 @@ impl Display for Metadata {
         display_system_time(f, "\tmodification_time:", self.modified)?;
         write!(f, "\tmode: {}", self.permissions)?;
         Ok(())
-    }
-}
-
-pub struct UnixPathBuf(String);
-
-impl UnixPathBuf {
-    const UNIX_SEP: char = '/';
-    pub fn push(&mut self, path: impl AsRef<str>) {
-        let path = path.as_ref();
-        if path.is_empty() {
-            return;
-        }
-        if self.0.is_empty() {
-            self.0 = path.into();
-            return;
-        }
-        if self.0.ends_with(Self::UNIX_SEP) {
-            if let Some(stripped) = path.strip_prefix(Self::UNIX_SEP) {
-                self.0.push_str(stripped);
-            } else {
-                self.0.push_str(path);
-            }
-        } else {
-            if !path.starts_with(Self::UNIX_SEP) {
-                self.0.push(Self::UNIX_SEP);
-            }
-            self.0.push_str(path);
-        }
-    }
-    pub fn join(&self, path: impl AsRef<str>) -> UnixPathBuf {
-        let mut inner_string = String::with_capacity(self.0.capacity() + path.as_ref().len() + 1);
-        inner_string.push_str(&self.0);
-        let mut buf = UnixPathBuf(inner_string);
-        buf.push(path);
-        buf
-    }
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-    pub fn into_string(self) -> String {
-        self.0
-    }
-}
-
-impl std::ops::Deref for UnixPathBuf {
-    type Target = Utf8Path;
-    fn deref(&self) -> &Self::Target {
-        self.as_ref()
-    }
-}
-
-impl AsRef<Utf8Path> for UnixPathBuf {
-    fn as_ref(&self) -> &Utf8Path {
-        self.0.as_str().into()
-    }
-}
-
-impl AsRef<std::path::Path> for UnixPathBuf {
-    fn as_ref(&self) -> &std::path::Path {
-        self.as_std_path()
-    }
-}
-
-impl From<Utf8PathBuf> for UnixPathBuf {
-    fn from(value: Utf8PathBuf) -> Self {
-        Self(value.into_string().replace('\\', "/"))
-    }
-}
-
-impl From<&Utf8Path> for UnixPathBuf {
-    fn from(value: &Utf8Path) -> Self {
-        let buf: Utf8PathBuf = value.into();
-        buf.into()
     }
 }

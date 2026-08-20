@@ -5,6 +5,7 @@ mod file;
 mod filesystem;
 mod traits;
 mod types;
+mod unix_path;
 pub use anyhow::Result;
 pub use backend_provider::{
     BackendProvider, MasterKey, PROVIDERS, build_filesystem, get_providers_name, init_filesystem,
@@ -16,6 +17,7 @@ pub use filesystem::{EncryptedFileTranslator, FileCache, FileCachePolicy, NoCach
 pub(crate) use traits::temp_file_path;
 pub use traits::*;
 pub use types::*;
+pub use unix_path::{VirtualPath, VirtualPathBuf};
 
 /// Returns whether a directory contains no entries.
 pub fn is_dir_empty(path: &Utf8Path) -> std::io::Result<bool> {

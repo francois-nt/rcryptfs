@@ -25,10 +25,10 @@ pub struct CryptFsFile<T: EncryptionTranslator, F: StorageFile> {
 impl<T: EncryptionTranslator, F: StorageFile> CryptFsFile<T, F> {
     /// Wraps an opened cipher file and eagerly loads its header when present.
     pub fn try_from_file(cipher_file: F, backend: Arc<T>, readonly: bool) -> std::io::Result<Self> {
-        let mut cipher_file_size = cipher_file.size()?.or_invalid()?;
+        let mut cipher_file_size = cipher_file.size()?;
         if T::EMPTY_FILE_HAS_HEADER && !readonly && cipher_file_size == 0 {
             cipher_file.write_all_at(0, &backend.generate_cipher_header().or_invalid()?)?;
-            cipher_file_size = cipher_file.size()?.or_invalid()?;
+            cipher_file_size = cipher_file.size()?;
         }
 
         let header = if cipher_file_size == 0 {
@@ -63,11 +63,7 @@ impl<T: EncryptionTranslator, F: StorageFile> CryptFsFile<T, F> {
     fn get_physical_size(&self) -> std::io::Result<u64> {
         self.cipher_file
             .size()
-            .inspect_err(|e| error!("catastrophic error while reading size len {e}"))?
-            .or_invalid()
-            .inspect_err(|_| {
-                error!("catastrophic error while reading size (null value)");
-            })
+            .inspect_err(|e| error!("catastrophic error while reading size len {e}"))
     }
     /// Reads and decrypts one cipher block into the caller-provided plain buffer.
     fn read_block(

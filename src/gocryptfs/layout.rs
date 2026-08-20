@@ -1,7 +1,7 @@
 use super::GoCryptFs;
 use crate::core::{
     Backend, CacheAccess, CipherPathLayout, EncryptionLayout, EncryptionTranslator, FsBackend,
-    FsDirEntry, MinimalFs, OrIoError, Result, Utf8Path, Utf8PathBuf,
+    FsDirEntry, MinimalFs, OrIoError, Result, VirtualPath, VirtualPathBuf, Utf8Path, Utf8PathBuf,
     default_remove_cached_plain_path, temp_file_path,
 };
 use anyhow::{Context, anyhow};
@@ -11,12 +11,12 @@ impl<F: MinimalFs> CipherPathLayout for GoCryptFs<FsBackend<F>> {
     fn lower_fs(&self) -> &Self::LowerFs {
         self.backend.get_fs()
     }
-    fn remove_cached_plain_path(&self, plain_path: &str) {
+    fn remove_cached_plain_path(&self, plain_path: &VirtualPath) {
         default_remove_cached_plain_path(&self.backend, plain_path);
     }
 
     /// Converts a plain path to its cipher text equivalent.
-    fn plain_path_to_cipher(&self, plain_path: &Utf8Path) -> Result<Utf8PathBuf> {
+    fn plain_path_to_cipher(&self, plain_path: &VirtualPath) -> Result<Utf8PathBuf> {
         self.backend.access(|cache| {
             if let Some((_, cipher_path)) = cache.get(plain_path.as_str()) {
                 Ok(cipher_path.to_owned())
@@ -32,7 +32,7 @@ impl<F: MinimalFs> CipherPathLayout for GoCryptFs<FsBackend<F>> {
                     let cipher_part = self.plain_name_to_cipher(dir_iv, name)?;
                     Ok(cipher_parent_path.as_path().join(cipher_part))
                 } else {
-                    let mut partial_plain_path = Utf8PathBuf::from("");
+                    let mut partial_plain_path = VirtualPathBuf::from("");
                     let mut absolute_path = self.backend.cipher_root.clone();
                     for plain_part in plain_path.iter() {
                         if let Some((dir_iv, cipher_parent)) =
@@ -82,10 +82,10 @@ impl<F: MinimalFs> EncryptionLayout for GoCryptFs<FsBackend<F>> {
     /// Lists directory entries with plain names.
     fn list_dir_plain_names(
         &self,
-        plain_path: &Utf8Path,
+        plain_path: &VirtualPath,
     ) -> std::io::Result<impl Iterator<Item = Result<(FsDirEntry, Utf8PathBuf)>> + '_ + use<'_, F>>
     {
-        let plain_path: Utf8PathBuf = plain_path.into();
+        let plain_path: VirtualPathBuf = plain_path.into();
         let cipher_path = self.plain_path_to_cipher(&plain_path).or_invalid()?;
         let dir_iv = read_diriv(self.lower_fs(), &cipher_path).or_invalid()?;
 
@@ -161,6 +161,11 @@ mod tests {
     use crate::core::{EncryptionLayout, FileType, FsBackend, MinimalFs};
     use tempfile::tempdir;
 
+    /// Creates a borrowed plain path for tests.
+    fn p(path: &str) -> &VirtualPath {
+        VirtualPath::new(path)
+    }
+
     /// Creates a freshly initialized GoCryptFS backend rooted in a temp directory.
     fn test_backend() -> (tempfile::TempDir, GoCryptFs<FsBackend>) {
         let temp_dir = tempdir().unwrap();
@@ -174,16 +179,16 @@ mod tests {
     fn plain_path_to_cipher_resolves_root_and_nested_paths() {
         let (_temp_dir, backend) = test_backend();
 
-        let root_cipher = backend.plain_path_to_cipher(Utf8Path::new("")).unwrap();
+        let root_cipher = backend.plain_path_to_cipher(p("")).unwrap();
         assert_eq!(root_cipher, backend.backend.cipher_root);
 
-        backend.mkdir("docs", 0o755_u16.into()).unwrap();
-        backend.mknode("docs/note.txt", 0o644_u16.into()).unwrap();
-
-        let docs_cipher = backend.plain_path_to_cipher(Utf8Path::new("docs")).unwrap();
-        let note_cipher = backend
-            .plain_path_to_cipher(Utf8Path::new("docs/note.txt"))
+        backend.mkdir(p("docs"), 0o755_u16.into()).unwrap();
+        backend
+            .mknode(p("docs/note.txt"), 0o644_u16.into())
             .unwrap();
+
+        let docs_cipher = backend.plain_path_to_cipher(p("docs")).unwrap();
+        let note_cipher = backend.plain_path_to_cipher(p("docs/note.txt")).unwrap();
 
         assert!(docs_cipher.starts_with(&backend.backend.cipher_root));
         assert!(note_cipher.starts_with(&docs_cipher));
@@ -195,19 +200,17 @@ mod tests {
     fn remove_cached_plain_path_invalidates_nested_cache_entries() {
         let (_temp_dir, backend) = test_backend();
 
-        backend.mkdir("docs", 0o755_u16.into()).unwrap();
-        backend.mknode("docs/note.txt", 0o644_u16.into()).unwrap();
-
-        let _ = backend.plain_path_to_cipher(Utf8Path::new("docs")).unwrap();
-        let before = backend
-            .plain_path_to_cipher(Utf8Path::new("docs/note.txt"))
+        backend.mkdir(p("docs"), 0o755_u16.into()).unwrap();
+        backend
+            .mknode(p("docs/note.txt"), 0o644_u16.into())
             .unwrap();
 
-        backend.remove_cached_plain_path("docs");
+        let _ = backend.plain_path_to_cipher(p("docs")).unwrap();
+        let before = backend.plain_path_to_cipher(p("docs/note.txt")).unwrap();
 
-        let after = backend
-            .plain_path_to_cipher(Utf8Path::new("docs/note.txt"))
-            .unwrap();
+        backend.remove_cached_plain_path(p("docs"));
+
+        let after = backend.plain_path_to_cipher(p("docs/note.txt")).unwrap();
 
         assert_eq!(before, after);
     }
@@ -238,11 +241,11 @@ mod tests {
     fn list_dir_plain_names_returns_plain_entries_and_filters_special_files() {
         let (_temp_dir, backend) = test_backend();
 
-        backend.mkdir("docs", 0o755_u16.into()).unwrap();
-        backend.mknode("file.txt", 0o644_u16.into()).unwrap();
-        backend.create_symlink("link", "../target.txt").unwrap();
+        backend.mkdir(p("docs"), 0o755_u16.into()).unwrap();
+        backend.mknode(p("file.txt"), 0o644_u16.into()).unwrap();
+        backend.create_symlink(p("link"), "../target.txt").unwrap();
 
-        let root_cipher = backend.plain_path_to_cipher(Utf8Path::new("")).unwrap();
+        let root_cipher = backend.plain_path_to_cipher(p("")).unwrap();
         backend
             .lower_fs()
             .put(&root_cipher.join("gocryptfs.conf"), b"ignored")
@@ -253,7 +256,7 @@ mod tests {
             .unwrap();
 
         let entries: Vec<_> = backend
-            .list_dir_plain_names(Utf8Path::new(""))
+            .list_dir_plain_names(p(""))
             .unwrap()
             .collect::<Result<Vec<_>>>()
             .unwrap();
@@ -273,9 +276,7 @@ mod tests {
         let (_temp_dir, backend) = test_backend();
 
         let plain = b"hello layout metadata";
-        let cipher_path = backend
-            .plain_path_to_cipher(Utf8Path::new("file.txt"))
-            .unwrap();
+        let cipher_path = backend.plain_path_to_cipher(p("file.txt")).unwrap();
         let header = backend.generate_cipher_header().unwrap();
         let cipher = backend.plain_block_to_cipher(&header, 0, plain).unwrap();
         backend
@@ -286,7 +287,7 @@ mod tests {
             )
             .unwrap();
 
-        let metadata = backend.metadata("file.txt").unwrap();
+        let metadata = backend.metadata(p("file.txt")).unwrap();
 
         assert!(metadata.file_type == FileType::File);
         assert_eq!(metadata.len, plain.len() as u64);
@@ -296,10 +297,8 @@ mod tests {
     fn mknode_creates_cipher_file_and_applies_permissions() {
         let (_temp_dir, backend) = test_backend();
 
-        let metadata = backend.mknode("file.txt", 0o640_u16.into()).unwrap();
-        let cipher_path = backend
-            .plain_path_to_cipher(Utf8Path::new("file.txt"))
-            .unwrap();
+        let metadata = backend.mknode(p("file.txt"), 0o640_u16.into()).unwrap();
+        let cipher_path = backend.plain_path_to_cipher(p("file.txt")).unwrap();
 
         assert!(backend.lower_fs().exists(&cipher_path).unwrap());
         assert!(metadata.file_type == FileType::File);
@@ -310,8 +309,8 @@ mod tests {
     fn mkdir_creates_cipher_directory_and_diriv() {
         let (_temp_dir, backend) = test_backend();
 
-        let metadata = backend.mkdir("docs", 0o750_u16.into()).unwrap();
-        let cipher_path = backend.plain_path_to_cipher(Utf8Path::new("docs")).unwrap();
+        let metadata = backend.mkdir(p("docs"), 0o750_u16.into()).unwrap();
+        let cipher_path = backend.plain_path_to_cipher(p("docs")).unwrap();
         let diriv_path = backend.get_dir_iv_file(&cipher_path);
 
         assert!(backend.lower_fs().exists(&cipher_path).unwrap());
@@ -324,12 +323,10 @@ mod tests {
     fn remove_deletes_cipher_file() {
         let (_temp_dir, backend) = test_backend();
 
-        backend.mknode("file.txt", 0o644_u16.into()).unwrap();
-        let cipher_path = backend
-            .plain_path_to_cipher(Utf8Path::new("file.txt"))
-            .unwrap();
+        backend.mknode(p("file.txt"), 0o644_u16.into()).unwrap();
+        let cipher_path = backend.plain_path_to_cipher(p("file.txt")).unwrap();
 
-        backend.remove("file.txt").unwrap();
+        backend.remove(p("file.txt")).unwrap();
 
         assert!(!backend.lower_fs().exists(&cipher_path).unwrap());
     }
@@ -338,11 +335,11 @@ mod tests {
     fn remove_dir_deletes_directory_and_diriv() {
         let (_temp_dir, backend) = test_backend();
 
-        backend.mkdir("docs", 0o755_u16.into()).unwrap();
-        let cipher_path = backend.plain_path_to_cipher(Utf8Path::new("docs")).unwrap();
+        backend.mkdir(p("docs"), 0o755_u16.into()).unwrap();
+        let cipher_path = backend.plain_path_to_cipher(p("docs")).unwrap();
         let diriv_path = backend.get_dir_iv_file(&cipher_path);
 
-        backend.remove_dir("docs").unwrap();
+        backend.remove_dir(p("docs")).unwrap();
 
         assert!(!backend.lower_fs().exists(&cipher_path).unwrap());
         assert!(!backend.lower_fs().exists(&diriv_path).unwrap());
@@ -352,31 +349,31 @@ mod tests {
     fn create_and_read_symlink_roundtrip() {
         let (_temp_dir, backend) = test_backend();
 
-        let metadata = backend.create_symlink("link", "../target.txt").unwrap();
+        let metadata = backend.create_symlink(p("link"), "../target.txt").unwrap();
 
         assert!(metadata.file_type == FileType::SymLink);
-        assert_eq!(backend.read_symlink("link").unwrap(), "../target.txt");
+        assert_eq!(backend.read_symlink(p("link")).unwrap(), "../target.txt");
     }
 
     #[test]
     fn rename_moves_file_directory_and_symlink_entries() {
         let (_temp_dir, backend) = test_backend();
 
-        backend.mknode("file.txt", 0o644_u16.into()).unwrap();
-        backend.rename("file.txt", "file2.txt").unwrap();
-        assert!(backend.metadata("file.txt").is_err());
-        assert!(backend.metadata("file2.txt").is_ok());
+        backend.mknode(p("file.txt"), 0o644_u16.into()).unwrap();
+        backend.rename(p("file.txt"), p("file2.txt")).unwrap();
+        assert!(backend.metadata(p("file.txt")).is_err());
+        assert!(backend.metadata(p("file2.txt")).is_ok());
 
-        backend.mkdir("docs", 0o755_u16.into()).unwrap();
-        backend.rename("docs", "docs2").unwrap();
-        assert!(backend.metadata("docs").is_err());
-        assert!(backend.metadata("docs2").is_ok());
+        backend.mkdir(p("docs"), 0o755_u16.into()).unwrap();
+        backend.rename(p("docs"), p("docs2")).unwrap();
+        assert!(backend.metadata(p("docs")).is_err());
+        assert!(backend.metadata(p("docs2")).is_ok());
 
-        backend.create_symlink("link", "../target.txt").unwrap();
-        backend.rename("link", "link2").unwrap();
-        assert!(backend.metadata("link").is_err());
-        assert!(backend.metadata("link2").is_ok());
-        assert_eq!(backend.read_symlink("link2").unwrap(), "../target.txt");
+        backend.create_symlink(p("link"), "../target.txt").unwrap();
+        backend.rename(p("link"), p("link2")).unwrap();
+        assert!(backend.metadata(p("link")).is_err());
+        assert!(backend.metadata(p("link2")).is_ok());
+        assert_eq!(backend.read_symlink(p("link2")).unwrap(), "../target.txt");
     }
 
     #[test]
@@ -387,16 +384,16 @@ mod tests {
         let mtime =
             std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_123);
 
-        backend.mknode("file.txt", 0o644_u16.into()).unwrap();
+        backend.mknode(p("file.txt"), 0o644_u16.into()).unwrap();
         let metadata = backend
-            .set_permissions("file.txt", 0o600_u16.into())
+            .set_permissions(p("file.txt"), 0o600_u16.into())
             .unwrap();
         assert_eq!(u16::from(metadata.permissions), 0o600);
 
         backend
-            .set_time("file.txt", Some(atime), Some(mtime))
+            .set_time(p("file.txt"), Some(atime), Some(mtime))
             .unwrap();
-        let after = backend.metadata("file.txt").unwrap();
+        let after = backend.metadata(p("file.txt")).unwrap();
         assert_eq!(after.accessed, atime);
         assert_eq!(after.modified, mtime);
     }

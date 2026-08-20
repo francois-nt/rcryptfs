@@ -1,4 +1,6 @@
-use super::{FsDirEntry, GenericOpenOptions, Metadata, Permissions, Result, UnsafeCache};
+use super::{
+    FsDirEntry, GenericOpenOptions, Metadata, Permissions, Result, VirtualPath, UnsafeCache,
+};
 pub use camino::{Utf8Path, Utf8PathBuf};
 use log::error;
 use std::{fmt::Display, time::SystemTime};
@@ -40,9 +42,9 @@ pub trait ReadAt {
     }
 }
 
-/// Returns the logical size of a file-like object when available.
+/// Returns the logical size of a file-like object.
 pub trait Size {
-    fn size(&self) -> std::io::Result<Option<u64>>;
+    fn size(&self) -> std::io::Result<u64>;
 }
 
 /// Provides access to a file's modification time.
@@ -93,24 +95,24 @@ pub trait SetLen {
 }
 
 /// Marker trait for read operations.
-pub trait Read: ReadAt + Send + Sync {}
+pub trait ReadHandle: ReadAt + Send + Sync {}
 /// Marker trait for read-write operations.
-pub trait ReadWrite: Read + WriteAt + SetLen + SetSync {}
+pub trait FileHandle: ReadHandle + WriteAt + SetLen + SetSync {}
 
-impl<T> Read for T where T: ReadAt + Send + Sync {}
+impl<T> ReadHandle for T where T: ReadAt + Send + Sync {}
 
-impl<T> ReadWrite for T where T: ReadAt + WriteAt + SetLen + SetSync + Send + Sync {}
+impl<T> FileHandle for T where T: ReadHandle + WriteAt + SetLen + SetSync {}
 
 /// Trait for caching open files.
 pub trait OpenCache: Default {
     /// Inserts a file into the cache and returns an unique fileId.
-    fn insert(&self, file: Box<dyn ReadWrite>) -> u64;
+    fn insert(&self, file: Box<dyn FileHandle>) -> u64;
 
     /// Releases a file from the cache.
     fn release(&self, id: u64) -> std::io::Result<()>;
 
     /// Accesses a file in the cache.
-    fn access<U, F: FnOnce(&dyn ReadWrite) -> std::io::Result<U>>(
+    fn access<U, F: FnOnce(&dyn FileHandle) -> std::io::Result<U>>(
         &self,
         id: u64,
         handler: F,
@@ -120,21 +122,24 @@ pub trait OpenCache: Default {
 /// Trait for read-only filesystem operations.
 pub trait ReadOnlyFileSystem: Send + Sync + 'static {
     /// Opens a file in read-only mode.
-    fn open_readonly(&self, path: &str) -> std::io::Result<Box<dyn ReadWrite>>;
+    fn open_readonly(&self, path: &VirtualPath) -> std::io::Result<Box<dyn FileHandle>>;
     /// Lists directory entries.
-    fn read_dir(&self, path: &str) -> std::io::Result<Box<dyn Iterator<Item = FsDirEntry> + '_>>;
+    fn read_dir(
+        &self,
+        path: &VirtualPath,
+    ) -> std::io::Result<Box<dyn Iterator<Item = FsDirEntry> + '_>>;
     /// Retrieves metadata for a path.
-    fn metadata(&self, path: &str) -> std::io::Result<Metadata>;
+    fn metadata(&self, path: &VirtualPath) -> std::io::Result<Metadata>;
     /// Checks if a path exists.
-    fn exists(&self, path: &str) -> std::io::Result<bool> {
+    fn exists(&self, path: &VirtualPath) -> std::io::Result<bool> {
         self.metadata(path).map(|_| true)
     }
     /// Reads the target of a symbolic link.
-    fn read_symlink(&self, path: &str) -> std::io::Result<String>;
+    fn read_symlink(&self, path: &VirtualPath) -> std::io::Result<String>;
     /// Lists extended attribute names.
-    fn list_xattr(&self, path: &str) -> std::io::Result<Vec<String>>;
+    fn list_xattr(&self, path: &VirtualPath) -> std::io::Result<Vec<String>>;
     /// Gets an extended attribute value.
-    fn get_xattr(&self, path: &str, name: &str) -> std::io::Result<Vec<u8>>;
+    fn get_xattr(&self, path: &VirtualPath, name: &str) -> std::io::Result<Vec<u8>>;
 }
 
 //pub trait GenericFileSystem: FileSystem<File = Box<dyn ReadWrite>> {}
@@ -145,39 +150,44 @@ pub trait FileSystem: ReadOnlyFileSystem {
     /// Opens a file with specified options.
     fn open_file_with(
         &self,
-        path: &str,
+        path: &VirtualPath,
         options: GenericOpenOptions,
-    ) -> std::io::Result<Box<dyn ReadWrite>>;
+    ) -> std::io::Result<Box<dyn FileHandle>>;
     /// Truncates a file to a new size.
-    fn truncate(&self, path: &str, new_size: u64) -> std::io::Result<()>;
+    fn truncate(&self, path: &VirtualPath, new_size: u64) -> std::io::Result<()>;
     /// Renames a file or directory.
-    fn rename(&self, old_path: &str, new_path: &str) -> std::io::Result<()>;
+    fn rename(&self, old_path: &VirtualPath, new_path: &VirtualPath) -> std::io::Result<()>;
     /// Removes a file.
-    fn remove(&self, path: &str) -> std::io::Result<()>;
+    fn remove(&self, path: &VirtualPath) -> std::io::Result<()>;
     /// Removes a directory.
-    fn remove_dir(&self, path: &str) -> std::io::Result<()>;
+    fn remove_dir(&self, path: &VirtualPath) -> std::io::Result<()>;
     /// Creates a new directory with permissions.
-    fn mkdir(&self, path: &str, permissions: Permissions) -> std::io::Result<Metadata>;
+    fn mkdir(&self, path: &VirtualPath, permissions: Permissions) -> std::io::Result<Metadata>;
     /// Creates a new node (file) with permissions.
-    fn mknode(&self, path: &str, permissions: Permissions) -> std::io::Result<Metadata>;
+    fn mknode(&self, path: &VirtualPath, permissions: Permissions) -> std::io::Result<Metadata>;
     /// Sets permissions on a path.
-    fn set_permissions(&self, path: &str, permissions: Permissions) -> std::io::Result<Metadata>;
+    fn set_permissions(
+        &self,
+        path: &VirtualPath,
+        permissions: Permissions,
+    ) -> std::io::Result<Metadata>;
     /// Sets access and modification times.
     fn set_time(
         &self,
-        path: &str,
+        path: &VirtualPath,
         atime: Option<SystemTime>,
         mtime: Option<SystemTime>,
     ) -> std::io::Result<()>;
     /// Creates a symbolic link.
-    fn create_symlink(&self, path: &str, target_path: &str) -> std::io::Result<Metadata>;
+    fn create_symlink(&self, path: &VirtualPath, target_path: &str) -> std::io::Result<Metadata>;
     /// Changes ownership of a path.
-    fn chown(&self, path: &str, uid: Option<u32>, gid: Option<u32>) -> std::io::Result<()>;
+    fn chown(&self, path: &VirtualPath, uid: Option<u32>, gid: Option<u32>)
+    -> std::io::Result<()>;
 
     /// Sets an extended attribute.
-    fn set_xattr(&self, path: &str, name: &str, value: &[u8]) -> std::io::Result<()>;
+    fn set_xattr(&self, path: &VirtualPath, name: &str, value: &[u8]) -> std::io::Result<()>;
     /// Removes an extended attribute.
-    fn remove_xattr(&self, path: &str, name: &str) -> std::io::Result<()>;
+    fn remove_xattr(&self, path: &VirtualPath, name: &str) -> std::io::Result<()>;
 }
 
 /// Wrapper for filesystem with caching.

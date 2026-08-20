@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rcryptfs::core::{FileSystemHandler, FileType, FsDirEntry, FsTime, OpenCache};
+use rcryptfs::core::{FileSystemHandler, FileType, FsDirEntry, FsTime, OpenCache, VirtualPath};
 use rustyline::error::ReadlineError;
 
 use crate::platform;
@@ -59,7 +59,7 @@ fn handle_cli_command<C: OpenCache>(
                 None => cwd.clone(),
             };
 
-            match handler.as_ref().read_dir(&target) {
+            match handler.as_ref().read_dir(VirtualPath::new(&target)) {
                 Ok(entries) => {
                     for element in entries {
                         println!("{}", format_entry(&element));
@@ -79,7 +79,7 @@ fn handle_cli_command<C: OpenCache>(
             }
 
             let target = resolve_path(cwd, path);
-            match handler.as_ref().read_dir(&target) {
+            match handler.as_ref().read_dir(VirtualPath::new(&target)) {
                 Ok(_) => *cwd = target,
                 Err(e) => println!("cd: {}: {}", display_path(&target), e),
             }
