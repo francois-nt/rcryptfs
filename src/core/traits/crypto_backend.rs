@@ -239,7 +239,7 @@ pub trait MinimalFs: Send + Sync + 'static {
         Ok(buffer)
     }
     fn is_dir_empty(&self, path: &Utf8Path) -> std::io::Result<bool> {
-        self.list_dir(path)?
+        self.read_dir(path)?
             .next()
             .transpose()
             .map(|entry| entry.is_none())
@@ -270,5 +270,5 @@ pub trait MinimalFs: Send + Sync + 'static {
     fn set_xattr(&self, path: &Utf8Path, name: &str, value: &[u8]) -> std::io::Result<()>;
     fn read_symlink(&self, path: &Utf8Path) -> std::io::Result<Utf8PathBuf>;
     fn create_symlink(&self, path: &Utf8Path, target_path: &Utf8Path) -> std::io::Result<Metadata>;
-    fn list_dir(&self, path: &Utf8Path) -> std::io::Result<Self::DirEntries>;
+    fn read_dir(&self, path: &Utf8Path) -> std::io::Result<Self::DirEntries>;
 }

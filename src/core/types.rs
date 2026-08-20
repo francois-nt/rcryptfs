@@ -160,7 +160,7 @@ impl MinimalFs for DefaultFs {
         }
     }
 
-    fn list_dir(
+    fn read_dir(
         &self,
         path: &Utf8Path,
         // impl Iterator<Item = std::io::Result<FsDirEntry>> + '_ + use<'_>

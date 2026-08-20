@@ -123,7 +123,7 @@ impl<F: MinimalFs> EncryptionLayout for CryptoMator<FsBackend<F>> {
         log::debug!("read_dir on {}", cipher_path);
         Ok(self
             .lower_fs()
-            .list_dir(&cipher_path)?
+            .read_dir(&cipher_path)?
             .filter_map(move |entry| {
                 match &entry {
                     Ok(entry) => log::debug!("> entry Ok {entry}"),
