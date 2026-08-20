@@ -189,26 +189,42 @@ impl MinimalFs for DefaultFs {
     fn exists(&self, path: &VirtualPath) -> std::io::Result<bool> {
         std::fs::exists(self.resolve(path)?)
     }
-    fn mkdir(&self, path: &VirtualPath) -> std::io::Result<()> {
-        std::fs::create_dir(self.resolve(path)?)
+    fn mkdir(
+        &self,
+        path: &VirtualPath,
+        permissions: Option<Permissions>,
+    ) -> std::io::Result<Metadata> {
+        std::fs::create_dir(self.resolve(path)?)?;
+        match permissions {
+            Some(permissions) => self.set_permissions(path, permissions),
+            None => self.metadata(path),
+        }
     }
-    fn mknode(&self, path: &VirtualPath) -> std::io::Result<()> {
+    fn mknode(
+        &self,
+        path: &VirtualPath,
+        permissions: Option<Permissions>,
+    ) -> std::io::Result<Metadata> {
         std::fs::File::create_new(self.resolve(path)?)?;
-        Ok(())
+        match permissions {
+            Some(permissions) => self.set_permissions(path, permissions),
+            None => self.metadata(path),
+        }
     }
     fn rename(&self, old_path: &VirtualPath, new_path: &VirtualPath) -> std::io::Result<()> {
         std::fs::rename(self.resolve(old_path)?, self.resolve(new_path)?)
     }
-    fn remove_file(&self, path: &VirtualPath) -> std::io::Result<()> {
+    fn remove(&self, path: &VirtualPath) -> std::io::Result<()> {
         std::fs::remove_file(self.resolve(path)?)
     }
-    fn remove_dir(&self, path: &VirtualPath, all: bool) -> std::io::Result<()> {
-        let path = self.resolve(path)?;
-        if all {
-            std::fs::remove_dir_all(&path)
-        } else {
-            std::fs::remove_dir(&path)
+    fn remove_dir(&self, path: &VirtualPath) -> std::io::Result<()> {
+        std::fs::remove_dir(self.resolve(path)?)
+    }
+    fn remove_dir_all(&self, path: &VirtualPath) -> std::io::Result<()> {
+        if path.is_empty() {
+            return Err(std::io::Error::from_raw_os_error(libc::ENOTEMPTY));
         }
+        std::fs::remove_dir_all(self.resolve(path)?)
     }
     fn set_permissions(
         &self,

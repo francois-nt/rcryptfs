@@ -1,7 +1,7 @@
 use super::super::FsCacheEntry;
 use super::{
-    FileHandle, FsDirEntry, GenericOpenOptions, Metadata, ModifiedTime, Permissions, ReadAt,
-    Result, Size, VirtualPath, VirtualPathBuf, WriteAt,
+    FileHandle, FileType, FsDirEntry, GenericOpenOptions, Metadata, ModifiedTime, Permissions,
+    ReadAt, Result, Size, VirtualPath, VirtualPathBuf, WriteAt,
 };
 use super::{
     default_create_symlink, default_metadata, default_mkdir, default_mknode, default_read_symlink,
@@ -134,14 +134,14 @@ pub trait EncryptionLayout: CipherPathLayout {
     fn mknode(
         &self,
         plain_path: &VirtualPath,
-        permissions: Permissions,
+        permissions: Option<Permissions>,
     ) -> std::io::Result<Metadata> {
         default_mknode(self, plain_path, permissions)
     }
     fn mkdir(
         &self,
         plain_path: &VirtualPath,
-        permissions: Permissions,
+        permissions: Option<Permissions>,
     ) -> std::io::Result<Metadata> {
         default_mkdir(self, plain_path, permissions)
     }
@@ -201,11 +201,44 @@ pub trait MinimalFs: Send + Sync + 'static {
     fn chown(&self, path: &VirtualPath, uid: Option<u32>, gid: Option<u32>) -> std::io::Result<()>;
     fn metadata(&self, path: &VirtualPath) -> std::io::Result<Metadata>;
     fn exists(&self, path: &VirtualPath) -> std::io::Result<bool>;
-    fn mkdir(&self, path: &VirtualPath) -> std::io::Result<()>;
-    fn mknode(&self, path: &VirtualPath) -> std::io::Result<()>;
+    /// Creates a new directory with optional permissions.
+    fn mkdir(
+        &self,
+        path: &VirtualPath,
+        permissions: Option<Permissions>,
+    ) -> std::io::Result<Metadata>;
+    /// Creates a new node with optional permissions.
+    fn mknode(
+        &self,
+        path: &VirtualPath,
+        permissions: Option<Permissions>,
+    ) -> std::io::Result<Metadata>;
     fn rename(&self, old_path: &VirtualPath, new_path: &VirtualPath) -> std::io::Result<()>;
-    fn remove_file(&self, path: &VirtualPath) -> std::io::Result<()>;
-    fn remove_dir(&self, path: &VirtualPath, all: bool) -> std::io::Result<()>;
+    /// Removes a non-directory entry.
+    fn remove(&self, path: &VirtualPath) -> std::io::Result<()>;
+    /// Removes an empty directory.
+    fn remove_dir(&self, path: &VirtualPath) -> std::io::Result<()>;
+    /// Recursively removes a directory and its contents.
+    fn remove_dir_all(&self, path: &VirtualPath) -> std::io::Result<()> {
+        if path.is_empty() {
+            return Err(std::io::Error::from_raw_os_error(libc::ENOTEMPTY));
+        }
+
+        let entries = self.read_dir(path)?.collect::<std::io::Result<Vec<_>>>()?;
+        for entry in entries {
+            let child_path = path.join(entry.file_name);
+            let file_type = match entry.file_type {
+                Some(file_type) => file_type,
+                None => self.metadata(&child_path)?.file_type,
+            };
+            if file_type == FileType::Directory {
+                self.remove_dir_all(&child_path)?;
+            } else {
+                self.remove(&child_path)?;
+            }
+        }
+        self.remove_dir(path)
+    }
     fn put(&self, path: &VirtualPath, data: &[u8]) -> std::io::Result<()> {
         let mut options = GenericOpenOptions::default();
         options.write(true).truncate(true).create(true);
@@ -258,8 +291,8 @@ pub trait MinimalFs: Send + Sync + 'static {
         {
             self.mkdir_all(parent)?;
         }
-        match self.mkdir(path) {
-            Ok(()) => Ok(()),
+        match self.mkdir(path, None) {
+            Ok(_) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
             Err(error) => Err(error),
         }

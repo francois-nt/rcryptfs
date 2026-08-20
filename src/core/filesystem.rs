@@ -161,10 +161,18 @@ where
         )
     }
     /// Creates a new directory with given permissions.
-    fn mkdir(&self, path: &VirtualPath, permissions: Permissions) -> std::io::Result<Metadata> {
+    fn mkdir(
+        &self,
+        path: &VirtualPath,
+        permissions: Option<Permissions>,
+    ) -> std::io::Result<Metadata> {
         self.fs.mkdir(path, permissions)
     }
-    fn mknode(&self, path: &VirtualPath, permissions: Permissions) -> std::io::Result<Metadata> {
+    fn mknode(
+        &self,
+        path: &VirtualPath,
+        permissions: Option<Permissions>,
+    ) -> std::io::Result<Metadata> {
         self.fs.mknode(path, permissions)
     }
     fn remove(&self, path: &VirtualPath) -> std::io::Result<()> {

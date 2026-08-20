@@ -267,18 +267,18 @@ impl<F: MinimalFs> GoCryptFs<FsBackend<F>> {
         }
         // Best effort rollback in case of error
         let rollback = |_: &std::io::Error| {
-            let _ = fs.remove_file(&root_path.join("gocryptfs.conf"));
-            let _ = fs.remove_file(&root_path.join("gocryptfs.diriv"));
+            let _ = fs.remove("gocryptfs.conf".into());
+            let _ = fs.remove("gocryptfs.diriv".into());
         };
         let (config, master_key) = GoCryptfsConfig::try_new(password)?;
         let json_config = serde_json::to_vec_pretty(&config)?;
-        fs.put_new(&root_path.join("gocryptfs.conf"), &json_config)
+        fs.put_new("gocryptfs.conf".into(), &json_config)
             .inspect_err(rollback)?;
 
         // The root directory uses its own DirIV file just like any other directory.
         let mut root_dir_iv = [0u8; 16];
         rand::fill(&mut root_dir_iv);
-        fs.put_new(&root_path.join("gocryptfs.diriv"), &root_dir_iv)
+        fs.put_new("gocryptfs.diriv".into(), &root_dir_iv)
             .inspect_err(rollback)?;
 
         Ok(master_key)

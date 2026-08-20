@@ -175,12 +175,18 @@ impl<C: OpenCache + 'static> Filesystem for FileSystemHandler<C> {
     ) -> fuser_ng::ResultEntry {
         debug!("mknod on {:?}", path);
         sanitize!(path);
-        Ok((TTL, self.as_ref().mknode(path, mode.into())?.try_into()?))
+        Ok((
+            TTL,
+            self.as_ref().mknode(path, Some(mode.into()))?.try_into()?,
+        ))
     }
     fn mkdir(&self, _req: RequestInfo, path: &EntryName, mode: u32) -> fuser_ng::ResultEntry {
         debug!("mkdir on {:?}", path);
         sanitize!(path);
-        Ok((TTL, self.as_ref().mkdir(path, mode.into())?.try_into()?))
+        Ok((
+            TTL,
+            self.as_ref().mkdir(path, Some(mode.into()))?.try_into()?,
+        ))
     }
     fn rename(
         &self,

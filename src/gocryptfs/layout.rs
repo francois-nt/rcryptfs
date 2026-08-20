@@ -177,9 +177,9 @@ mod tests {
         let root_cipher = backend.plain_path_to_cipher(p("")).unwrap();
         assert!(root_cipher.is_empty());
 
-        backend.mkdir(p("docs"), 0o755_u16.into()).unwrap();
+        backend.mkdir(p("docs"), Some(0o755_u16.into())).unwrap();
         backend
-            .mknode(p("docs/note.txt"), 0o644_u16.into())
+            .mknode(p("docs/note.txt"), Some(0o644_u16.into()))
             .unwrap();
 
         let docs_cipher = backend.plain_path_to_cipher(p("docs")).unwrap();
@@ -195,9 +195,9 @@ mod tests {
     fn remove_cached_plain_path_invalidates_nested_cache_entries() {
         let (_temp_dir, backend) = test_backend();
 
-        backend.mkdir(p("docs"), 0o755_u16.into()).unwrap();
+        backend.mkdir(p("docs"), Some(0o755_u16.into())).unwrap();
         backend
-            .mknode(p("docs/note.txt"), 0o644_u16.into())
+            .mknode(p("docs/note.txt"), Some(0o644_u16.into()))
             .unwrap();
 
         let _ = backend.plain_path_to_cipher(p("docs")).unwrap();
@@ -236,8 +236,10 @@ mod tests {
     fn list_dir_plain_names_returns_plain_entries_and_filters_special_files() {
         let (_temp_dir, backend) = test_backend();
 
-        backend.mkdir(p("docs"), 0o755_u16.into()).unwrap();
-        backend.mknode(p("file.txt"), 0o644_u16.into()).unwrap();
+        backend.mkdir(p("docs"), Some(0o755_u16.into())).unwrap();
+        backend
+            .mknode(p("file.txt"), Some(0o644_u16.into()))
+            .unwrap();
         backend.create_symlink(p("link"), "../target.txt").unwrap();
 
         let root_cipher = backend.plain_path_to_cipher(p("")).unwrap();
@@ -292,7 +294,9 @@ mod tests {
     fn mknode_creates_cipher_file_and_applies_permissions() {
         let (_temp_dir, backend) = test_backend();
 
-        let metadata = backend.mknode(p("file.txt"), 0o640_u16.into()).unwrap();
+        let metadata = backend
+            .mknode(p("file.txt"), Some(0o640_u16.into()))
+            .unwrap();
         let cipher_path = backend.plain_path_to_cipher(p("file.txt")).unwrap();
 
         assert!(backend.lower_fs().exists(&cipher_path).unwrap());
@@ -304,7 +308,7 @@ mod tests {
     fn mkdir_creates_cipher_directory_and_diriv() {
         let (_temp_dir, backend) = test_backend();
 
-        let metadata = backend.mkdir(p("docs"), 0o750_u16.into()).unwrap();
+        let metadata = backend.mkdir(p("docs"), Some(0o750_u16.into())).unwrap();
         let cipher_path = backend.plain_path_to_cipher(p("docs")).unwrap();
         let diriv_path = backend.get_dir_iv_file(&cipher_path);
 
@@ -318,7 +322,9 @@ mod tests {
     fn remove_deletes_cipher_file() {
         let (_temp_dir, backend) = test_backend();
 
-        backend.mknode(p("file.txt"), 0o644_u16.into()).unwrap();
+        backend
+            .mknode(p("file.txt"), Some(0o644_u16.into()))
+            .unwrap();
         let cipher_path = backend.plain_path_to_cipher(p("file.txt")).unwrap();
 
         backend.remove(p("file.txt")).unwrap();
@@ -330,7 +336,7 @@ mod tests {
     fn remove_dir_deletes_directory_and_diriv() {
         let (_temp_dir, backend) = test_backend();
 
-        backend.mkdir(p("docs"), 0o755_u16.into()).unwrap();
+        backend.mkdir(p("docs"), Some(0o755_u16.into())).unwrap();
         let cipher_path = backend.plain_path_to_cipher(p("docs")).unwrap();
         let diriv_path = backend.get_dir_iv_file(&cipher_path);
 
@@ -354,12 +360,14 @@ mod tests {
     fn rename_moves_file_directory_and_symlink_entries() {
         let (_temp_dir, backend) = test_backend();
 
-        backend.mknode(p("file.txt"), 0o644_u16.into()).unwrap();
+        backend
+            .mknode(p("file.txt"), Some(0o644_u16.into()))
+            .unwrap();
         backend.rename(p("file.txt"), p("file2.txt")).unwrap();
         assert!(backend.metadata(p("file.txt")).is_err());
         assert!(backend.metadata(p("file2.txt")).is_ok());
 
-        backend.mkdir(p("docs"), 0o755_u16.into()).unwrap();
+        backend.mkdir(p("docs"), Some(0o755_u16.into())).unwrap();
         backend.rename(p("docs"), p("docs2")).unwrap();
         assert!(backend.metadata(p("docs")).is_err());
         assert!(backend.metadata(p("docs2")).is_ok());
@@ -379,7 +387,9 @@ mod tests {
         let mtime =
             std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_123);
 
-        backend.mknode(p("file.txt"), 0o644_u16.into()).unwrap();
+        backend
+            .mknode(p("file.txt"), Some(0o644_u16.into()))
+            .unwrap();
         let metadata = backend
             .set_permissions(p("file.txt"), 0o600_u16.into())
             .unwrap();

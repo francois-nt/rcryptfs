@@ -1,6 +1,6 @@
 use super::{
-    FsDirEntry, GenericOpenOptions, Metadata, Permissions, Result, UnsafeCache, VirtualPath,
-    VirtualPathBuf,
+    FileType, FsDirEntry, GenericOpenOptions, Metadata, Permissions, Result, UnsafeCache,
+    VirtualPath, VirtualPathBuf,
 };
 pub use camino::{Utf8Path, Utf8PathBuf};
 use log::error;
@@ -158,14 +158,43 @@ pub trait FileSystem: ReadOnlyFileSystem {
     fn truncate(&self, path: &VirtualPath, new_size: u64) -> std::io::Result<()>;
     /// Renames a file or directory.
     fn rename(&self, old_path: &VirtualPath, new_path: &VirtualPath) -> std::io::Result<()>;
-    /// Removes a file.
+    /// Removes a non-directory entry.
     fn remove(&self, path: &VirtualPath) -> std::io::Result<()>;
-    /// Removes a directory.
+    /// Removes an empty directory.
     fn remove_dir(&self, path: &VirtualPath) -> std::io::Result<()>;
-    /// Creates a new directory with permissions.
-    fn mkdir(&self, path: &VirtualPath, permissions: Permissions) -> std::io::Result<Metadata>;
-    /// Creates a new node (file) with permissions.
-    fn mknode(&self, path: &VirtualPath, permissions: Permissions) -> std::io::Result<Metadata>;
+    /// Recursively removes a directory and its contents.
+    fn remove_dir_all(&self, path: &VirtualPath) -> std::io::Result<()> {
+        if path.is_empty() {
+            return Err(std::io::Error::from_raw_os_error(libc::ENOTEMPTY));
+        }
+
+        let entries = self.read_dir(path)?.collect::<std::io::Result<Vec<_>>>()?;
+        for entry in entries {
+            let child_path = path.join(entry.file_name);
+            let file_type = match entry.file_type {
+                Some(file_type) => file_type,
+                None => self.metadata(&child_path)?.file_type,
+            };
+            if file_type == FileType::Directory {
+                self.remove_dir_all(&child_path)?;
+            } else {
+                self.remove(&child_path)?;
+            }
+        }
+        self.remove_dir(path)
+    }
+    /// Creates a new directory with optional permissions.
+    fn mkdir(
+        &self,
+        path: &VirtualPath,
+        permissions: Option<Permissions>,
+    ) -> std::io::Result<Metadata>;
+    /// Creates a new node (file) with optional permissions.
+    fn mknode(
+        &self,
+        path: &VirtualPath,
+        permissions: Option<Permissions>,
+    ) -> std::io::Result<Metadata>;
     /// Sets permissions on a path.
     fn set_permissions(
         &self,

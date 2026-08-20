@@ -271,18 +271,18 @@ impl<F: MinimalFs> CryptoMator<FsBackend<F>> {
         }
 
         let rollback = |_: &std::io::Error| {
-            let _ = fs.remove_file(&root_path.join("masterkey.cryptomator"));
-            let _ = fs.remove_file(&root_path.join("vault.cryptomator"));
-            let _ = fs.remove_dir(&root_path.join("d"), true);
+            let _ = fs.remove("masterkey.cryptomator".into());
+            let _ = fs.remove("vault.cryptomator".into());
+            let _ = fs.remove_dir_all("d".into());
         };
 
         let (config, master_keys) = CryptoMatorConfig::try_new(password)?;
         let json_config = serde_json::to_vec_pretty(&config)?;
-        fs.put_new(&root_path.join("masterkey.cryptomator"), &json_config)
+        fs.put_new("masterkey.cryptomator".into(), &json_config)
             .inspect_err(rollback)?;
 
         let vault = generate_vault_cryptomator(&master_keys, "SIV_GCM", 220)?;
-        fs.put_new(&root_path.join("vault.cryptomator"), vault.as_bytes())
+        fs.put_new("vault.cryptomator".into(), vault.as_bytes())
             .inspect_err(rollback)?;
 
         let siv_key = master_keys.siv_key();
@@ -305,8 +305,8 @@ impl<F: MinimalFs> CryptoMator<FsBackend<F>> {
     pub(super) fn mkdir_storage_path(&self, dir_id: &str) -> Result<()> {
         let full_path = self.dir_id_to_storage_path(dir_id)?;
         self.lower_fs()
-            .mkdir(full_path.parent().unwrap_or_else(VirtualPath::root))?;
-        self.lower_fs().mkdir(&full_path)?;
+            .mkdir(full_path.parent().unwrap_or_else(VirtualPath::root), None)?;
+        self.lower_fs().mkdir(&full_path, None)?;
         Ok(())
     }
 
