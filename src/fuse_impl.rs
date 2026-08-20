@@ -484,16 +484,24 @@ fn readdir<T: ReadOnlyFileSystem + ?Sized>(
 
     let result = common_paths
         .into_iter()
-        .chain(fs.as_ref().read_dir(path)?.filter_map(|entry| {
-            let name: OsString = entry.file_name.into();
-            let kind = match entry.file_type? {
-                FileType::File => Some(fuser_ng::FileType::RegularFile),
-                FileType::Directory => Some(fuser_ng::FileType::Directory),
-                FileType::SymLink => Some(fuser_ng::FileType::Symlink),
-                _ => None, // ignore anything that isnt a regular file or a directory
-            };
-            Some(fuser_ng::DirectoryEntry { name, kind: kind? })
-        }))
+        .chain(
+            fs.as_ref()
+                .read_dir(path)?
+                .filter_map(|entry| match entry {
+                    Err(error) => Some(Err(error)),
+                    Ok(entry) => {
+                        let name: OsString = entry.file_name.into();
+                        let kind = match entry.file_type? {
+                            FileType::File => Some(fuser_ng::FileType::RegularFile),
+                            FileType::Directory => Some(fuser_ng::FileType::Directory),
+                            FileType::SymLink => Some(fuser_ng::FileType::Symlink),
+                            _ => None, // ignore anything that isnt a regular file or a directory
+                        };
+                        Some(Ok(fuser_ng::DirectoryEntry { name, kind: kind? }))
+                    }
+                })
+                .collect::<std::io::Result<Vec<_>>>()?,
+        )
         .collect();
     debug!("readdir ok for path {:?}", path);
     Ok(result)

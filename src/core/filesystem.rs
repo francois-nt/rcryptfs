@@ -124,12 +124,11 @@ where
     fn read_dir(
         &self,
         path: &VirtualPath,
-    ) -> std::io::Result<Box<dyn Iterator<Item = FsDirEntry> + '_>> {
+    ) -> std::io::Result<Box<dyn Iterator<Item = std::io::Result<FsDirEntry>> + '_>> {
         let it = self
             .fs
-            .list_dir_plain_names(path)
-            .or_invalid()?
-            .filter_map(|it| Some(it.ok()?.0));
+            .list_dir_plain_names(path)?
+            .map(|it| it.map(|r| r.0));
         Ok(Box::new(it))
     }
     fn read_symlink(&self, path: &VirtualPath) -> std::io::Result<String> {

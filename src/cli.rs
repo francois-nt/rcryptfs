@@ -62,7 +62,13 @@ fn handle_cli_command<C: OpenCache>(
             match handler.as_ref().read_dir(VirtualPath::new(&target)) {
                 Ok(entries) => {
                     for element in entries {
-                        println!("{}", format_entry(&element));
+                        match element {
+                            Ok(element) => println!("{}", format_entry(&element)),
+                            Err(error) => {
+                                println!("ls: {}: {}", display_path(&target), error);
+                                break;
+                            }
+                        }
                     }
                 }
                 Err(e) => println!("ls: {}: {}", display_path(&target), e),

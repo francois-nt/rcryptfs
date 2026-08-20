@@ -106,8 +106,9 @@ impl<F: MinimalFs> EncryptionLayout for CryptoMator<FsBackend<F>> {
     fn list_dir_plain_names(
         &self,
         plain_path: &VirtualPath,
-    ) -> std::io::Result<impl Iterator<Item = Result<(FsDirEntry, Utf8PathBuf)>> + '_ + use<'_, F>>
-    {
+    ) -> std::io::Result<
+        impl Iterator<Item = std::io::Result<(FsDirEntry, Utf8PathBuf)>> + '_ + use<'_, F>,
+    > {
         // Directory listings come from the storage directory identified by the folder dir id.
         let (cipher_path, dir_id) =
             folder_path_to_cipher_and_dirid(self, plain_path).or_invalid()?;
@@ -337,8 +338,8 @@ fn map_dir_entry(
     this: &impl EncryptionLayout,
     cipher_path: &Utf8Path,
     dir_iv: &[u8],
-    entry: Result<FsDirEntry, std::io::Error>,
-) -> Result<Option<(FsDirEntry, Utf8PathBuf)>> {
+    entry: std::io::Result<FsDirEntry>,
+) -> std::io::Result<Option<(FsDirEntry, Utf8PathBuf)>> {
     match entry {
         Ok(mut entry) => {
             let cipher_name = entry.file_name.clone();
@@ -347,19 +348,23 @@ fn map_dir_entry(
                 Ok(None)
             } else {
                 if let Some(metadata) = entry.metadata.as_mut() {
-                    metadata.adjust(this, &cipher_path.join(&cipher_name), false)?;
+                    metadata
+                        .adjust(this, &cipher_path.join(&cipher_name), false)
+                        .or_invalid()?;
                     if let Some(file_type) = entry.file_type.as_mut() {
                         *file_type = metadata.file_type;
                     }
                 }
-                let plain_name = this.cipher_name_to_plain(dir_iv, &cipher_name)?;
+                let plain_name = this
+                    .cipher_name_to_plain(dir_iv, &cipher_name)
+                    .or_invalid()?;
                 Ok(Some((
                     entry.with_name(plain_name),
                     cipher_path.join(Utf8Path::new(&cipher_name)),
                 )))
             }
         }
-        Err(e) => Err(e)?,
+        Err(e) => Err(e),
     }
 }
 
@@ -509,7 +514,7 @@ mod tests {
         let entries: Vec<_> = backend
             .list_dir_plain_names(p(""))
             .unwrap()
-            .collect::<Result<Vec<_>>>()
+            .collect::<std::io::Result<Vec<_>>>()
             .unwrap();
 
         assert!(entries.is_empty());

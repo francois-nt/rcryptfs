@@ -124,7 +124,9 @@ pub trait EncryptionLayout: CipherPathLayout {
     fn list_dir_plain_names(
         &self,
         plain_path: &VirtualPath,
-    ) -> std::io::Result<impl Iterator<Item = Result<(FsDirEntry, Utf8PathBuf)>> + '_ + use<'_, Self>>;
+    ) -> std::io::Result<
+        impl Iterator<Item = std::io::Result<(FsDirEntry, Utf8PathBuf)>> + '_ + use<'_, Self>,
+    >;
 
     fn metadata(&self, plain_path: &VirtualPath) -> std::io::Result<Metadata> {
         default_metadata(self, plain_path)

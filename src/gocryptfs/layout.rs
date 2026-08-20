@@ -83,8 +83,9 @@ impl<F: MinimalFs> EncryptionLayout for GoCryptFs<FsBackend<F>> {
     fn list_dir_plain_names(
         &self,
         plain_path: &VirtualPath,
-    ) -> std::io::Result<impl Iterator<Item = Result<(FsDirEntry, Utf8PathBuf)>> + '_ + use<'_, F>>
-    {
+    ) -> std::io::Result<
+        impl Iterator<Item = std::io::Result<(FsDirEntry, Utf8PathBuf)>> + '_ + use<'_, F>,
+    > {
         let plain_path: VirtualPathBuf = plain_path.into();
         let cipher_path = self.plain_path_to_cipher(&plain_path).or_invalid()?;
         let dir_iv = read_diriv(self.lower_fs(), &cipher_path).or_invalid()?;
@@ -136,22 +137,24 @@ fn map_dir_entry(
     this: &impl EncryptionLayout,
     cipher_path: &Utf8Path,
     dir_iv: &[u8],
-    entry: Result<FsDirEntry, std::io::Error>,
-) -> Result<Option<(FsDirEntry, Utf8PathBuf)>> {
+    entry: std::io::Result<FsDirEntry>,
+) -> std::io::Result<Option<(FsDirEntry, Utf8PathBuf)>> {
     match entry {
         Ok(entry) => {
             let cipher_name = entry.file_name.clone();
             if is_special_entry(&cipher_name) {
                 Ok(None)
             } else {
-                let plain_name = this.cipher_name_to_plain(dir_iv, &cipher_name)?;
+                let plain_name = this
+                    .cipher_name_to_plain(dir_iv, &cipher_name)
+                    .or_invalid()?;
                 Ok(Some((
                     entry.with_name(plain_name),
                     cipher_path.join(Utf8Path::new(&cipher_name)),
                 )))
             }
         }
-        Err(e) => Err(e)?,
+        Err(e) => Err(e),
     }
 }
 
@@ -258,7 +261,7 @@ mod tests {
         let entries: Vec<_> = backend
             .list_dir_plain_names(p(""))
             .unwrap()
-            .collect::<Result<Vec<_>>>()
+            .collect::<std::io::Result<Vec<_>>>()
             .unwrap();
 
         assert_eq!(entries.len(), 3);
