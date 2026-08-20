@@ -91,7 +91,7 @@ impl<F: MinimalFs> EncryptionLayout for GoCryptFs<FsBackend<F>> {
 
         Ok(self
             .lower_fs()
-            .list_dir(cipher_path.as_str())?
+            .list_dir(&cipher_path)?
             .filter_map(
                 move |entry| match map_dir_entry(self, &cipher_path, &dir_iv, entry) {
                     Ok(Some((plain_name, cipher_path))) => Some(Ok((plain_name, cipher_path))),

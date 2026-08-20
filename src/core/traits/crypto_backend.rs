@@ -237,7 +237,7 @@ pub trait MinimalFs: Send + Sync + 'static {
         Ok(buffer)
     }
     fn is_dir_empty(&self, path: &Utf8Path) -> std::io::Result<bool> {
-        self.list_dir(path.as_str())?
+        self.list_dir(path)?
             .next()
             .transpose()
             .map(|entry| entry.is_none())
@@ -262,11 +262,11 @@ pub trait MinimalFs: Send + Sync + 'static {
         path: &Utf8Path,
         permissions: Permissions,
     ) -> std::io::Result<Metadata>;
-    fn get_xattr(&self, path: &str, name: &str) -> std::io::Result<Vec<u8>>;
-    fn list_xattr(&self, path: &str) -> std::io::Result<Vec<String>>;
-    fn remove_xattr(&self, path: &str, name: &str) -> std::io::Result<()>;
-    fn set_xattr(&self, path: &str, name: &str, value: &[u8]) -> std::io::Result<()>;
-    fn read_symlink(&self, path: &str) -> std::io::Result<Utf8PathBuf>;
-    fn create_symlink(&self, path: &str, target_path: &str) -> std::io::Result<Metadata>;
-    fn list_dir(&self, path: &str) -> std::io::Result<Self::DirEntries>;
+    fn get_xattr(&self, path: &Utf8Path, name: &str) -> std::io::Result<Vec<u8>>;
+    fn list_xattr(&self, path: &Utf8Path) -> std::io::Result<Vec<String>>;
+    fn remove_xattr(&self, path: &Utf8Path, name: &str) -> std::io::Result<()>;
+    fn set_xattr(&self, path: &Utf8Path, name: &str, value: &[u8]) -> std::io::Result<()>;
+    fn read_symlink(&self, path: &Utf8Path) -> std::io::Result<Utf8PathBuf>;
+    fn create_symlink(&self, path: &Utf8Path, target_path: &Utf8Path) -> std::io::Result<Metadata>;
+    fn list_dir(&self, path: &Utf8Path) -> std::io::Result<Self::DirEntries>;
 }

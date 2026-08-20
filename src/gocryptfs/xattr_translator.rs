@@ -56,9 +56,7 @@ impl<F: MinimalFs> XattrLayout for GoCryptFs<FsBackend<F>> {
         let cipher_path = self.plain_path_to_cipher(path).or_invalid()?;
         let cipher_name = plain_xattr_name_to_cipher(self, name).or_invalid()?;
 
-        let cipher_xattr_value = self
-            .lower_fs()
-            .get_xattr(cipher_path.as_str(), &cipher_name)?;
+        let cipher_xattr_value = self.lower_fs().get_xattr(&cipher_path, &cipher_name)?;
         cipher_xattr_value_to_plain(self, &cipher_xattr_value).or_invalid()
     }
     fn set_xattr(&self, path: &VirtualPath, name: &str, value: &[u8]) -> std::io::Result<()> {
@@ -66,19 +64,18 @@ impl<F: MinimalFs> XattrLayout for GoCryptFs<FsBackend<F>> {
         let cipher_name = plain_xattr_name_to_cipher(self, name).or_invalid()?;
         let cipher_xattr_value = plain_xattr_value_to_cipher(self, value).or_invalid()?;
         self.lower_fs()
-            .set_xattr(cipher_path.as_str(), &cipher_name, &cipher_xattr_value)
+            .set_xattr(&cipher_path, &cipher_name, &cipher_xattr_value)
     }
     fn remove_xattr(&self, path: &VirtualPath, name: &str) -> std::io::Result<()> {
         let cipher_path = self.plain_path_to_cipher(path).or_invalid()?;
         let cipher_name = plain_xattr_name_to_cipher(self, name).or_invalid()?;
-        self.lower_fs()
-            .remove_xattr(cipher_path.as_str(), &cipher_name)
+        self.lower_fs().remove_xattr(&cipher_path, &cipher_name)
     }
     fn list_xattr(&self, path: &VirtualPath) -> std::io::Result<Vec<String>> {
         let cipher_path = self.plain_path_to_cipher(path).or_invalid()?;
         Ok(self
             .lower_fs()
-            .list_xattr(cipher_path.as_str())?
+            .list_xattr(&cipher_path)?
             .into_iter()
             .filter_map(|name| cipher_xattr_name_to_plain(self, &name).ok())
             .collect())

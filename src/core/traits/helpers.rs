@@ -104,14 +104,14 @@ pub(super) fn default_create_symlink<T: EncryptionLayout + ?Sized>(
     let cipher_target = str::from_utf8(&cipher_target).or_invalid()?;
 
     this.lower_fs()
-        .create_symlink(cipher_path.as_str(), cipher_target)
+        .create_symlink(&cipher_path, Utf8Path::new(cipher_target))
 }
 pub(super) fn default_read_symlink<T: EncryptionLayout + ?Sized>(
     this: &T,
     plain_path: &VirtualPath,
 ) -> std::io::Result<String> {
     let cipher_path = this.plain_path_to_cipher(plain_path).or_invalid()?;
-    let cipher_target = this.lower_fs().read_symlink(cipher_path.as_str())?;
+    let cipher_target = this.lower_fs().read_symlink(&cipher_path)?;
     let plain_value = this
         .cipher_metavalue_to_plain(cipher_target.as_str().as_bytes())
         .or_invalid()?;

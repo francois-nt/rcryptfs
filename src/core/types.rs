@@ -162,7 +162,7 @@ impl MinimalFs for DefaultFs {
 
     fn list_dir(
         &self,
-        path: &str,
+        path: &Utf8Path,
         // impl Iterator<Item = std::io::Result<FsDirEntry>> + '_ + use<'_>
     ) -> std::io::Result<Self::DirEntries> {
         Ok(FsDirentryIterator(std::fs::read_dir(path)?))
@@ -215,7 +215,7 @@ impl MinimalFs for DefaultFs {
         log::debug!("metadata are {metadata}");
         Ok(metadata)
     }
-    fn get_xattr(&self, path: &str, name: &str) -> std::io::Result<Vec<u8>> {
+    fn get_xattr(&self, path: &Utf8Path, name: &str) -> std::io::Result<Vec<u8>> {
         #[cfg(not(unix))]
         {
             let _ = (path, name);
@@ -226,7 +226,7 @@ impl MinimalFs for DefaultFs {
             xattr::get(path, name)?.or_io_error(libc::ENODATA)
         }
     }
-    fn list_xattr(&self, path: &str) -> std::io::Result<Vec<String>> {
+    fn list_xattr(&self, path: &Utf8Path) -> std::io::Result<Vec<String>> {
         #[cfg(not(unix))]
         {
             let _ = path;
@@ -239,7 +239,7 @@ impl MinimalFs for DefaultFs {
                 .collect())
         }
     }
-    fn remove_xattr(&self, path: &str, name: &str) -> std::io::Result<()> {
+    fn remove_xattr(&self, path: &Utf8Path, name: &str) -> std::io::Result<()> {
         #[cfg(not(unix))]
         {
             let _ = (path, name);
@@ -250,7 +250,7 @@ impl MinimalFs for DefaultFs {
             xattr::remove(path, name)
         }
     }
-    fn set_xattr(&self, path: &str, name: &str, value: &[u8]) -> std::io::Result<()> {
+    fn set_xattr(&self, path: &Utf8Path, name: &str, value: &[u8]) -> std::io::Result<()> {
         #[cfg(not(unix))]
         {
             let _ = (path, name, value);
@@ -261,10 +261,10 @@ impl MinimalFs for DefaultFs {
             xattr::set(path, name, value)
         }
     }
-    fn read_symlink(&self, path: &str) -> std::io::Result<Utf8PathBuf> {
+    fn read_symlink(&self, path: &Utf8Path) -> std::io::Result<Utf8PathBuf> {
         std::fs::read_link(path)?.try_into().or_invalid()
     }
-    fn create_symlink(&self, path: &str, target_path: &str) -> std::io::Result<Metadata> {
+    fn create_symlink(&self, path: &Utf8Path, target_path: &Utf8Path) -> std::io::Result<Metadata> {
         #[cfg(unix)]
         std::os::unix::fs::symlink(target_path, path)?;
         #[cfg(not(unix))]
