@@ -3,7 +3,7 @@ use crate::core::XattrLayout;
 use super::{
     BufferedFile, CryptFsFile, EncryptionLayout, EncryptionTranslator, FileHandle, FileSystem,
     FsDirEntry, GenericOpenOptions, Metadata, MinimalFs, OrIoError, Permissions,
-    ReadOnlyFileSystem, VirtualPath, Utf8Path,
+    ReadOnlyFileSystem, Utf8Path, VirtualPath,
 };
 
 use std::sync::Arc;
@@ -204,12 +204,7 @@ where
 
         Ok(())
     }
-    fn chown(
-        &self,
-        path: &VirtualPath,
-        uid: Option<u32>,
-        gid: Option<u32>,
-    ) -> std::io::Result<()> {
+    fn chown(&self, path: &VirtualPath, uid: Option<u32>, gid: Option<u32>) -> std::io::Result<()> {
         let cipher_path = self.fs.plain_path_to_cipher(path).or_invalid()?;
         self.fs.lower_fs().chown(&cipher_path, uid, gid)
     }

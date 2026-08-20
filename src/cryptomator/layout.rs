@@ -1,8 +1,8 @@
 use super::CryptoMator;
 use crate::core::{
     Backend, CacheAccess, CipherPathLayout, EncryptionLayout, EncryptionTranslator, FileType,
-    FsBackend, FsDirEntry, Metadata, MinimalFs, OrIoError, Permissions, Result, VirtualPath,
-    VirtualPathBuf, Utf8Path, Utf8PathBuf, default_remove_cached_plain_path, temp_file_path,
+    FsBackend, FsDirEntry, Metadata, MinimalFs, OrIoError, Permissions, Result, Utf8Path,
+    Utf8PathBuf, VirtualPath, VirtualPathBuf, default_remove_cached_plain_path, temp_file_path,
 };
 use anyhow::{Context, anyhow};
 

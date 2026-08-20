@@ -1,7 +1,7 @@
 use super::super::FsCacheEntry;
 use super::{
     FileHandle, FsDirEntry, GenericOpenOptions, Metadata, ModifiedTime, Permissions, ReadAt,
-    Result, Size, VirtualPath, Utf8Path, Utf8PathBuf, WriteAt,
+    Result, Size, Utf8Path, Utf8PathBuf, VirtualPath, WriteAt,
 };
 use super::{
     default_create_symlink, default_metadata, default_mkdir, default_mknode, default_read_symlink,

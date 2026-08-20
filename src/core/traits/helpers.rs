@@ -1,6 +1,6 @@
 use super::super::FileType;
 use super::{EncryptionLayout, MinimalFs, OrIoError};
-use super::{Metadata, Permissions, VirtualPath, Utf8Path, Utf8PathBuf};
+use super::{Metadata, Permissions, Utf8Path, Utf8PathBuf, VirtualPath};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::Digest;
 use std::time::SystemTime;

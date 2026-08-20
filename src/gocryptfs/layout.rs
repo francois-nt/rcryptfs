@@ -1,7 +1,7 @@
 use super::GoCryptFs;
 use crate::core::{
     Backend, CacheAccess, CipherPathLayout, EncryptionLayout, EncryptionTranslator, FsBackend,
-    FsDirEntry, MinimalFs, OrIoError, Result, VirtualPath, VirtualPathBuf, Utf8Path, Utf8PathBuf,
+    FsDirEntry, MinimalFs, OrIoError, Result, Utf8Path, Utf8PathBuf, VirtualPath, VirtualPathBuf,
     default_remove_cached_plain_path, temp_file_path,
 };
 use anyhow::{Context, anyhow};

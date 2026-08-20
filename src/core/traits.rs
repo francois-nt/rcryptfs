@@ -1,5 +1,5 @@
 use super::{
-    FsDirEntry, GenericOpenOptions, Metadata, Permissions, Result, VirtualPath, UnsafeCache,
+    FsDirEntry, GenericOpenOptions, Metadata, Permissions, Result, UnsafeCache, VirtualPath,
 };
 pub use camino::{Utf8Path, Utf8PathBuf};
 use log::error;
@@ -181,8 +181,7 @@ pub trait FileSystem: ReadOnlyFileSystem {
     /// Creates a symbolic link.
     fn create_symlink(&self, path: &VirtualPath, target_path: &str) -> std::io::Result<Metadata>;
     /// Changes ownership of a path.
-    fn chown(&self, path: &VirtualPath, uid: Option<u32>, gid: Option<u32>)
-    -> std::io::Result<()>;
+    fn chown(&self, path: &VirtualPath, uid: Option<u32>, gid: Option<u32>) -> std::io::Result<()>;
 
     /// Sets an extended attribute.
     fn set_xattr(&self, path: &VirtualPath, name: &str, value: &[u8]) -> std::io::Result<()>;
