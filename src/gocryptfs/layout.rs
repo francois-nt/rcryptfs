@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::GoCryptFs;
 use crate::core::{
     Backend, CacheAccess, CipherPathLayout, EncryptionLayout, EncryptionTranslator, FsBackend,
@@ -73,10 +75,10 @@ impl<F: MinimalFs> CipherPathLayout for GoCryptFs<FsBackend<F>> {
 impl<F: MinimalFs> EncryptionLayout for GoCryptFs<FsBackend<F>> {
     /// Lists directory entries with plain names.
     fn list_dir_plain_names(
-        &self,
+        self: Arc<Self>,
         plain_path: &VirtualPath,
     ) -> std::io::Result<
-        impl Iterator<Item = std::io::Result<(FsDirEntry, VirtualPathBuf)>> + '_ + use<'_, F>,
+        impl Iterator<Item = std::io::Result<(FsDirEntry, VirtualPathBuf)>> + 'static,
     > {
         let plain_path: VirtualPathBuf = plain_path.into();
         let cipher_path = self.plain_path_to_cipher(&plain_path).or_invalid()?;
@@ -85,13 +87,13 @@ impl<F: MinimalFs> EncryptionLayout for GoCryptFs<FsBackend<F>> {
         Ok(self
             .lower_fs()
             .read_dir(&cipher_path)?
-            .filter_map(
-                move |entry| match map_dir_entry(self, &cipher_path, &dir_iv, entry) {
+            .filter_map(move |entry| {
+                match map_dir_entry(self.as_ref(), &cipher_path, &dir_iv, entry) {
                     Ok(Some((plain_name, cipher_path))) => Some(Ok((plain_name, cipher_path))),
                     Ok(None) => None,
                     Err(e) => Some(Err(e)),
-                },
-            ))
+                }
+            }))
 
         // //std::fs::metadata(path)
         // Ok(std::fs::read_dir(&cipher_path)?.filter_map(move |entry| {
@@ -252,7 +254,7 @@ mod tests {
             .put(&root_cipher.join("temp.junk"), b"ignored")
             .unwrap();
 
-        let entries: Vec<_> = backend
+        let entries: Vec<_> = Arc::from(backend)
             .list_dir_plain_names(p(""))
             .unwrap()
             .collect::<std::io::Result<Vec<_>>>()

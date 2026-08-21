@@ -25,7 +25,7 @@ pub trait MasterKey {
 }
 
 /// Builds a filesystem implementation for a backend that recognizes a cipher root.
-pub trait BackendProvider: Send + Sync + 'static {
+pub trait BackendProvider: Send + Sync {
     fn init_with_default_params(
         &self,
         root: &Utf8Path,
@@ -60,7 +60,7 @@ macro_rules! register_provider {
 pub fn build_filesystem(
     root_path: &Utf8Path,
     password: &str,
-    cache_policy: impl FileCachePolicy,
+    cache_policy: impl FileCachePolicy + 'static,
 ) -> Result<Box<dyn FileSystem>> {
     for &provider in PROVIDERS {
         if provider.probe(root_path) {

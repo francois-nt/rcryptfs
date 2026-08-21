@@ -129,7 +129,7 @@ fn open<T: FileSystem + ?Sized, C: OpenCache>(
     Ok(cache.insert(file))
 }
 
-impl<C: OpenCache + 'static> Filesystem for FileSystemHandler<C> {
+impl<C: OpenCache> Filesystem for FileSystemHandler<C> {
     fn init(
         &self,
         req: RequestInfo,
@@ -591,7 +591,7 @@ fn access<T: ReadOnlyFileSystem + ?Sized>(
     .inspect(|_| debug!("access ok for path {:?}", path))
 }
 
-fn read<C: OpenCache + 'static>(
+fn read<C: OpenCache>(
     cache: &C,
     path: &ResolvedPath,
     fh: u64,

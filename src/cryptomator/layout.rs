@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::CryptoMator;
 use crate::core::{
     Backend, CacheAccess, CipherPathLayout, EncryptionLayout, EncryptionTranslator, FileType,
@@ -104,14 +106,14 @@ impl<F: MinimalFs> CipherPathLayout for CryptoMator<FsBackend<F>> {
 
 impl<F: MinimalFs> EncryptionLayout for CryptoMator<FsBackend<F>> {
     fn list_dir_plain_names(
-        &self,
+        self: Arc<Self>,
         plain_path: &VirtualPath,
     ) -> std::io::Result<
-        impl Iterator<Item = std::io::Result<(FsDirEntry, VirtualPathBuf)>> + '_ + use<'_, F>,
+        impl Iterator<Item = std::io::Result<(FsDirEntry, VirtualPathBuf)>> + 'static,
     > {
         // Directory listings come from the storage directory identified by the folder dir id.
         let (cipher_path, dir_id) =
-            folder_path_to_cipher_and_dirid(self, plain_path).or_invalid()?;
+            folder_path_to_cipher_and_dirid(self.as_ref(), plain_path).or_invalid()?;
         // let plain_path: Utf8PathBuf = plain_path.into();
         // let cipher_path = self.plain_path_to_cipher(&plain_path)?;
         // let dir_id = if plain_path == "" {
@@ -129,7 +131,7 @@ impl<F: MinimalFs> EncryptionLayout for CryptoMator<FsBackend<F>> {
                     Ok(entry) => log::debug!("> entry Ok {entry}"),
                     Err(e) => log::debug!("> entry Err {e}"),
                 };
-                match map_dir_entry(self, &cipher_path, &dir_id, entry) {
+                match map_dir_entry(self.as_ref(), &cipher_path, &dir_id, entry) {
                     Ok(Some((plain_name, cipher_path))) => Some(Ok((plain_name, cipher_path))),
                     Ok(None) => None,
                     Err(e) => Some(Err(e)),
@@ -427,7 +429,7 @@ mod tests {
         let (_temp_dir, backend) = test_backend();
         backend.create_symlink(p("link"), "../target.txt").unwrap();
 
-        let entries: Vec<_> = backend
+        let entries: Vec<_> = Arc::from(backend)
             .list_dir_plain_names(p(""))
             .unwrap()
             .map(|entry| entry.unwrap().0)
@@ -521,7 +523,7 @@ mod tests {
             .put(&root_storage.join("dirid.c9r"), b"internal")
             .unwrap();
 
-        let entries: Vec<_> = backend
+        let entries: Vec<_> = Arc::from(backend)
             .list_dir_plain_names(p(""))
             .unwrap()
             .collect::<std::io::Result<Vec<_>>>()

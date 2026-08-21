@@ -202,7 +202,7 @@ impl From<std::fs::Metadata> for Metadata {
 
         Self {
             len: value.len(),
-            blocks: value.len() / 4096 + 1,
+            blocks: num_blocks(value.len()),
             file_type: value.file_type().into(),
             created,
             modified,
@@ -214,6 +214,13 @@ impl From<std::fs::Metadata> for Metadata {
     }
 }
 
+fn num_blocks(file_len: u64) -> u64 {
+    if file_len == 0 {
+        0
+    } else {
+        (file_len - 1) / 4096 + 1
+    }
+}
 /// File metadata.
 pub struct Metadata {
     pub len: u64,

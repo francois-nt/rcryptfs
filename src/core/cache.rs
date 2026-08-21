@@ -26,10 +26,8 @@ impl OpenCache for UnsafeCache {
         id: u64,
         handler: F,
     ) -> std::io::Result<U> {
-        let file = unsafe { Box::from_raw(id as usize as *mut Box<dyn FileHandle>) };
-        let res = handler(file.as_ref().as_ref());
-        let _ = Box::into_raw(file);
-        res
+        let file = unsafe { &*(id as usize as *const Box<dyn FileHandle>) };
+        handler(file.as_ref())
     }
 }
 

@@ -149,10 +149,28 @@ impl Size for std::fs::File {
 
 impl ReadAt for std::fs::File {
     fn read_at(&self, pos: u64, buf: &mut [u8]) -> std::io::Result<usize> {
-        #[cfg(unix)]
-        return std::os::unix::fs::FileExt::read_at(self, buf, pos);
-        #[cfg(windows)]
-        return std::os::windows::fs::FileExt::seek_read(self, buf, pos);
+        let mut total = 0;
+
+        while total < buf.len() {
+            let offset = pos
+                .checked_add(total as u64)
+                .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?;
+
+            #[cfg(unix)]
+            let result = std::os::unix::fs::FileExt::read_at(self, &mut buf[total..], offset);
+
+            #[cfg(windows)]
+            let result = std::os::windows::fs::FileExt::seek_read(self, &mut buf[total..], offset);
+
+            match result {
+                Ok(0) => break, // EOF
+                Ok(n) => total += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
+
+        Ok(total)
     }
 }
 
