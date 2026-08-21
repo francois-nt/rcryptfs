@@ -261,31 +261,33 @@ impl<F: StorageFileSystem> GoCryptFs<FsBackend<F>> {
     /// Initializes a GoCryptFS-compatible repository on the provided storage backend.
     pub fn init_with_backend(backend: &FsBackend<F>, password: &str) -> Result<Vec<u8>> {
         let root_path = VirtualPath::root();
-        let fs = backend.get_fs();
-        if !fs.is_dir_empty(root_path)? {
+        let storage_fs = backend.storage_fs();
+        if !storage_fs.is_dir_empty(root_path)? {
             bail!("Directory {root_path} must be empty!");
         }
         // Best effort rollback in case of error
         let rollback = |_: &std::io::Error| {
-            let _ = fs.remove("gocryptfs.conf".into());
-            let _ = fs.remove("gocryptfs.diriv".into());
+            let _ = storage_fs.remove("gocryptfs.conf".into());
+            let _ = storage_fs.remove("gocryptfs.diriv".into());
         };
         let (config, master_key) = GoCryptfsConfig::try_new(password)?;
         let json_config = serde_json::to_vec_pretty(&config)?;
-        fs.put_new("gocryptfs.conf".into(), &json_config)
+        storage_fs
+            .put_new("gocryptfs.conf".into(), &json_config)
             .inspect_err(rollback)?;
 
         // The root directory uses its own DirIV file just like any other directory.
         let mut root_dir_iv = [0u8; 16];
         rand::fill(&mut root_dir_iv);
-        fs.put_new("gocryptfs.diriv".into(), &root_dir_iv)
+        storage_fs
+            .put_new("gocryptfs.diriv".into(), &root_dir_iv)
             .inspect_err(rollback)?;
 
         Ok(master_key)
     }
     /// Opens a GoCryptFS repository from the provided storage backend.
     pub fn try_new_with_backend(backend: FsBackend<F>, password: &str) -> Result<Self> {
-        let config_data = backend.get_fs().read_all("gocryptfs.conf".into())?;
+        let config_data = backend.storage_fs().read_all("gocryptfs.conf".into())?;
         let config: GoCryptfsConfig = serde_json::from_slice(&config_data)?;
 
         let master_key = get_master_key(password, &config)?;

@@ -20,7 +20,7 @@ impl GoCryptFsBuilder {
     /// Checks whether a storage backend contains a GoCryptFS repository.
     pub fn probe_backend<F: StorageFileSystem>(backend: &FsBackend<F>) -> bool {
         backend
-            .get_fs()
+            .storage_fs()
             .exists("gocryptfs.conf".into())
             .unwrap_or(false)
     }

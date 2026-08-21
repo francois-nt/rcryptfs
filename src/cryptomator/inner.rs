@@ -265,36 +265,40 @@ impl<F: StorageFileSystem> CryptoMator<FsBackend<F>> {
         password: &str,
     ) -> Result<CryptomatorMasterKeys> {
         let root_path = VirtualPath::root();
-        let fs = backend.get_fs();
-        if !fs.is_dir_empty(root_path)? {
+        let storage_fs = backend.storage_fs();
+        if !storage_fs.is_dir_empty(root_path)? {
             bail!("Directory {root_path} must be empty!");
         }
 
         let rollback = |_: &std::io::Error| {
-            let _ = fs.remove("masterkey.cryptomator".into());
-            let _ = fs.remove("vault.cryptomator".into());
-            let _ = fs.remove_dir_all("d".into());
+            let _ = storage_fs.remove("masterkey.cryptomator".into());
+            let _ = storage_fs.remove("vault.cryptomator".into());
+            let _ = storage_fs.remove_dir_all("d".into());
         };
 
         let (config, master_keys) = CryptoMatorConfig::try_new(password)?;
         let json_config = serde_json::to_vec_pretty(&config)?;
-        fs.put_new("masterkey.cryptomator".into(), &json_config)
+        storage_fs
+            .put_new("masterkey.cryptomator".into(), &json_config)
             .inspect_err(rollback)?;
 
         let vault = generate_vault_cryptomator(&master_keys, "SIV_GCM", 220)?;
-        fs.put_new("vault.cryptomator".into(), vault.as_bytes())
+        storage_fs
+            .put_new("vault.cryptomator".into(), vault.as_bytes())
             .inspect_err(rollback)?;
 
         let siv_key = master_keys.siv_key();
         let storage_path = dir_id_to_storage_path(&siv_key, "")?;
-        fs.mkdir_all(&storage_path).inspect_err(rollback)?;
+        storage_fs.mkdir_all(&storage_path).inspect_err(rollback)?;
 
         Ok(master_keys)
     }
 
     /// Opens a Cryptomator repository from the provided storage backend.
     pub fn try_new_with_backend(backend: FsBackend<F>, password: &str) -> Result<Self> {
-        let config_data = backend.get_fs().read_all("masterkey.cryptomator".into())?;
+        let config_data = backend
+            .storage_fs()
+            .read_all("masterkey.cryptomator".into())?;
         let config: CryptoMatorConfig = serde_json::from_slice(&config_data)?;
 
         let keys = derive_keys(password, &config)?;
@@ -304,9 +308,9 @@ impl<F: StorageFileSystem> CryptoMator<FsBackend<F>> {
 
     pub(super) fn mkdir_storage_path(&self, dir_id: &str) -> Result<()> {
         let full_path = self.dir_id_to_storage_path(dir_id)?;
-        self.lower_fs()
+        self.storage_fs()
             .mkdir(full_path.parent().unwrap_or_else(VirtualPath::root), None)?;
-        self.lower_fs().mkdir(&full_path, None)?;
+        self.storage_fs().mkdir(&full_path, None)?;
         Ok(())
     }
 

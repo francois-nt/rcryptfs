@@ -14,7 +14,7 @@ impl CryptoMatorBuilder {
     /// Checks whether a storage backend contains a Cryptomator repository.
     pub fn probe_backend<F: StorageFileSystem>(backend: &FsBackend<F>) -> bool {
         backend
-            .get_fs()
+            .storage_fs()
             .exists("vault.cryptomator".into())
             .unwrap_or(false)
     }

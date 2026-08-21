@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::{collections::BTreeMap, time::SystemTime};
 /// Marker trait for backend implementations.
 pub trait Backend {
-    type LowerFs: StorageFileSystem;
-    fn get_fs(&self) -> &Self::LowerFs;
+    type StorageFs: StorageFileSystem;
+    fn storage_fs(&self) -> &Self::StorageFs;
 }
 
 /// Provides synchronized access to the plain-to-cipher path cache.
@@ -111,8 +111,8 @@ pub(crate) fn default_remove_cached_plain_path<T: PathCacheAccess>(
 
 /// Trait for path translation between plain and cipher.
 pub trait CipherPathLayout: EncryptionTranslator {
-    type LowerFs: StorageFileSystem;
-    fn lower_fs(&self) -> &Self::LowerFs;
+    type StorageFs: StorageFileSystem;
+    fn storage_fs(&self) -> &Self::StorageFs;
     /// Creates a temporary name for a given path.
     fn create_temp_name(&self, path: &str, is_dir_iv: bool) -> VirtualPathBuf;
     /// Converts a plain path to its cipher text equivalent.

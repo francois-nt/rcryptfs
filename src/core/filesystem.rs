@@ -90,7 +90,7 @@ where
     }
     let readonly = options.is_readonly();
     options.read(true).append(false);
-    let cipher_file = backend.lower_fs().open_file_with(path, options)?;
+    let cipher_file = backend.storage_fs().open_file_with(path, options)?;
     let crypt_file = CryptFsFile::try_from_file(cipher_file, backend, readonly)?;
 
     if cache_policy.cache_write() {
@@ -205,7 +205,7 @@ where
     }
     fn chown(&self, path: &VirtualPath, uid: Option<u32>, gid: Option<u32>) -> std::io::Result<()> {
         let cipher_path = self.fs.plain_path_to_cipher(path).or_invalid()?;
-        self.fs.lower_fs().chown(&cipher_path, uid, gid)
+        self.fs.storage_fs().chown(&cipher_path, uid, gid)
     }
     fn create_symlink(&self, path: &VirtualPath, target_path: &str) -> std::io::Result<Metadata> {
         self.fs.create_symlink(path, target_path)

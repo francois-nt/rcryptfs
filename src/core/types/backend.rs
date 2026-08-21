@@ -9,15 +9,15 @@ pub type CipherPathCacheEntry = (Vec<u8>, VirtualPathBuf);
 
 /// Backend state shared by one encrypted layout.
 pub struct FsBackend<F: StorageFileSystem = NativeFileSystem> {
-    fs: F,
+    storage_fs: F,
     path_cache: Mutex<BTreeMap<String, CipherPathCacheEntry>>,
 }
 
 impl<F: StorageFileSystem> FsBackend<F> {
     /// Creates a backend backed by the provided rooted storage implementation.
-    pub fn new(fs: F) -> Self {
+    pub fn new(storage_fs: F) -> Self {
         Self {
-            fs,
+            storage_fs,
             path_cache: Default::default(),
         }
     }
@@ -46,23 +46,23 @@ impl From<&Utf8Path> for FsBackend {
 }
 
 impl<F: StorageFileSystem> Backend for FsBackend<F> {
-    type LowerFs = F;
+    type StorageFs = F;
 
-    fn get_fs(&self) -> &F {
-        &self.fs
+    fn storage_fs(&self) -> &F {
+        &self.storage_fs
     }
 }
 
 /// In-memory backend for testing.
 #[derive(Default)]
 pub struct MemoryBackend {
-    fs: NativeFileSystem,
+    storage_fs: NativeFileSystem,
 }
 
 impl Backend for MemoryBackend {
-    type LowerFs = NativeFileSystem;
+    type StorageFs = NativeFileSystem;
 
-    fn get_fs(&self) -> &NativeFileSystem {
-        &self.fs
+    fn storage_fs(&self) -> &NativeFileSystem {
+        &self.storage_fs
     }
 }

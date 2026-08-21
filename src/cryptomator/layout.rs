@@ -48,7 +48,7 @@ fn folder_path_to_cipher_and_dirid<F: StorageFileSystem>(
                     let cipher_part = this.plain_name_to_cipher(dir_id, plain_part)?;
                     absolute_path = cipher_parent.join(cipher_part);
                 } else {
-                    let dir_id = read_dirid(this.lower_fs(), &absolute_path, is_root)?;
+                    let dir_id = read_dirid(this.storage_fs(), &absolute_path, is_root)?;
 
                     absolute_path = this.dir_id_to_storage_path(&dir_id)?;
                     cache.insert(
@@ -64,7 +64,7 @@ fn folder_path_to_cipher_and_dirid<F: StorageFileSystem>(
                 }
             }
 
-            let dir_id = read_dirid(this.lower_fs(), &absolute_path, is_root)?;
+            let dir_id = read_dirid(this.storage_fs(), &absolute_path, is_root)?;
             absolute_path = this.dir_id_to_storage_path(&dir_id)?;
 
             cache.insert(
@@ -78,9 +78,9 @@ fn folder_path_to_cipher_and_dirid<F: StorageFileSystem>(
 }
 
 impl<F: StorageFileSystem> CipherPathLayout for CryptoMator<FsBackend<F>> {
-    type LowerFs = F;
-    fn lower_fs(&self) -> &Self::LowerFs {
-        self.backend.get_fs()
+    type StorageFs = F;
+    fn storage_fs(&self) -> &Self::StorageFs {
+        self.backend.storage_fs()
     }
     /// Resolves one logical path to its visible storage entry inside the parent storage directory.
     fn plain_path_to_cipher(&self, plain_path: &VirtualPath) -> Result<VirtualPathBuf> {
@@ -128,7 +128,7 @@ impl<F: StorageFileSystem> EncryptionLayout for CryptoMator<FsBackend<F>> {
         // let cipher_path = self.dir_id_to_storage_path(&dir_id)?;
         log::debug!("read_dir on {}", cipher_path);
         Ok(self
-            .lower_fs()
+            .storage_fs()
             .read_dir(&cipher_path)?
             .filter_map(move |entry| {
                 match &entry {
@@ -156,7 +156,7 @@ impl<F: StorageFileSystem> EncryptionLayout for CryptoMator<FsBackend<F>> {
         // Metadata must be rewritten from the raw storage view to the logical Cryptomator view.
         let cipher_path = self.plain_path_to_cipher(plain_path).or_invalid()?;
         log::debug!("metadata on [{plain_path}] : {cipher_path}");
-        let mut metadata = self.lower_fs().metadata(&cipher_path)?;
+        let mut metadata = self.storage_fs().metadata(&cipher_path)?;
         metadata
             .adjust(self, &cipher_path, plain_path.is_empty())
             .or_io_error(libc::EBADF)?;
@@ -194,7 +194,7 @@ impl<F: StorageFileSystem> EncryptionLayout for CryptoMator<FsBackend<F>> {
                 let cipher_parent_path = self.plain_path_to_cipher(parent).or_invalid()?;
                 log::debug!("computed cipher_parent_path for {parent} - {cipher_parent_path}");
                 let parent_dir_id =
-                    read_dirid(self.lower_fs(), &cipher_parent_path, is_root).or_invalid()?;
+                    read_dirid(self.storage_fs(), &cipher_parent_path, is_root).or_invalid()?;
                 (parent_dir_id, cipher_parent_path)
             }
         };
@@ -208,18 +208,18 @@ impl<F: StorageFileSystem> EncryptionLayout for CryptoMator<FsBackend<F>> {
         let new_dir_iv = self.generate_diriv();
         let cipher_path = cipher_parent_path.join(cipher_name);
         log::debug!("cipher_path is {cipher_path}");
-        self.lower_fs().mkdir(&cipher_path, None)?;
+        self.storage_fs().mkdir(&cipher_path, None)?;
         let new_dir_iv_file = self.get_dir_iv_file(&cipher_path);
         log::debug!("new_dir_iv_file is {new_dir_iv_file}");
-        self.lower_fs()
+        self.storage_fs()
             .put(&new_dir_iv_file, &new_dir_iv)
             .or_invalid()?;
 
         self.mkdir_storage_path(str::from_utf8(&new_dir_iv).unwrap_or_default())
             .or_invalid()?;
         match permissions {
-            Some(permissions) => self.lower_fs().set_permissions(&cipher_path, permissions),
-            None => self.lower_fs().metadata(&cipher_path),
+            Some(permissions) => self.storage_fs().set_permissions(&cipher_path, permissions),
+            None => self.storage_fs().metadata(&cipher_path),
         }
     }
     fn mknode(
@@ -229,25 +229,25 @@ impl<F: StorageFileSystem> EncryptionLayout for CryptoMator<FsBackend<F>> {
     ) -> std::io::Result<Metadata> {
         // Empty logical files are materialized with a header immediately.
         let cipher_path = self.plain_path_to_cipher(plain_path).or_invalid()?;
-        self.lower_fs()
+        self.storage_fs()
             .put(&cipher_path, &self.generate_cipher_header().or_invalid()?)
             .or_invalid()?;
         match permissions {
-            Some(permissions) => self.lower_fs().set_permissions(&cipher_path, permissions),
-            None => self.lower_fs().metadata(&cipher_path),
+            Some(permissions) => self.storage_fs().set_permissions(&cipher_path, permissions),
+            None => self.storage_fs().metadata(&cipher_path),
         }
     }
     fn remove_dir(&self, plain_path: &VirtualPath) -> std::io::Result<()> {
         // Removing a logical directory must remove both its visible entry and its storage directory.
         let cipher_path = self.plain_path_to_cipher(plain_path).or_invalid()?;
         let is_root = plain_path.is_empty();
-        let dir_id = read_dirid(self.lower_fs(), &cipher_path, is_root).or_invalid()?;
+        let dir_id = read_dirid(self.storage_fs(), &cipher_path, is_root).or_invalid()?;
 
         let children_path = self.dir_id_to_storage_path(&dir_id).or_invalid()?;
-        self.lower_fs()
+        self.storage_fs()
             .remove_dir(&children_path)
             .inspect_err(|e| log::error!("cant rmdir on {children_path} - {e}"))?;
-        self.lower_fs()
+        self.storage_fs()
             .remove_dir_all(&cipher_path)
             .inspect_err(|e| log::error!("cant rmdir all on {cipher_path} - {e}"))?;
         self.remove_cached_plain_path(plain_path);
@@ -256,10 +256,10 @@ impl<F: StorageFileSystem> EncryptionLayout for CryptoMator<FsBackend<F>> {
     fn remove(&self, plain_path: &VirtualPath) -> std::io::Result<()> {
         // Logical symlinks are stored as directories, so removal depends on the visible entry type.
         let cipher_path = self.plain_path_to_cipher(plain_path).or_invalid()?;
-        let meta = self.lower_fs().metadata(&cipher_path)?;
+        let meta = self.storage_fs().metadata(&cipher_path)?;
         match meta.file_type {
-            FileType::File => self.lower_fs().remove(&cipher_path),
-            _ => self.lower_fs().remove_dir_all(&cipher_path),
+            FileType::File => self.storage_fs().remove(&cipher_path),
+            _ => self.storage_fs().remove_dir_all(&cipher_path),
         }
     }
     fn read_symlink(&self, plain_path: &VirtualPath) -> std::io::Result<String> {
@@ -267,7 +267,7 @@ impl<F: StorageFileSystem> EncryptionLayout for CryptoMator<FsBackend<F>> {
         let cipher_path = self.plain_path_to_cipher(plain_path).or_invalid()?;
         let symlink_content = cipher_path.join("symlink.c9r");
         let data = self
-            .lower_fs()
+            .storage_fs()
             .read(&symlink_content, 0, 1024)
             .or_invalid()?;
         let target = self.cipher_metavalue_to_plain(&data).or_invalid()?;
@@ -284,7 +284,7 @@ impl<F: StorageFileSystem> EncryptionLayout for CryptoMator<FsBackend<F>> {
             return Ok(metadata);
         }
         let cipher_path = self.plain_path_to_cipher(path).or_invalid()?;
-        self.lower_fs().set_permissions(&cipher_path, permissions)
+        self.storage_fs().set_permissions(&cipher_path, permissions)
     }
     /// Creates a logical symlink as a visible directory containing one encrypted target payload.
     fn create_symlink(&self, plain_path: &VirtualPath, target: &str) -> std::io::Result<Metadata> {
@@ -292,10 +292,10 @@ impl<F: StorageFileSystem> EncryptionLayout for CryptoMator<FsBackend<F>> {
         let cipher_target = self
             .plain_metavalue_to_cipher(target.as_bytes())
             .or_invalid()?;
-        self.lower_fs().mkdir(&cipher_path, None)?;
-        self.lower_fs()
+        self.storage_fs().mkdir(&cipher_path, None)?;
+        self.storage_fs()
             .put(&cipher_path.join("symlink.c9r"), &cipher_target)?;
-        let mut meta = self.lower_fs().metadata(&cipher_path)?;
+        let mut meta = self.storage_fs().metadata(&cipher_path)?;
         meta.adjust(self, &cipher_path, false).or_invalid()?;
         Ok(meta)
     }
@@ -328,9 +328,9 @@ impl AdujstMetadata for Metadata {
         } else if self.file_type == FileType::Directory {
             if !is_root {
                 let dir = path.join("dir.c9r");
-                if !this.lower_fs().exists(&dir)? {
+                if !this.storage_fs().exists(&dir)? {
                     let symlink = path.join("symlink.c9r");
-                    if this.lower_fs().exists(&symlink)? {
+                    if this.storage_fs().exists(&symlink)? {
                         self.file_type = FileType::SymLink;
                         self.permissions = 0o777_u16.into();
                     } else {
@@ -407,7 +407,7 @@ mod tests {
         };
 
         backend
-            .lower_fs()
+            .storage_fs()
             .mkdir_all(&backend.dir_id_to_storage_path("").unwrap())
             .unwrap();
 
@@ -453,7 +453,7 @@ mod tests {
             .unwrap();
 
         let cipher_path = backend.plain_path_to_cipher(p("empty.txt")).unwrap();
-        let raw_metadata = backend.lower_fs().metadata(&cipher_path).unwrap();
+        let raw_metadata = backend.storage_fs().metadata(&cipher_path).unwrap();
         let plain_metadata = backend.metadata(p("empty.txt")).unwrap();
 
         assert_eq!(
@@ -471,17 +471,17 @@ mod tests {
         backend.mkdir(p("docs"), Some(0o755_u16.into())).unwrap();
 
         let cipher_path = backend.plain_path_to_cipher(p("docs")).unwrap();
-        let dir_id = read_dirid(backend.lower_fs(), &cipher_path, false).unwrap();
+        let dir_id = read_dirid(backend.storage_fs(), &cipher_path, false).unwrap();
         let storage_path = backend.dir_id_to_storage_path(&dir_id).unwrap();
 
-        assert!(backend.lower_fs().exists(&cipher_path).unwrap());
+        assert!(backend.storage_fs().exists(&cipher_path).unwrap());
         assert!(
             backend
-                .lower_fs()
+                .storage_fs()
                 .exists(&cipher_path.join("dir.c9r"))
                 .unwrap()
         );
-        assert!(backend.lower_fs().exists(&storage_path).unwrap());
+        assert!(backend.storage_fs().exists(&storage_path).unwrap());
         assert!(backend.metadata(p("docs")).unwrap().file_type == FileType::Directory);
     }
 
@@ -491,13 +491,13 @@ mod tests {
 
         backend.mkdir(p("docs"), Some(0o755_u16.into())).unwrap();
         let cipher_path = backend.plain_path_to_cipher(p("docs")).unwrap();
-        let dir_id = read_dirid(backend.lower_fs(), &cipher_path, false).unwrap();
+        let dir_id = read_dirid(backend.storage_fs(), &cipher_path, false).unwrap();
         let storage_path = backend.dir_id_to_storage_path(&dir_id).unwrap();
 
         backend.remove_dir(p("docs")).unwrap();
 
-        assert!(!backend.lower_fs().exists(&cipher_path).unwrap());
-        assert!(!backend.lower_fs().exists(&storage_path).unwrap());
+        assert!(!backend.storage_fs().exists(&cipher_path).unwrap());
+        assert!(!backend.storage_fs().exists(&storage_path).unwrap());
     }
 
     #[test]
@@ -509,12 +509,12 @@ mod tests {
             .unwrap();
         let file_path = backend.plain_path_to_cipher(p("file.txt")).unwrap();
         backend.remove(p("file.txt")).unwrap();
-        assert!(!backend.lower_fs().exists(&file_path).unwrap());
+        assert!(!backend.storage_fs().exists(&file_path).unwrap());
 
         backend.create_symlink(p("link"), "../target.txt").unwrap();
         let symlink_path = backend.plain_path_to_cipher(p("link")).unwrap();
         backend.remove(p("link")).unwrap();
-        assert!(!backend.lower_fs().exists(&symlink_path).unwrap());
+        assert!(!backend.storage_fs().exists(&symlink_path).unwrap());
     }
 
     #[test]
@@ -523,7 +523,7 @@ mod tests {
         let root_storage = backend.dir_id_to_storage_path("").unwrap();
 
         backend
-            .lower_fs()
+            .storage_fs()
             .put(&root_storage.join("dirid.c9r"), b"internal")
             .unwrap();
 

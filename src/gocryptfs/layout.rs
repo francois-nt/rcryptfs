@@ -9,9 +9,9 @@ use crate::core::{
 use anyhow::{Context, anyhow};
 
 impl<F: StorageFileSystem> CipherPathLayout for GoCryptFs<FsBackend<F>> {
-    type LowerFs = F;
-    fn lower_fs(&self) -> &Self::LowerFs {
-        self.backend.get_fs()
+    type StorageFs = F;
+    fn storage_fs(&self) -> &Self::StorageFs {
+        self.backend.storage_fs()
     }
     fn remove_cached_plain_path(&self, plain_path: &VirtualPath) {
         default_remove_cached_plain_path(&self.backend, plain_path);
@@ -43,7 +43,7 @@ impl<F: StorageFileSystem> CipherPathLayout for GoCryptFs<FsBackend<F>> {
                             let cipher_part = self.plain_name_to_cipher(dir_iv, plain_part)?;
                             absolute_path = cipher_parent.join(cipher_part);
                         } else {
-                            let dir_iv = read_diriv(self.lower_fs(), &absolute_path)?;
+                            let dir_iv = read_diriv(self.storage_fs(), &absolute_path)?;
 
                             cache.insert(
                                 partial_plain_path.as_str().into(),
@@ -82,10 +82,10 @@ impl<F: StorageFileSystem> EncryptionLayout for GoCryptFs<FsBackend<F>> {
     > {
         let plain_path: VirtualPathBuf = plain_path.into();
         let cipher_path = self.plain_path_to_cipher(&plain_path).or_invalid()?;
-        let dir_iv = read_diriv(self.lower_fs(), &cipher_path).or_invalid()?;
+        let dir_iv = read_diriv(self.storage_fs(), &cipher_path).or_invalid()?;
 
         Ok(self
-            .lower_fs()
+            .storage_fs()
             .read_dir(&cipher_path)?
             .filter_map(move |entry| {
                 match map_dir_entry(self.as_ref(), &cipher_path, &dir_iv, entry) {
@@ -246,11 +246,11 @@ mod tests {
 
         let root_cipher = backend.plain_path_to_cipher(p("")).unwrap();
         backend
-            .lower_fs()
+            .storage_fs()
             .put(&root_cipher.join("gocryptfs.conf"), b"ignored")
             .unwrap();
         backend
-            .lower_fs()
+            .storage_fs()
             .put(&root_cipher.join("temp.junk"), b"ignored")
             .unwrap();
 
@@ -279,7 +279,7 @@ mod tests {
         let header = backend.generate_cipher_header().unwrap();
         let cipher = backend.plain_block_to_cipher(&header, 0, plain).unwrap();
         backend
-            .lower_fs()
+            .storage_fs()
             .put(
                 &cipher_path,
                 &[header.as_slice(), cipher.as_slice()].concat(),
@@ -301,7 +301,7 @@ mod tests {
             .unwrap();
         let cipher_path = backend.plain_path_to_cipher(p("file.txt")).unwrap();
 
-        assert!(backend.lower_fs().exists(&cipher_path).unwrap());
+        assert!(backend.storage_fs().exists(&cipher_path).unwrap());
         assert!(metadata.file_type == FileType::File);
         assert_eq!(u16::from(metadata.permissions), 0o640);
     }
@@ -314,8 +314,8 @@ mod tests {
         let cipher_path = backend.plain_path_to_cipher(p("docs")).unwrap();
         let diriv_path = backend.get_dir_iv_file(&cipher_path);
 
-        assert!(backend.lower_fs().exists(&cipher_path).unwrap());
-        assert!(backend.lower_fs().exists(&diriv_path).unwrap());
+        assert!(backend.storage_fs().exists(&cipher_path).unwrap());
+        assert!(backend.storage_fs().exists(&diriv_path).unwrap());
         assert!(metadata.file_type == FileType::Directory);
         assert_eq!(u16::from(metadata.permissions), 0o750);
     }
@@ -331,7 +331,7 @@ mod tests {
 
         backend.remove(p("file.txt")).unwrap();
 
-        assert!(!backend.lower_fs().exists(&cipher_path).unwrap());
+        assert!(!backend.storage_fs().exists(&cipher_path).unwrap());
     }
 
     #[test]
@@ -344,8 +344,8 @@ mod tests {
 
         backend.remove_dir(p("docs")).unwrap();
 
-        assert!(!backend.lower_fs().exists(&cipher_path).unwrap());
-        assert!(!backend.lower_fs().exists(&diriv_path).unwrap());
+        assert!(!backend.storage_fs().exists(&cipher_path).unwrap());
+        assert!(!backend.storage_fs().exists(&diriv_path).unwrap());
     }
 
     #[test]
