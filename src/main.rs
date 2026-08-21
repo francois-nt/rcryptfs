@@ -5,8 +5,8 @@
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, FromArgMatches, Parser, builder::PossibleValuesParser};
 use rcryptfs::core::{
-    CacheLock, FileSystemHandler, NoCache, build_filesystem, get_providers_name, init_filesystem,
-    is_native_dir_empty,
+    FileSystemHandler, LockedOpenFileTable, NoCache, build_filesystem, get_providers_name,
+    init_filesystem, is_native_dir_empty,
 };
 use rcryptfs::{is_background_child, platform, respawn_in_background};
 use std::io::{IsTerminal, Write};
@@ -191,7 +191,7 @@ fn main() -> Result<()> {
             log::set_max_level(log::LevelFilter::Error);
             let cryptfs =
                 build_filesystem(cli_args.folder_path.as_str().into(), &password, NoCache)?;
-            let handler: FileSystemHandler<CacheLock> = cryptfs.into();
+            let handler: FileSystemHandler<LockedOpenFileTable> = cryptfs.into();
             // CLI mode reuses stdin after password entry, so the platform layer restores an interactive input when needed.
             platform::prepare_cli_stdin(stdin_is_piped())?;
             cli::run_cli_shell(&handler)?;
@@ -249,7 +249,7 @@ fn run_mount(mount_args: &MountArgs, is_background_child: bool) -> Result<()> {
         respawn_in_background(&password)?;
     }
 
-    let mut handler: FileSystemHandler<CacheLock> = cryptfs.into();
+    let mut handler: FileSystemHandler<LockedOpenFileTable> = cryptfs.into();
     if !is_background_child || std::env::var_os("VERBOSE").is_some() {
         log::set_logger(&LOGGER).map_err(|e| anyhow::anyhow!("{e}"))?;
         log::set_max_level(log::LevelFilter::Debug);

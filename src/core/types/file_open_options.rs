@@ -3,7 +3,7 @@ use std::fs::OpenOptions;
 
 /// Options for opening files.
 #[derive(Default, Debug)]
-pub struct GenericOpenOptions {
+pub struct FileOpenOptions {
     // generic
     pub read: bool,
     pub write: bool,
@@ -14,7 +14,7 @@ pub struct GenericOpenOptions {
     pub permissions: Option<Permissions>,
 }
 
-impl GenericOpenOptions {
+impl FileOpenOptions {
     /// Checks if options are read-only.
     pub fn is_readonly(&self) -> bool {
         self.read
@@ -73,8 +73,8 @@ impl GenericOpenOptions {
     }
 }
 
-impl From<GenericOpenOptions> for OpenOptions {
-    fn from(value: GenericOpenOptions) -> Self {
+impl From<FileOpenOptions> for OpenOptions {
+    fn from(value: FileOpenOptions) -> Self {
         let mut this = Self::new();
         this.read(value.read)
             .write(value.write)

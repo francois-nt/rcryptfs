@@ -1,7 +1,7 @@
-use super::super::FsCacheEntry;
+use super::super::CipherPathCacheEntry;
 use super::{
-    FileHandle, FileType, FsDirEntry, GenericOpenOptions, Metadata, ModifiedTime, Permissions,
-    ReadAt, Result, Size, VirtualPath, VirtualPathBuf, WriteAt,
+    FileHandle, FileOpenOptions, FileType, FsDirEntry, Metadata, ModifiedTime, Permissions, ReadAt,
+    Result, Size, VirtualPath, VirtualPathBuf, WriteAt,
 };
 use super::{
     default_create_symlink, default_metadata, default_mkdir, default_mknode, default_read_symlink,
@@ -11,12 +11,16 @@ use std::sync::Arc;
 use std::{collections::BTreeMap, time::SystemTime};
 /// Marker trait for backend implementations.
 pub trait Backend {
-    type LowerFs: MinimalFs;
+    type LowerFs: StorageFileSystem;
     fn get_fs(&self) -> &Self::LowerFs;
 }
 
-pub trait CacheAccess {
-    fn access<Res, F: FnOnce(&mut BTreeMap<String, FsCacheEntry>) -> Res>(&self, f: F) -> Res;
+/// Provides synchronized access to the plain-to-cipher path cache.
+pub trait PathCacheAccess {
+    fn with_path_cache<Res, F: FnOnce(&mut BTreeMap<String, CipherPathCacheEntry>) -> Res>(
+        &self,
+        f: F,
+    ) -> Res;
 }
 /// Trait for encryption and decryption operations.
 pub trait EncryptionTranslator {
@@ -89,11 +93,11 @@ pub trait XattrLayout: EncryptionTranslator {
     }
 }
 
-pub(crate) fn default_remove_cached_plain_path<T: CacheAccess>(
+pub(crate) fn default_remove_cached_plain_path<T: PathCacheAccess>(
     backend: &T,
     plain_path: &VirtualPath,
 ) {
-    backend.access(|cache| {
+    backend.with_path_cache(|cache| {
         cache.remove(plain_path.as_str());
         // Remove cached descendants in one range operation.
         let prefix = format!("{plain_path}/");
@@ -107,7 +111,7 @@ pub(crate) fn default_remove_cached_plain_path<T: CacheAccess>(
 
 /// Trait for path translation between plain and cipher.
 pub trait CipherPathLayout: EncryptionTranslator {
-    type LowerFs: MinimalFs;
+    type LowerFs: StorageFileSystem;
     fn lower_fs(&self) -> &Self::LowerFs;
     /// Creates a temporary name for a given path.
     fn create_temp_name(&self, path: &str, is_dir_iv: bool) -> VirtualPathBuf;
@@ -183,13 +187,14 @@ pub trait StorageFile: FileHandle + Size + ModifiedTime + 'static {}
 
 impl<T> StorageFile for T where T: FileHandle + Size + ModifiedTime + 'static {}
 
-pub trait MinimalFs: Send + Sync + 'static {
+/// Provides the filesystem operations required by encrypted storage layouts.
+pub trait StorageFileSystem: Send + Sync + 'static {
     type OpenHandle: StorageFile;
     type DirEntries: Iterator<Item = std::io::Result<FsDirEntry>>;
     fn open_file_with(
         &self,
         path: &VirtualPath,
-        options: GenericOpenOptions,
+        options: FileOpenOptions,
     ) -> std::io::Result<Self::OpenHandle>;
 
     fn set_time(
@@ -241,12 +246,12 @@ pub trait MinimalFs: Send + Sync + 'static {
         self.remove_dir(path)
     }
     fn put(&self, path: &VirtualPath, data: &[u8]) -> std::io::Result<()> {
-        let mut options = GenericOpenOptions::default();
+        let mut options = FileOpenOptions::default();
         options.write(true).truncate(true).create(true);
         self.open_file_with(path, options)?.write_all_at(0, data)
     }
     fn put_new(&self, path: &VirtualPath, data: &[u8]) -> std::io::Result<()> {
-        let mut options = GenericOpenOptions::default();
+        let mut options = FileOpenOptions::default();
         options.write(true).create_new(true);
         self.open_file_with(path, options)?.write_all_at(0, data)
     }
@@ -256,7 +261,7 @@ pub trait MinimalFs: Send + Sync + 'static {
         offset: u64,
         buffer: &mut [u8],
     ) -> std::io::Result<usize> {
-        let mut options = GenericOpenOptions::default();
+        let mut options = FileOpenOptions::default();
         options.read(true);
         self.open_file_with(path, options)?.read_at(offset, buffer)
     }
@@ -267,7 +272,7 @@ pub trait MinimalFs: Send + Sync + 'static {
         Ok(buffer)
     }
     fn read_all(&self, path: &VirtualPath) -> std::io::Result<Vec<u8>> {
-        let mut options = GenericOpenOptions::default();
+        let mut options = FileOpenOptions::default();
         options.read(true);
         let file = self.open_file_with(path, options)?;
         let size = file.size()?;

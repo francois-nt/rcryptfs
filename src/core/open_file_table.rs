@@ -1,4 +1,4 @@
-use super::{FileHandle, OpenCache, OrIoError};
+use super::{FileHandle, OpenFileTable, OrIoError};
 use parking_lot::RwLock;
 use std::{
     collections::HashMap,
@@ -8,10 +8,11 @@ use std::{
     },
 };
 
+/// Stores open handles directly in pointer-derived identifiers.
 #[derive(Default)]
-pub struct UnsafeCache;
+pub struct UnsafeOpenFileTable;
 
-impl OpenCache for UnsafeCache {
+impl OpenFileTable for UnsafeOpenFileTable {
     fn insert(&self, file: Box<dyn FileHandle>) -> u64 {
         let file = Box::new(file);
         Box::into_raw(file) as usize as u64
@@ -32,12 +33,13 @@ impl OpenCache for UnsafeCache {
 }
 
 type FileDictionary<T> = HashMap<u64, Arc<T>>;
-pub struct CacheLock {
+/// Stores open handles in a synchronized identifier table.
+pub struct LockedOpenFileTable {
     id: AtomicU64,
     open_files: RwLock<FileDictionary<dyn FileHandle>>,
 }
 
-impl Default for CacheLock {
+impl Default for LockedOpenFileTable {
     fn default() -> Self {
         Self {
             id: 1.into(),
@@ -46,7 +48,7 @@ impl Default for CacheLock {
     }
 }
 
-impl OpenCache for CacheLock {
+impl OpenFileTable for LockedOpenFileTable {
     fn insert(&self, file: Box<dyn FileHandle>) -> u64 {
         let id = self.id.fetch_add(1, Ordering::Relaxed);
         self.open_files.write().insert(id, file.into());

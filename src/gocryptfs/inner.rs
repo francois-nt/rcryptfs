@@ -1,5 +1,5 @@
 use super::GoCryptFs;
-use crate::core::{Backend, FsBackend, MinimalFs, Result};
+use crate::core::{Backend, FsBackend, Result, StorageFileSystem};
 use crate::{Utf8Path, VirtualPath};
 use aes::{Aes256, cipher::generic_array::GenericArray};
 use aes_gcm::{
@@ -257,7 +257,7 @@ impl GoCryptFs<FsBackend> {
     }
 }
 
-impl<F: MinimalFs> GoCryptFs<FsBackend<F>> {
+impl<F: StorageFileSystem> GoCryptFs<FsBackend<F>> {
     /// Initializes a GoCryptFS-compatible repository on the provided storage backend.
     pub fn init_with_backend(backend: &FsBackend<F>, password: &str) -> Result<Vec<u8>> {
         let root_path = VirtualPath::root();

@@ -1,5 +1,5 @@
 use super::super::FileType;
-use super::{EncryptionLayout, MinimalFs, OrIoError};
+use super::{EncryptionLayout, OrIoError, StorageFileSystem};
 use super::{Metadata, Permissions, VirtualPath, VirtualPathBuf};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::Digest;
@@ -48,7 +48,7 @@ pub(super) fn default_mkdir<T: EncryptionLayout + ?Sized>(
 
 /// Creates a directory with an initialization vector file.
 fn create_diriv(
-    sub_fs: &impl MinimalFs,
+    sub_fs: &impl StorageFileSystem,
     path: impl AsRef<VirtualPath>,
     diriv_path: impl AsRef<VirtualPath>,
     iv: &[u8],

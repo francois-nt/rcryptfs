@@ -455,7 +455,7 @@ mod tests {
         GoCryptFs::<FsBackend>::init_with_default_params(root, "password").unwrap();
         let backend = Arc::new(GoCryptFs::<FsBackend>::try_new(root, "password").unwrap());
 
-        let mut options = GenericOpenOptions::default();
+        let mut options = FileOpenOptions::default();
         options.read(true).write(true).create(true);
         let cipher_file = backend
             .lower_fs()
@@ -476,7 +476,7 @@ mod tests {
         CryptoMator::<FsBackend>::init_with_default_params(root, "password").unwrap();
         let backend = Arc::new(CryptoMator::<FsBackend>::try_new(root, "password").unwrap());
 
-        let mut options = GenericOpenOptions::default();
+        let mut options = FileOpenOptions::default();
         options.read(true).write(true).create(true);
         let cipher_file = backend
             .lower_fs()
@@ -655,7 +655,7 @@ mod tests {
         CryptoMator::<FsBackend>::init_with_default_params(root, "password").unwrap();
         let backend = Arc::new(CryptoMator::<FsBackend>::try_new(root, "password").unwrap());
 
-        let mut options = GenericOpenOptions::default();
+        let mut options = FileOpenOptions::default();
         options.read(true).write(true).create(true);
         let cipher_file = backend
             .lower_fs()

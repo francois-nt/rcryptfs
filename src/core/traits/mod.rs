@@ -1,5 +1,5 @@
 use super::{
-    FileType, FsDirEntry, GenericOpenOptions, Metadata, Permissions, Result, VirtualPath,
+    FileOpenOptions, FileType, FsDirEntry, Metadata, Permissions, Result, VirtualPath,
     VirtualPathBuf,
 };
 

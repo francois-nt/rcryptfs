@@ -1,47 +1,51 @@
-use super::DefaultFs;
-use crate::core::{Backend, CacheAccess, MinimalFs, VirtualPathBuf};
+use super::NativeFileSystem;
+use crate::core::{Backend, PathCacheAccess, StorageFileSystem, VirtualPathBuf};
 use camino::{Utf8Path, Utf8PathBuf};
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
 
-pub type FsCacheEntry = (Vec<u8>, VirtualPathBuf);
+/// Cached directory identifier and resolved cipher path.
+pub type CipherPathCacheEntry = (Vec<u8>, VirtualPathBuf);
 
 /// Backend state shared by one encrypted layout.
-pub struct FsBackend<F: MinimalFs = DefaultFs> {
+pub struct FsBackend<F: StorageFileSystem = NativeFileSystem> {
     fs: F,
-    cache: Mutex<BTreeMap<String, FsCacheEntry>>,
+    path_cache: Mutex<BTreeMap<String, CipherPathCacheEntry>>,
 }
 
-impl<F: MinimalFs> FsBackend<F> {
+impl<F: StorageFileSystem> FsBackend<F> {
     /// Creates a backend backed by the provided rooted storage implementation.
     pub fn new(fs: F) -> Self {
         Self {
             fs,
-            cache: Default::default(),
+            path_cache: Default::default(),
         }
     }
 }
 
-impl<F: MinimalFs> CacheAccess for FsBackend<F> {
+impl<F: StorageFileSystem> PathCacheAccess for FsBackend<F> {
     /// Gives temporary mutable access to the plain-to-cipher path cache.
-    fn access<Res, Op: FnOnce(&mut BTreeMap<String, FsCacheEntry>) -> Res>(&self, f: Op) -> Res {
-        f(&mut self.cache.lock())
+    fn with_path_cache<Res, Op: FnOnce(&mut BTreeMap<String, CipherPathCacheEntry>) -> Res>(
+        &self,
+        f: Op,
+    ) -> Res {
+        f(&mut self.path_cache.lock())
     }
 }
 
 impl From<Utf8PathBuf> for FsBackend {
     fn from(value: Utf8PathBuf) -> Self {
-        Self::new(DefaultFs::new(value))
+        Self::new(NativeFileSystem::new(value))
     }
 }
 
 impl From<&Utf8Path> for FsBackend {
     fn from(value: &Utf8Path) -> Self {
-        Self::new(DefaultFs::new(value.into()))
+        Self::new(NativeFileSystem::new(value.into()))
     }
 }
 
-impl<F: MinimalFs> Backend for FsBackend<F> {
+impl<F: StorageFileSystem> Backend for FsBackend<F> {
     type LowerFs = F;
 
     fn get_fs(&self) -> &F {
@@ -52,13 +56,13 @@ impl<F: MinimalFs> Backend for FsBackend<F> {
 /// In-memory backend for testing.
 #[derive(Default)]
 pub struct MemoryBackend {
-    fs: DefaultFs,
+    fs: NativeFileSystem,
 }
 
 impl Backend for MemoryBackend {
-    type LowerFs = DefaultFs;
+    type LowerFs = NativeFileSystem;
 
-    fn get_fs(&self) -> &DefaultFs {
+    fn get_fs(&self) -> &NativeFileSystem {
         &self.fs
     }
 }

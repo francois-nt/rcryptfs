@@ -1,6 +1,6 @@
-use super::{FsDirEntry, GenericOpenOptions, Metadata, Permissions};
+use super::{FileOpenOptions, FsDirEntry, Metadata, Permissions};
 use crate::core::{
-    JoinVirtualPath, MinimalFs, ModifiedTime, OrIoError, ReadAt, SetLen, SetSync, Size,
+    JoinVirtualPath, ModifiedTime, OrIoError, ReadAt, SetLen, SetSync, Size, StorageFileSystem,
     VirtualPath, WriteAt,
 };
 use camino::{Utf8Path, Utf8PathBuf};
@@ -10,11 +10,11 @@ use std::{fs::OpenOptions, time::SystemTime};
 
 /// Local filesystem implementation rooted at one native UTF-8 directory.
 #[derive(Default)]
-pub struct DefaultFs {
+pub struct NativeFileSystem {
     root: Utf8PathBuf,
 }
 
-impl DefaultFs {
+impl NativeFileSystem {
     /// Creates a local filesystem rooted at the provided native directory.
     pub fn new(root: Utf8PathBuf) -> Self {
         Self { root }
@@ -116,9 +116,9 @@ fn set_times_nofollow(
 }
 
 /// Iterates over entries returned by the local filesystem.
-pub struct FsDirentryIterator(std::fs::ReadDir);
+pub struct NativeDirEntries(std::fs::ReadDir);
 
-impl Iterator for FsDirentryIterator {
+impl Iterator for NativeDirEntries {
     type Item = std::io::Result<FsDirEntry>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -199,14 +199,14 @@ impl SetSync for std::fs::File {
     }
 }
 
-impl MinimalFs for DefaultFs {
-    type DirEntries = FsDirentryIterator;
+impl StorageFileSystem for NativeFileSystem {
+    type DirEntries = NativeDirEntries;
     type OpenHandle = std::fs::File;
 
     fn open_file_with(
         &self,
         path: &VirtualPath,
-        options: GenericOpenOptions,
+        options: FileOpenOptions,
     ) -> std::io::Result<Self::OpenHandle> {
         let options: OpenOptions = options.into();
         options.open(self.resolve(path)?)
@@ -244,7 +244,7 @@ impl MinimalFs for DefaultFs {
         path: &VirtualPath,
         // impl Iterator<Item = std::io::Result<FsDirEntry>> + '_ + use<'_>
     ) -> std::io::Result<Self::DirEntries> {
-        Ok(FsDirentryIterator(std::fs::read_dir(self.resolve(path)?)?))
+        Ok(NativeDirEntries(std::fs::read_dir(self.resolve(path)?)?))
     }
 
     fn metadata(&self, path: &VirtualPath) -> std::io::Result<Metadata> {
@@ -402,10 +402,10 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn default_fs_set_time_preserves_omitted_timestamp() {
+    fn native_fs_set_time_preserves_omitted_timestamp() {
         let temp_dir = tempdir().unwrap();
         let root = Utf8Path::from_path(temp_dir.path()).unwrap().to_owned();
-        let fs = DefaultFs::new(root);
+        let fs = NativeFileSystem::new(root);
         let path = VirtualPath::new("file");
         let initial_atime = UNIX_EPOCH + Duration::from_secs(1_600_000_000);
         let initial_mtime = UNIX_EPOCH + Duration::from_secs(1_600_000_100);
@@ -430,10 +430,10 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn default_fs_set_time_does_not_follow_symlinks() {
+    fn native_fs_set_time_does_not_follow_symlinks() {
         let temp_dir = tempdir().unwrap();
         let root = Utf8Path::from_path(temp_dir.path()).unwrap().to_owned();
-        let fs = DefaultFs::new(root);
+        let fs = NativeFileSystem::new(root);
         let target = VirtualPath::new("target");
         let link = VirtualPath::new("link");
         let target_atime = UNIX_EPOCH + Duration::from_secs(1_600_000_000);
@@ -458,10 +458,10 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn default_fs_keeps_symlink_targets_opaque() {
+    fn native_fs_keeps_symlink_targets_opaque() {
         let temp_dir = tempdir().unwrap();
         let root = Utf8Path::from_path(temp_dir.path()).unwrap().to_owned();
-        let fs = DefaultFs::new(root);
+        let fs = NativeFileSystem::new(root);
         let target = "/opaque/../target";
 
         fs.create_symlink(VirtualPath::new("link"), target).unwrap();

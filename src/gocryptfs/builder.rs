@@ -1,7 +1,7 @@
 use super::GoCryptFs;
 use crate::core::{
-    Backend, BackendProvider, EncryptedFileTranslator, FileCachePolicy, FileSystem, FsBackend,
-    MasterKey, MinimalFs, Result,
+    Backend, BackendProvider, EncryptedFileSystem, FileCachePolicy, FileSystem, FsBackend,
+    MasterKey, Result, StorageFileSystem,
 };
 use crate::{Utf8Path, register_provider};
 
@@ -18,7 +18,7 @@ register_provider!(GoCryptFsBuilder);
 
 impl GoCryptFsBuilder {
     /// Checks whether a storage backend contains a GoCryptFS repository.
-    pub fn probe_backend<F: MinimalFs>(backend: &FsBackend<F>) -> bool {
+    pub fn probe_backend<F: StorageFileSystem>(backend: &FsBackend<F>) -> bool {
         backend
             .get_fs()
             .exists("gocryptfs.conf".into())
@@ -26,12 +26,12 @@ impl GoCryptFsBuilder {
     }
 
     /// Builds a GoCryptFS filesystem on an arbitrary storage backend.
-    pub fn try_build_with_backend<F: MinimalFs>(
+    pub fn try_build_with_backend<F: StorageFileSystem>(
         backend: FsBackend<F>,
         password: &str,
         cache_policy: Box<dyn FileCachePolicy>,
     ) -> Result<Box<dyn FileSystem>> {
-        let cryptfs: EncryptedFileTranslator<GoCryptFs<FsBackend<F>>> = (
+        let cryptfs: EncryptedFileSystem<GoCryptFs<FsBackend<F>>> = (
             GoCryptFs::try_new_with_backend(backend, password)?,
             cache_policy,
         )
@@ -40,7 +40,7 @@ impl GoCryptFsBuilder {
     }
 
     /// Initializes a GoCryptFS repository on an arbitrary storage backend.
-    pub fn init_with_backend<F: MinimalFs>(
+    pub fn init_with_backend<F: StorageFileSystem>(
         backend: &FsBackend<F>,
         password: &str,
     ) -> Result<Box<dyn MasterKey>> {

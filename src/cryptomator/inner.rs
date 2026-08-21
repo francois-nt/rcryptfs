@@ -1,6 +1,6 @@
 use crate::core::{
-    Backend, CipherPathLayout, EncryptionTranslator, FsBackend, MasterKey, MinimalFs, Result,
-    Utf8Path, VirtualPath, VirtualPathBuf, XattrLayout,
+    Backend, CipherPathLayout, EncryptionTranslator, FsBackend, MasterKey, Result,
+    StorageFileSystem, Utf8Path, VirtualPath, VirtualPathBuf, XattrLayout,
 };
 use aes_gcm::{
     Aes256Gcm,
@@ -258,7 +258,7 @@ impl CryptoMator<FsBackend> {
     }
 }
 
-impl<F: MinimalFs> CryptoMator<FsBackend<F>> {
+impl<F: StorageFileSystem> CryptoMator<FsBackend<F>> {
     /// Initializes a Cryptomator repository on the provided storage backend.
     pub fn init_with_backend(
         backend: &FsBackend<F>,

@@ -2,13 +2,13 @@ use std::sync::Arc;
 
 use super::GoCryptFs;
 use crate::core::{
-    Backend, CacheAccess, CipherPathLayout, EncryptionLayout, EncryptionTranslator, FsBackend,
-    FsDirEntry, MinimalFs, OrIoError, Result, VirtualPath, VirtualPathBuf,
+    Backend, CipherPathLayout, EncryptionLayout, EncryptionTranslator, FsBackend, FsDirEntry,
+    OrIoError, PathCacheAccess, Result, StorageFileSystem, VirtualPath, VirtualPathBuf,
     default_remove_cached_plain_path, temp_file_path,
 };
 use anyhow::{Context, anyhow};
 
-impl<F: MinimalFs> CipherPathLayout for GoCryptFs<FsBackend<F>> {
+impl<F: StorageFileSystem> CipherPathLayout for GoCryptFs<FsBackend<F>> {
     type LowerFs = F;
     fn lower_fs(&self) -> &Self::LowerFs {
         self.backend.get_fs()
@@ -19,7 +19,7 @@ impl<F: MinimalFs> CipherPathLayout for GoCryptFs<FsBackend<F>> {
 
     /// Converts a plain path to its cipher text equivalent.
     fn plain_path_to_cipher(&self, plain_path: &VirtualPath) -> Result<VirtualPathBuf> {
-        self.backend.access(|cache| {
+        self.backend.with_path_cache(|cache| {
             if let Some((_, cipher_path)) = cache.get(plain_path.as_str()) {
                 Ok(cipher_path.to_owned())
             } else {
@@ -72,7 +72,7 @@ impl<F: MinimalFs> CipherPathLayout for GoCryptFs<FsBackend<F>> {
     }
 }
 
-impl<F: MinimalFs> EncryptionLayout for GoCryptFs<FsBackend<F>> {
+impl<F: StorageFileSystem> EncryptionLayout for GoCryptFs<FsBackend<F>> {
     /// Lists directory entries with plain names.
     fn list_dir_plain_names(
         self: Arc<Self>,
@@ -107,7 +107,7 @@ impl<F: MinimalFs> EncryptionLayout for GoCryptFs<FsBackend<F>> {
 }
 
 /// Reads the directory initialization vector from a cipher directory.
-fn read_diriv(fs: &impl MinimalFs, cipher_dir: &VirtualPath) -> Result<[u8; 16]> {
+fn read_diriv(fs: &impl StorageFileSystem, cipher_dir: &VirtualPath) -> Result<[u8; 16]> {
     let p = cipher_dir.join("gocryptfs.diriv");
     let data = fs.read(&p, 0, 17).context(format!("read {:?}", p))?;
     if data.len() != 16 {
@@ -155,7 +155,7 @@ fn map_dir_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{EncryptionLayout, FileType, FsBackend, MinimalFs, Utf8Path};
+    use crate::core::{EncryptionLayout, FileType, FsBackend, StorageFileSystem, Utf8Path};
     use tempfile::tempdir;
 
     /// Creates a borrowed plain path for tests.

@@ -1,5 +1,5 @@
 use super::super::{
-    FileType, FsDirEntry, GenericOpenOptions, Metadata, Permissions, Result, UnsafeCache,
+    FileOpenOptions, FileType, FsDirEntry, Metadata, Permissions, Result, UnsafeOpenFileTable,
     VirtualPath,
 };
 pub use camino::{Utf8Path, Utf8PathBuf};
@@ -95,15 +95,15 @@ impl<T> ReadHandle for T where T: ReadAt + Send + Sync {}
 
 impl<T> FileHandle for T where T: ReadHandle + WriteAt + SetLen + SetSync {}
 
-/// Trait for caching open files.
-pub trait OpenCache: Default {
-    /// Inserts a file into the cache and returns an unique fileId.
+/// Maps stable identifiers to open file handles.
+pub trait OpenFileTable: Default {
+    /// Inserts a file and returns its unique handle identifier.
     fn insert(&self, file: Box<dyn FileHandle>) -> u64;
 
-    /// Releases a file from the cache.
+    /// Releases an open file handle.
     fn release(&self, id: u64) -> std::io::Result<()>;
 
-    /// Accesses a file in the cache.
+    /// Accesses an open file handle.
     fn access<U, F: FnOnce(&dyn FileHandle) -> std::io::Result<U>>(
         &self,
         id: u64,
@@ -143,7 +143,7 @@ pub trait FileSystem: ReadOnlyFileSystem {
     fn open_file_with(
         &self,
         path: &VirtualPath,
-        options: GenericOpenOptions,
+        options: FileOpenOptions,
     ) -> std::io::Result<Box<dyn FileHandle>>;
     /// Truncates a file to a new size.
     fn truncate(&self, path: &VirtualPath, new_size: u64) -> std::io::Result<()>;
@@ -210,16 +210,16 @@ pub trait FileSystem: ReadOnlyFileSystem {
     fn remove_xattr(&self, path: &VirtualPath, name: &str) -> std::io::Result<()>;
 }
 
-/// Wrapper for filesystem with caching.
-pub struct FileSystemHandler<C: OpenCache = UnsafeCache> {
+/// Hosts a filesystem together with its open file table.
+pub struct FileSystemHandler<C: OpenFileTable = UnsafeOpenFileTable> {
     fs: Box<dyn FileSystem>,
-    cache: C,
+    open_files: C,
     is_background_child: bool,
 }
 
-impl<C: OpenCache> FileSystemHandler<C> {
-    pub fn as_cache(&self) -> &C {
-        &self.cache
+impl<C: OpenFileTable> FileSystemHandler<C> {
+    pub fn open_files(&self) -> &C {
+        &self.open_files
     }
     pub fn set_as_background_child(&mut self) {
         self.is_background_child = true;
@@ -229,27 +229,27 @@ impl<C: OpenCache> FileSystemHandler<C> {
     }
 }
 
-impl<T: FileSystem, C: OpenCache> From<T> for FileSystemHandler<C> {
+impl<T: FileSystem, C: OpenFileTable> From<T> for FileSystemHandler<C> {
     fn from(value: T) -> Self {
         Self {
             fs: Box::new(value),
-            cache: C::default(),
+            open_files: C::default(),
             is_background_child: false,
         }
     }
 }
 
-impl<C: OpenCache> From<Box<dyn FileSystem>> for FileSystemHandler<C> {
+impl<C: OpenFileTable> From<Box<dyn FileSystem>> for FileSystemHandler<C> {
     fn from(value: Box<dyn FileSystem>) -> Self {
         Self {
             fs: value,
-            cache: C::default(),
+            open_files: C::default(),
             is_background_child: false,
         }
     }
 }
 
-impl<C: OpenCache> AsRef<dyn FileSystem> for FileSystemHandler<C> {
+impl<C: OpenFileTable> AsRef<dyn FileSystem> for FileSystemHandler<C> {
     fn as_ref(&self) -> &dyn FileSystem {
         self.fs.as_ref()
     }

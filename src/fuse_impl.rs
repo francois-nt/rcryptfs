@@ -1,5 +1,5 @@
 use crate::core::{
-    FileSystem, FileSystemHandler, FileType, GenericOpenOptions, Metadata, OpenCache, OrIoError,
+    FileOpenOptions, FileSystem, FileSystemHandler, FileType, Metadata, OpenFileTable, OrIoError,
     ReadOnlyFileSystem, VirtualPath,
 };
 use fuser_ng::{EntryName, EntryRef, FileAttr, Filesystem, RequestInfo, ResolvedPath};
@@ -92,10 +92,10 @@ impl HasFlag for u32 {
     }
 }
 
-/// Opens a file through the filesystem backend and stores it in the open-file cache.
-fn open<T: FileSystem + ?Sized, C: OpenCache>(
+/// Opens a file through the filesystem backend and stores it in the open file table.
+fn open<T: FileSystem + ?Sized, C: OpenFileTable>(
     backend: &T,
-    cache: &C,
+    open_files: &C,
     path: &VirtualPath,
     flags: u32,
     mode: Option<u32>,
@@ -107,7 +107,7 @@ fn open<T: FileSystem + ?Sized, C: OpenCache>(
     let read = flags.has_read();
     let write = flags.has_write();
 
-    let mut options = GenericOpenOptions::default();
+    let mut options = FileOpenOptions::default();
     options
         .read(read)
         .write(write)
@@ -126,10 +126,10 @@ fn open<T: FileSystem + ?Sized, C: OpenCache>(
     } else {
         backend.open_file_with(path, options)?
     };
-    Ok(cache.insert(file))
+    Ok(open_files.insert(file))
 }
 
-impl<C: OpenCache> Filesystem for FileSystemHandler<C> {
+impl<C: OpenFileTable> Filesystem for FileSystemHandler<C> {
     fn init(
         &self,
         req: RequestInfo,
@@ -209,7 +209,7 @@ impl<C: OpenCache> Filesystem for FileSystemHandler<C> {
         debug!("create on path {:?} with flags {flags}", path);
         sanitize!(path, spath);
         //let path = EntryRef::Resolved(path);
-        let fh = open(self.as_ref(), self.as_cache(), spath, flags, Some(mode))?;
+        let fh = open(self.as_ref(), self.open_files(), spath, flags, Some(mode))?;
         debug!("got fh {fh}");
         let attr = self
             .getattr(req, &EntryRef::Resolved(path.clone()), None)?
@@ -281,7 +281,7 @@ impl<C: OpenCache> Filesystem for FileSystemHandler<C> {
         }
         //if let Some(fh) = fh {
         //log::error!("flushing file {fh} before utimens");
-        //self.as_cache().access(fh, |file| file.flush()).libc_err()?;
+        //self.open_files().access(fh, |file| file.flush()).libc_err()?;
         //}
         self.as_ref().set_time(path, atime, mtime)
     }
@@ -292,7 +292,7 @@ impl<C: OpenCache> Filesystem for FileSystemHandler<C> {
             log::error!("open on path {:?} with flags {flags}", path);
         }
         sanitize!(path, spath);
-        let fh = open(self.as_ref(), self.as_cache(), spath, flags, None)?;
+        let fh = open(self.as_ref(), self.open_files(), spath, flags, None)?;
         Ok((fh, 0))
     }
     fn read(
@@ -304,7 +304,7 @@ impl<C: OpenCache> Filesystem for FileSystemHandler<C> {
         size: u32,
         callback: impl FnOnce(fuser_ng::ResultSlice<'_>) -> fuser_ng::CallbackResult,
     ) -> fuser_ng::CallbackResult {
-        read(self.as_cache(), path, fh, offset, size, callback)
+        read(self.open_files(), path, fh, offset, size, callback)
     }
     fn write(
         &self,
@@ -316,7 +316,7 @@ impl<C: OpenCache> Filesystem for FileSystemHandler<C> {
         _flags: u32,
     ) -> fuser_ng::ResultWrite {
         //log::error!("writing to {:?} at {offset} len {}", _path, data.len());
-        self.as_cache().access(fh, |file| {
+        self.open_files().access(fh, |file| {
             file.write_all_at(offset, &data).map(|_| data.len() as u32)
         })
     }
@@ -344,10 +344,10 @@ impl<C: OpenCache> Filesystem for FileSystemHandler<C> {
             path
         );
         if flush {
-            let _ = self.as_cache().access(fh, |f| f.flush());
+            let _ = self.open_files().access(fh, |f| f.flush());
         }
 
-        self.as_cache().release(fh)?;
+        self.open_files().release(fh)?;
 
         Ok(())
     }
@@ -360,7 +360,7 @@ impl<C: OpenCache> Filesystem for FileSystemHandler<C> {
     ) -> fuser_ng::ResultEmpty {
         log::debug!("sync on path {:?} with fh {fh} datasync {datasync}", path);
 
-        self.as_cache().access(fh, |file| file.sync(datasync))
+        self.open_files().access(fh, |file| file.sync(datasync))
     }
     fn flush(
         &self,
@@ -370,7 +370,7 @@ impl<C: OpenCache> Filesystem for FileSystemHandler<C> {
         _lock_owner: u64,
     ) -> fuser_ng::ResultEmpty {
         log::debug!("flush on path {:?} with fh {fh}", path);
-        let _ = self.as_cache().access(fh, |file| file.flush());
+        let _ = self.open_files().access(fh, |file| file.flush());
         Ok(())
     }
     fn truncate(
@@ -382,7 +382,7 @@ impl<C: OpenCache> Filesystem for FileSystemHandler<C> {
     ) -> fuser_ng::ResultEmpty {
         log::debug!("truncate on path {:?} with fh {:?} size {size}", path, fh);
         if let Some(fh) = fh {
-            self.as_cache().access(fh, |file| file.set_len(size))
+            self.open_files().access(fh, |file| file.set_len(size))
         } else {
             sanitize!(path);
             self.as_ref().truncate(path, size)
@@ -591,8 +591,8 @@ fn access<T: ReadOnlyFileSystem + ?Sized>(
     .inspect(|_| debug!("access ok for path {:?}", path))
 }
 
-fn read<C: OpenCache>(
-    cache: &C,
+fn read<C: OpenFileTable>(
+    open_files: &C,
     path: &ResolvedPath,
     fh: u64,
     offset: u64,
@@ -606,7 +606,7 @@ fn read<C: OpenCache>(
 
     let mut buffer = vec![0; size as usize];
 
-    if let Ok(bytes_read) = cache.access(fh, |file| file.read_at(offset, &mut buffer)) {
+    if let Ok(bytes_read) = open_files.access(fh, |file| file.read_at(offset, &mut buffer)) {
         debug!("read ok with len {bytes_read}");
         callback(Ok(&buffer[0..bytes_read]))
     } else {

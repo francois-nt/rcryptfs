@@ -1,7 +1,7 @@
 use super::CryptoMator;
 use crate::core::{
-    Backend, BackendProvider, EncryptedFileTranslator, FileCachePolicy, FileSystem, FsBackend,
-    MasterKey, MinimalFs, Result,
+    Backend, BackendProvider, EncryptedFileSystem, FileCachePolicy, FileSystem, FsBackend,
+    MasterKey, Result, StorageFileSystem,
 };
 use crate::{Utf8Path, register_provider};
 
@@ -12,7 +12,7 @@ register_provider!(CryptoMatorBuilder);
 
 impl CryptoMatorBuilder {
     /// Checks whether a storage backend contains a Cryptomator repository.
-    pub fn probe_backend<F: MinimalFs>(backend: &FsBackend<F>) -> bool {
+    pub fn probe_backend<F: StorageFileSystem>(backend: &FsBackend<F>) -> bool {
         backend
             .get_fs()
             .exists("vault.cryptomator".into())
@@ -20,12 +20,12 @@ impl CryptoMatorBuilder {
     }
 
     /// Builds a Cryptomator filesystem on an arbitrary storage backend.
-    pub fn try_build_with_backend<F: MinimalFs>(
+    pub fn try_build_with_backend<F: StorageFileSystem>(
         backend: FsBackend<F>,
         password: &str,
         cache_policy: Box<dyn FileCachePolicy>,
     ) -> Result<Box<dyn FileSystem>> {
-        let cryptfs: EncryptedFileTranslator<CryptoMator<FsBackend<F>>> = (
+        let cryptfs: EncryptedFileSystem<CryptoMator<FsBackend<F>>> = (
             CryptoMator::try_new_with_backend(backend, password)?,
             cache_policy,
         )
@@ -34,7 +34,7 @@ impl CryptoMatorBuilder {
     }
 
     /// Initializes a Cryptomator repository on an arbitrary storage backend.
-    pub fn init_with_backend<F: MinimalFs>(
+    pub fn init_with_backend<F: StorageFileSystem>(
         backend: &FsBackend<F>,
         password: &str,
     ) -> Result<Box<dyn MasterKey>> {

@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
-use rcryptfs::core::{FileSystemHandler, FileType, FsDirEntry, FsTime, OpenCache, VirtualPath};
+use rcryptfs::core::{FileSystemHandler, FileType, FsDirEntry, FsTime, OpenFileTable, VirtualPath};
 use rustyline::error::ReadlineError;
 
 use crate::platform;
 
 // Runs the interactive CLI shell with in-memory history for this session.
-pub fn run_cli_shell<C: OpenCache>(handler: &FileSystemHandler<C>) -> Result<()> {
+pub fn run_cli_shell<C: OpenFileTable>(handler: &FileSystemHandler<C>) -> Result<()> {
     let mut editor = platform::create_line_editor()?;
     let mut cwd = String::new(); // root = ""
 
@@ -35,7 +35,7 @@ pub fn run_cli_shell<C: OpenCache>(handler: &FileSystemHandler<C>) -> Result<()>
 }
 
 // Executes one CLI command and returns false when shell should exit.
-fn handle_cli_command<C: OpenCache>(
+fn handle_cli_command<C: OpenFileTable>(
     handler: &FileSystemHandler<C>,
     cwd: &mut String,
     input: &str,

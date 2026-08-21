@@ -2,14 +2,18 @@ use std::sync::Arc;
 
 use super::CryptoMator;
 use crate::core::{
-    Backend, CacheAccess, CipherPathLayout, EncryptionLayout, EncryptionTranslator, FileType,
-    FsBackend, FsDirEntry, Metadata, MinimalFs, OrIoError, Permissions, Result, VirtualPath,
-    VirtualPathBuf, default_remove_cached_plain_path, temp_file_path,
+    Backend, CipherPathLayout, EncryptionLayout, EncryptionTranslator, FileType, FsBackend,
+    FsDirEntry, Metadata, OrIoError, PathCacheAccess, Permissions, Result, StorageFileSystem,
+    VirtualPath, VirtualPathBuf, default_remove_cached_plain_path, temp_file_path,
 };
 use anyhow::{Context, anyhow};
 
 /// Reads the directory id vector from a cipher directory.
-fn read_dirid(fs: &impl MinimalFs, cipher_dir: &VirtualPath, is_root: bool) -> Result<String> {
+fn read_dirid(
+    fs: &impl StorageFileSystem,
+    cipher_dir: &VirtualPath,
+    is_root: bool,
+) -> Result<String> {
     if is_root {
         return Ok(String::default());
     }
@@ -22,11 +26,11 @@ fn read_dirid(fs: &impl MinimalFs, cipher_dir: &VirtualPath, is_root: bool) -> R
 }
 
 /// Resolves a plain folder path to its storage directory and dir id.
-fn folder_path_to_cipher_and_dirid<F: MinimalFs>(
+fn folder_path_to_cipher_and_dirid<F: StorageFileSystem>(
     this: &CryptoMator<FsBackend<F>>,
     plain_path: &VirtualPath,
 ) -> Result<(VirtualPathBuf, Vec<u8>)> {
-    this.backend.access(|cache| {
+    this.backend.with_path_cache(|cache| {
         if let Some((dir_id, cipher_path)) = cache.get(plain_path.as_str()) {
             Ok((cipher_path.to_owned(), dir_id.clone()))
         } else {
@@ -73,7 +77,7 @@ fn folder_path_to_cipher_and_dirid<F: MinimalFs>(
     })
 }
 
-impl<F: MinimalFs> CipherPathLayout for CryptoMator<FsBackend<F>> {
+impl<F: StorageFileSystem> CipherPathLayout for CryptoMator<FsBackend<F>> {
     type LowerFs = F;
     fn lower_fs(&self) -> &Self::LowerFs {
         self.backend.get_fs()
@@ -104,7 +108,7 @@ impl<F: MinimalFs> CipherPathLayout for CryptoMator<FsBackend<F>> {
     }
 }
 
-impl<F: MinimalFs> EncryptionLayout for CryptoMator<FsBackend<F>> {
+impl<F: StorageFileSystem> EncryptionLayout for CryptoMator<FsBackend<F>> {
     fn list_dir_plain_names(
         self: Arc<Self>,
         plain_path: &VirtualPath,
@@ -172,7 +176,7 @@ impl<F: MinimalFs> EncryptionLayout for CryptoMator<FsBackend<F>> {
 
         log::debug!("parent {parent} - name {name}");
 
-        let cached = self.backend.access(|cache| {
+        let cached = self.backend.with_path_cache(|cache| {
             if let Some((parent_dir_id, cipher_parent_path)) = cache.get(parent.as_str()) {
                 log::debug!("found {parent} in cache! {cipher_parent_path}");
                 Some((

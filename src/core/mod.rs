@@ -1,8 +1,8 @@
 mod backend_provider;
 mod buffered_file;
-mod cache;
 mod file;
 mod filesystem;
+mod open_file_table;
 mod traits;
 mod types;
 mod virtual_path;
@@ -11,9 +11,9 @@ pub use backend_provider::{
     BackendProvider, MasterKey, PROVIDERS, build_filesystem, get_providers_name, init_filesystem,
 };
 pub use buffered_file::BufferedFile;
-pub use cache::{CacheLock, UnsafeCache};
 pub use file::CryptFsFile;
-pub use filesystem::{EncryptedFileTranslator, FileCache, FileCachePolicy, NoCache};
+pub use filesystem::{EncryptedFileSystem, FileCache, FileCachePolicy, NoCache};
+pub use open_file_table::{LockedOpenFileTable, UnsafeOpenFileTable};
 pub(crate) use traits::temp_file_path;
 pub use traits::*;
 pub use types::*;
@@ -21,5 +21,5 @@ pub use virtual_path::{JoinVirtualPath, VirtualPath, VirtualPathBuf};
 
 /// Returns whether a directory contains no entries.
 pub fn is_native_dir_empty(path: &Utf8Path) -> std::io::Result<bool> {
-    DefaultFs::new(path.to_owned()).is_dir_empty(VirtualPath::root())
+    NativeFileSystem::new(path.to_owned()).is_dir_empty(VirtualPath::root())
 }

@@ -1,9 +1,9 @@
 use crate::core::XattrLayout;
 
 use super::{
-    BufferedFile, CryptFsFile, EncryptionLayout, EncryptionTranslator, FileHandle, FileSystem,
-    FsDirEntry, GenericOpenOptions, Metadata, MinimalFs, OrIoError, Permissions,
-    ReadOnlyFileSystem, VirtualPath,
+    BufferedFile, CryptFsFile, EncryptionLayout, EncryptionTranslator, FileHandle, FileOpenOptions,
+    FileSystem, FsDirEntry, Metadata, OrIoError, Permissions, ReadOnlyFileSystem,
+    StorageFileSystem, VirtualPath,
 };
 
 use std::sync::Arc;
@@ -59,14 +59,14 @@ impl FileCachePolicy for NoCache {
     }
 }
 
-/// Adapts a backend layout and translator into the FileSystem traits.
+/// Exposes an encrypted layout through the public filesystem traits.
 #[derive(Clone)]
-pub struct EncryptedFileTranslator<T> {
+pub struct EncryptedFileSystem<T> {
     fs: Arc<T>,
     cache_policy: Arc<dyn FileCachePolicy>,
 }
 
-impl<T> From<(T, Box<dyn FileCachePolicy>)> for EncryptedFileTranslator<T> {
+impl<T> From<(T, Box<dyn FileCachePolicy>)> for EncryptedFileSystem<T> {
     fn from(value: (T, Box<dyn FileCachePolicy>)) -> Self {
         Self {
             fs: Arc::from(value.0),
@@ -79,7 +79,7 @@ impl<T> From<(T, Box<dyn FileCachePolicy>)> for EncryptedFileTranslator<T> {
 fn try_open_crypt_file<T>(
     path: &VirtualPath,
     backend: Arc<T>,
-    mut options: GenericOpenOptions,
+    mut options: FileOpenOptions,
     cache_policy: &dyn FileCachePolicy,
 ) -> std::io::Result<Box<dyn FileHandle>>
 where
@@ -103,13 +103,13 @@ where
     }
 }
 
-impl<T> ReadOnlyFileSystem for EncryptedFileTranslator<T>
+impl<T> ReadOnlyFileSystem for EncryptedFileSystem<T>
 where
     T: EncryptionTranslator + EncryptionLayout + XattrLayout + Send + Sync + 'static,
 {
     fn open_readonly(&self, path: &VirtualPath) -> std::io::Result<Box<dyn FileHandle>> {
         let cipher_path = self.fs.plain_path_to_cipher(path).or_invalid()?;
-        let mut options = GenericOpenOptions::default();
+        let mut options = FileOpenOptions::default();
         options.read(true);
         try_open_crypt_file(
             &cipher_path,
@@ -143,7 +143,7 @@ where
     }
 }
 
-impl<T> FileSystem for EncryptedFileTranslator<T>
+impl<T> FileSystem for EncryptedFileSystem<T>
 where
     T: EncryptionTranslator + EncryptionLayout + XattrLayout + Send + Sync + 'static,
 {
@@ -151,7 +151,7 @@ where
     fn open_file_with(
         &self,
         path: &VirtualPath,
-        options: GenericOpenOptions,
+        options: FileOpenOptions,
     ) -> std::io::Result<Box<dyn FileHandle>> {
         let cipher_path = self.fs.plain_path_to_cipher(path).or_invalid()?;
         try_open_crypt_file(
@@ -204,7 +204,7 @@ where
         self.fs.set_time(path, atime, mtime)
     }
     fn truncate(&self, path: &VirtualPath, new_size: u64) -> std::io::Result<()> {
-        let mut options = GenericOpenOptions::default();
+        let mut options = FileOpenOptions::default();
         options.read(true).write(true).append(false);
         let file = self.open_file_with(path, options)?;
         file.set_len(new_size)?;
