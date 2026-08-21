@@ -1,5 +1,6 @@
 use super::{
-    EncryptionTranslator, ModifiedTime, OrIoError, ReadAt, SetLen, SetSync, StorageFile, WriteAt,
+    EncryptionTranslator, FileHandle, ModifiedTime, OrIoError, ReadAt, SetLen, SetSync, Size,
+    WriteAt,
 };
 use log::{debug, error};
 use parking_lot::RwLock;
@@ -16,13 +17,13 @@ struct PlainEnd {
 }
 
 /// Wraps a cipher file and exposes plain-text block I/O.
-pub struct CryptFsFile<T: EncryptionTranslator, F: StorageFile> {
+pub struct CryptFsFile<T: EncryptionTranslator, F: FileHandle> {
     backend: Arc<T>,
     cipher_file: F,
     header: RwLock<Vec<u8>>,
 }
 
-impl<T: EncryptionTranslator, F: StorageFile> CryptFsFile<T, F> {
+impl<T: EncryptionTranslator, F: FileHandle> CryptFsFile<T, F> {
     /// Wraps an opened cipher file and eagerly loads its header when present.
     pub fn try_from_file(cipher_file: F, backend: Arc<T>, readonly: bool) -> std::io::Result<Self> {
         let mut cipher_file_size = cipher_file.size()?;
@@ -235,7 +236,7 @@ impl<T: EncryptionTranslator, F: StorageFile> CryptFsFile<T, F> {
     }
 }
 
-impl<T: EncryptionTranslator, F: StorageFile> ReadAt for CryptFsFile<T, F> {
+impl<T: EncryptionTranslator, F: FileHandle> ReadAt for CryptFsFile<T, F> {
     /// Reads plain bytes across encrypted block boundaries.
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
         if buf.is_empty() {
@@ -314,7 +315,7 @@ impl<T: EncryptionTranslator, F: StorageFile> ReadAt for CryptFsFile<T, F> {
     }
 }
 
-impl<T: EncryptionTranslator, F: StorageFile> WriteAt for CryptFsFile<T, F> {
+impl<T: EncryptionTranslator, F: FileHandle> WriteAt for CryptFsFile<T, F> {
     /// Writes plain bytes across encrypted block boundaries.
     fn write_at(&self, offset: u64, data: &[u8]) -> std::io::Result<usize> {
         // debug!(
@@ -393,7 +394,16 @@ impl<T: EncryptionTranslator, F: StorageFile> WriteAt for CryptFsFile<T, F> {
     }
 }
 
-impl<T: EncryptionTranslator, F: StorageFile> ModifiedTime for CryptFsFile<T, F> {
+impl<T: EncryptionTranslator, F: FileHandle> Size for CryptFsFile<T, F> {
+    /// Returns the logical plain-text file size.
+    fn size(&self) -> std::io::Result<u64> {
+        self.backend
+            .cipher_size_to_plain(self.get_physical_size()?)
+            .or_invalid()
+    }
+}
+
+impl<T: EncryptionTranslator, F: FileHandle> ModifiedTime for CryptFsFile<T, F> {
     /// Returns the modification time of the underlying cipher file.
     fn get_modified(&self) -> std::io::Result<std::time::SystemTime> {
         self.cipher_file.get_modified()
@@ -404,14 +414,14 @@ impl<T: EncryptionTranslator, F: StorageFile> ModifiedTime for CryptFsFile<T, F>
     }
 }
 
-impl<T: EncryptionTranslator, F: StorageFile> SetSync for CryptFsFile<T, F> {
+impl<T: EncryptionTranslator, F: FileHandle> SetSync for CryptFsFile<T, F> {
     /// Flushes the underlying cipher file with the requested durability level.
     fn sync(&self, datasync: bool) -> std::io::Result<()> {
         self.cipher_file.sync(datasync)
     }
 }
 
-impl<T: EncryptionTranslator, F: StorageFile> SetLen for CryptFsFile<T, F> {
+impl<T: EncryptionTranslator, F: FileHandle> SetLen for CryptFsFile<T, F> {
     /// Resizes the plain file while keeping the final encrypted block consistent.
     fn set_len(&self, target_plain_len: u64) -> std::io::Result<()> {
         if target_plain_len > 0 {
@@ -498,6 +508,8 @@ mod tests {
         let plain = sample_data(4096);
 
         file.write_all_at(0, &plain).unwrap();
+
+        assert_eq!(file.size().unwrap(), plain.len() as u64);
 
         let mut read_back = vec![0u8; plain.len()];
         let bytes_read = file.read_at(0, &mut read_back).unwrap();
@@ -673,6 +685,8 @@ mod tests {
         let plain = sample_data(4096);
 
         file.write_all_at(0, &plain).unwrap();
+
+        assert_eq!(file.size().unwrap(), plain.len() as u64);
 
         let mut read_back = vec![0u8; plain.len()];
         let bytes_read = file.read_at(0, &mut read_back).unwrap();

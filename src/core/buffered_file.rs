@@ -1,4 +1,4 @@
-use super::{FileHandle, ModifiedTime, OrIoError, ReadAt, SetLen, SetSync, WriteAt};
+use super::{FileHandle, ModifiedTime, OrIoError, ReadAt, SetLen, SetSync, Size, WriteAt};
 use parking_lot::Mutex;
 
 struct State {
@@ -33,7 +33,7 @@ impl<W> BufferedFile<W> {
     }
 }
 
-impl<W: WriteAt + ModifiedTime> BufferedFile<W> {
+impl<W: FileHandle> BufferedFile<W> {
     /// Flushes staged data before operations that must observe durable file contents.
     fn flush_staging(&self) -> std::io::Result<()> {
         let mut state = self.state.lock();
@@ -61,7 +61,7 @@ impl<W: WriteAt + ModifiedTime> BufferedFile<W> {
     }
 }
 
-impl<W: FileHandle + ModifiedTime> ReadAt for BufferedFile<W> {
+impl<W: FileHandle> ReadAt for BufferedFile<W> {
     fn read_at(&self, pos: u64, buf: &mut [u8]) -> std::io::Result<usize> {
         if buf.is_empty() {
             return Ok(0);
@@ -100,21 +100,51 @@ impl<W: FileHandle + ModifiedTime> ReadAt for BufferedFile<W> {
     }
 }
 
-impl<W: FileHandle + ModifiedTime> SetLen for BufferedFile<W> {
+impl<W: FileHandle> Size for BufferedFile<W> {
+    /// Returns the logical size, including data that has not been flushed yet.
+    fn size(&self) -> std::io::Result<u64> {
+        let state = self.state.lock();
+        let inner_size = self.inner.size()?;
+        if state.buffer_len == 0 {
+            return Ok(inner_size);
+        }
+        let staged_end = state
+            .buffer_offset
+            .checked_add(state.buffer_len as u64)
+            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?;
+        Ok(inner_size.max(staged_end))
+    }
+}
+
+impl<W: FileHandle> ModifiedTime for BufferedFile<W> {
+    /// Returns the backing file modification time.
+    fn get_modified(&self) -> std::io::Result<std::time::SystemTime> {
+        let _state = self.state.lock();
+        self.inner.get_modified()
+    }
+
+    /// Updates the backing file modification time without racing a flush.
+    fn set_modified_time(&self, modified_time: std::time::SystemTime) -> std::io::Result<()> {
+        let _state = self.state.lock();
+        self.inner.set_modified_time(modified_time)
+    }
+}
+
+impl<W: FileHandle> SetLen for BufferedFile<W> {
     fn set_len(&self, new_size: u64) -> std::io::Result<()> {
         self.flush_staging()?;
         self.inner.set_len(new_size)
     }
 }
 
-impl<W: FileHandle + ModifiedTime> SetSync for BufferedFile<W> {
+impl<W: FileHandle> SetSync for BufferedFile<W> {
     fn sync(&self, datasync: bool) -> std::io::Result<()> {
         self.flush()?;
         self.inner.sync(datasync)
     }
 }
 
-impl<W: WriteAt + ModifiedTime> WriteAt for BufferedFile<W> {
+impl<W: FileHandle> WriteAt for BufferedFile<W> {
     fn write_at(&self, pos: u64, mut data: &[u8]) -> std::io::Result<usize> {
         let mut state = self.state.lock();
         let mut has_written = false;
@@ -203,4 +233,22 @@ impl<W: WriteAt + ModifiedTime> WriteAt for BufferedFile<W> {
         self.flush_staging()?;
         self.inner.flush()
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn size_includes_staged_data() {
+        let file = tempfile::tempfile().unwrap();
+        let buffered = BufferedFile::new(file, 16);
+
+        buffered.write_all_at(100, b"abc").unwrap();
+
+        assert_eq!(buffered.size().unwrap(), 103);
+        assert_file_handle(&buffered);
+    }
+
+    fn assert_file_handle(_file: &impl FileHandle) {}
 }

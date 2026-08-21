@@ -88,12 +88,18 @@ pub trait SetLen {
 
 /// Marker trait for read operations.
 pub trait ReadHandle: ReadAt + Send + Sync {}
-/// Marker trait for read-write operations.
-pub trait FileHandle: ReadHandle + WriteAt + SetLen + SetSync {}
+/// Provides the complete set of operations supported by an open file.
+pub trait FileHandle:
+    ReadHandle + WriteAt + SetLen + SetSync + Size + ModifiedTime + 'static
+{
+}
 
 impl<T> ReadHandle for T where T: ReadAt + Send + Sync {}
 
-impl<T> FileHandle for T where T: ReadHandle + WriteAt + SetLen + SetSync {}
+impl<T> FileHandle for T where
+    T: ReadHandle + WriteAt + SetLen + SetSync + Size + ModifiedTime + 'static
+{
+}
 
 /// Maps stable identifiers to open file handles.
 pub trait OpenFileTable: Default {

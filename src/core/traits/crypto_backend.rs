@@ -1,7 +1,7 @@
 use super::super::CipherPathCacheEntry;
 use super::{
-    FileHandle, FileOpenOptions, FileType, FsDirEntry, Metadata, ModifiedTime, Permissions, ReadAt,
-    Result, Size, VirtualPath, VirtualPathBuf, WriteAt,
+    FileHandle, FileOpenOptions, FileType, FsDirEntry, Metadata, Permissions, ReadAt, Result, Size,
+    VirtualPath, VirtualPathBuf, WriteAt,
 };
 use super::{
     default_create_symlink, default_metadata, default_mkdir, default_mknode, default_read_symlink,
@@ -183,13 +183,9 @@ pub trait EncryptionLayout: CipherPathLayout {
     }
 }
 
-pub trait StorageFile: FileHandle + Size + ModifiedTime + 'static {}
-
-impl<T> StorageFile for T where T: FileHandle + Size + ModifiedTime + 'static {}
-
 /// Provides the filesystem operations required by encrypted storage layouts.
 pub trait StorageFileSystem: Send + Sync + 'static {
-    type OpenHandle: StorageFile;
+    type OpenHandle: FileHandle;
     type DirEntries: Iterator<Item = std::io::Result<FsDirEntry>>;
     fn open_file_with(
         &self,
