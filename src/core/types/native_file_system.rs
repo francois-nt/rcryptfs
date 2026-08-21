@@ -251,10 +251,6 @@ impl StorageFileSystem for NativeFileSystem {
         Ok(std::fs::symlink_metadata(self.resolve(path)?)?.into())
     }
 
-    fn exists(&self, path: &VirtualPath) -> std::io::Result<bool> {
-        std::fs::exists(self.resolve(path)?)
-    }
-
     fn mkdir(
         &self,
         path: &VirtualPath,
@@ -426,6 +422,22 @@ mod tests {
         let metadata = fs.metadata(path).unwrap();
         assert_eq!(metadata.accessed, updated_atime);
         assert_eq!(metadata.modified, updated_mtime);
+    }
+
+    #[test]
+    fn native_fs_default_exists_and_truncate() {
+        let temp_dir = tempdir().unwrap();
+        let root = Utf8Path::from_path(temp_dir.path()).unwrap().to_owned();
+        let fs = NativeFileSystem::new(root);
+        let path = VirtualPath::new("file");
+
+        assert!(!fs.exists(path).unwrap());
+        fs.put(path, b"abcdef").unwrap();
+        assert!(fs.exists(path).unwrap());
+
+        fs.truncate(path, 3).unwrap();
+
+        assert_eq!(fs.read_all(path).unwrap(), b"abc");
     }
 
     #[cfg(unix)]

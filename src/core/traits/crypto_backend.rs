@@ -1,7 +1,7 @@
 use super::super::CipherPathCacheEntry;
 use super::{
-    FileHandle, FileOpenOptions, FileType, FsDirEntry, Metadata, Permissions, ReadAt, Result, Size,
-    VirtualPath, VirtualPathBuf, WriteAt,
+    FileHandle, FileOpenOptions, FileType, FsDirEntry, Metadata, Permissions, ReadAt, Result,
+    SetLen, Size, VirtualPath, VirtualPathBuf, WriteAt,
 };
 use super::{
     default_create_symlink, default_metadata, default_mkdir, default_mknode, default_read_symlink,
@@ -202,7 +202,21 @@ pub trait StorageFileSystem: Send + Sync + 'static {
 
     fn chown(&self, path: &VirtualPath, uid: Option<u32>, gid: Option<u32>) -> std::io::Result<()>;
     fn metadata(&self, path: &VirtualPath) -> std::io::Result<Metadata>;
-    fn exists(&self, path: &VirtualPath) -> std::io::Result<bool>;
+    fn exists(&self, path: &VirtualPath) -> std::io::Result<bool> {
+        match self.metadata(path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+    /// Truncates a file to a new size.
+    fn truncate(&self, path: &VirtualPath, new_size: u64) -> std::io::Result<()> {
+        let mut options = FileOpenOptions::default();
+        options.read(true).write(true);
+        let file = self.open_file_with(path, options)?;
+        file.set_len(new_size)?;
+        file.flush()
+    }
     /// Creates a new directory with optional permissions.
     fn mkdir(
         &self,

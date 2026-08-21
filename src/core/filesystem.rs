@@ -203,15 +203,6 @@ where
     ) -> std::io::Result<()> {
         self.fs.set_time(path, atime, mtime)
     }
-    fn truncate(&self, path: &VirtualPath, new_size: u64) -> std::io::Result<()> {
-        let mut options = FileOpenOptions::default();
-        options.read(true).write(true).append(false);
-        let file = self.open_file_with(path, options)?;
-        file.set_len(new_size)?;
-        file.flush()?;
-
-        Ok(())
-    }
     fn chown(&self, path: &VirtualPath, uid: Option<u32>, gid: Option<u32>) -> std::io::Result<()> {
         let cipher_path = self.fs.plain_path_to_cipher(path).or_invalid()?;
         self.fs.lower_fs().chown(&cipher_path, uid, gid)

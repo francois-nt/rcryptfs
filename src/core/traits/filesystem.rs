@@ -94,6 +94,50 @@ pub trait FileHandle:
 {
 }
 
+impl<T: ReadAt + ?Sized> ReadAt for Box<T> {
+    fn read_at(&self, pos: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+        (**self).read_at(pos, buf)
+    }
+}
+
+impl<T: WriteAt + ?Sized> WriteAt for Box<T> {
+    fn write_at(&self, pos: u64, buf: &[u8]) -> std::io::Result<usize> {
+        (**self).write_at(pos, buf)
+    }
+
+    fn flush(&self) -> std::io::Result<()> {
+        (**self).flush()
+    }
+}
+
+impl<T: SetLen + ?Sized> SetLen for Box<T> {
+    fn set_len(&self, new_size: u64) -> std::io::Result<()> {
+        (**self).set_len(new_size)
+    }
+}
+
+impl<T: SetSync + ?Sized> SetSync for Box<T> {
+    fn sync(&self, datasync: bool) -> std::io::Result<()> {
+        (**self).sync(datasync)
+    }
+}
+
+impl<T: Size + ?Sized> Size for Box<T> {
+    fn size(&self) -> std::io::Result<u64> {
+        (**self).size()
+    }
+}
+
+impl<T: ModifiedTime + ?Sized> ModifiedTime for Box<T> {
+    fn get_modified(&self) -> std::io::Result<SystemTime> {
+        (**self).get_modified()
+    }
+
+    fn set_modified_time(&self, modified_time: SystemTime) -> std::io::Result<()> {
+        (**self).set_modified_time(modified_time)
+    }
+}
+
 impl<T> ReadHandle for T where T: ReadAt + Send + Sync {}
 
 impl<T> FileHandle for T where
@@ -125,12 +169,16 @@ pub trait ReadOnlyFileSystem: Send + Sync + 'static {
     fn read_dir(
         &self,
         path: &VirtualPath,
-    ) -> std::io::Result<Box<dyn Iterator<Item = std::io::Result<FsDirEntry>> + '_>>;
+    ) -> std::io::Result<Box<dyn Iterator<Item = std::io::Result<FsDirEntry>> + 'static>>;
     /// Retrieves metadata for a path.
     fn metadata(&self, path: &VirtualPath) -> std::io::Result<Metadata>;
     /// Checks if a path exists.
     fn exists(&self, path: &VirtualPath) -> std::io::Result<bool> {
-        self.metadata(path).map(|_| true)
+        match self.metadata(path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
     }
     /// Reads the target of a symbolic link.
     fn read_symlink(&self, path: &VirtualPath) -> std::io::Result<String>;
@@ -152,7 +200,13 @@ pub trait FileSystem: ReadOnlyFileSystem {
         options: FileOpenOptions,
     ) -> std::io::Result<Box<dyn FileHandle>>;
     /// Truncates a file to a new size.
-    fn truncate(&self, path: &VirtualPath, new_size: u64) -> std::io::Result<()>;
+    fn truncate(&self, path: &VirtualPath, new_size: u64) -> std::io::Result<()> {
+        let mut options = FileOpenOptions::default();
+        options.read(true).write(true);
+        let file = self.open_file_with(path, options)?;
+        file.set_len(new_size)?;
+        file.flush()
+    }
     /// Renames a file or directory.
     fn rename(&self, old_path: &VirtualPath, new_path: &VirtualPath) -> std::io::Result<()>;
     /// Removes a non-directory entry.
