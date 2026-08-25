@@ -359,14 +359,10 @@ fn map_dir_entry(
             if is_special_entry(&cipher_name) {
                 Ok(None)
             } else {
-                if let Some(metadata) = entry.metadata.as_mut() {
-                    metadata
-                        .adjust(this, &cipher_path.join(&cipher_name), false)
-                        .or_invalid()?;
-                    if let Some(file_type) = entry.file_type.as_mut() {
-                        *file_type = metadata.file_type;
-                    }
-                }
+                entry
+                    .metadata
+                    .adjust(this, &cipher_path.join(&cipher_name), false)
+                    .or_invalid()?;
                 let plain_name = this
                     .cipher_name_to_plain(dir_iv, &cipher_name)
                     .or_invalid()?;
@@ -441,7 +437,7 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].file_name, "link");
-        assert!(entries[0].file_type == Some(FileType::SymLink));
+        assert!(entries[0].metadata.file_type == FileType::SymLink);
     }
 
     #[test]

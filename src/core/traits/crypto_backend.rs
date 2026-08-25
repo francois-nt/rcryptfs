@@ -243,11 +243,7 @@ pub trait StorageFileSystem: Send + Sync + 'static {
         let entries = self.read_dir(path)?.collect::<std::io::Result<Vec<_>>>()?;
         for entry in entries {
             let child_path = path.join(entry.file_name);
-            let file_type = match entry.file_type {
-                Some(file_type) => file_type,
-                None => self.metadata(&child_path)?.file_type,
-            };
-            if file_type == FileType::Directory {
+            if entry.metadata.file_type == FileType::Directory {
                 self.remove_dir_all(&child_path)?;
             } else {
                 self.remove(&child_path)?;

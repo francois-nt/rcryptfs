@@ -131,17 +131,13 @@ fn display_path(path: &str) -> String {
 
 // Formats one directory entry for CLI output.
 fn format_entry(entry: &FsDirEntry) -> String {
-    let file_type = match entry.file_type {
-        Some(FileType::File) => "F",
-        Some(FileType::Directory) => "D",
-        Some(FileType::SymLink) => "L",
-        _ => "O",
+    let file_type = match entry.metadata.file_type {
+        FileType::File => "F",
+        FileType::Directory => "D",
+        FileType::SymLink => "L",
+        FileType::Other => "O",
     };
-    let rsize = if let Some(metadata) = &entry.metadata {
-        let fs_time: FsTime = metadata.modified.into();
-        format!("{} [{}]", metadata.len, fs_time)
-    } else {
-        String::default()
-    };
+    let fs_time: FsTime = entry.metadata.modified.into();
+    let rsize = format!("{} [{}]", entry.metadata.len, fs_time);
     format!("{} {} {}", file_type, entry.file_name, rsize)
 }

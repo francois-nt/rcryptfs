@@ -1,6 +1,9 @@
-use crate::core::{
-    FileOpenOptions, FileSystem, FileSystemHandler, FileType, Metadata, OpenFileTable, OrIoError,
-    ReadOnlyFileSystem, VirtualPath,
+use crate::{
+    VirtualPathBuf,
+    core::{
+        FileOpenOptions, FileSystem, FileSystemHandler, FileType, Metadata, OpenFileTable,
+        OrIoError, ReadOnlyFileSystem, VirtualPath,
+    },
 };
 use fuser_ng::{EntryName, EntryRef, FileAttr, Filesystem, RequestInfo, ResolvedPath};
 use log::debug;
@@ -453,9 +456,13 @@ impl<C: OpenFileTable> Filesystem for FileSystemHandler<C> {
         self.as_ref()
             .set_xattr(path, name.to_str().or_invalid()?, value)
     }
-
-    fn readdir(&self, _req: RequestInfo, path: &ResolvedPath, _fh: u64) -> fuser_ng::ResultReaddir {
-        readdir(self, path)
+    fn readdir(
+        &self,
+        _req: RequestInfo,
+        path: &ResolvedPath,
+        _fh: u64,
+    ) -> impl Iterator<Item = fuser_ng::ResultReaddirBatch> + Send + 'static {
+        std::iter::once(readdir(self, path))
     }
     fn getattr(
         &self,
@@ -473,20 +480,26 @@ impl<C: OpenFileTable> Filesystem for FileSystemHandler<C> {
 fn readdir<T: ReadOnlyFileSystem + ?Sized>(
     fs: impl AsRef<T>,
     path: &ResolvedPath,
-) -> fuser_ng::ResultReaddir {
+) -> fuser_ng::ResultReaddirBatch {
     debug!("readdir on path {:?}", path);
     sanitize!(path);
+    let attr = fs.as_ref().metadata(path)?;
 
-    let common_paths = [
-        fuser_ng::DirectoryEntry {
-            name: ".".into(),
-            kind: fuser_ng::FileType::Directory,
-        },
-        fuser_ng::DirectoryEntry {
+    let mut common_paths = Vec::with_capacity(2);
+    common_paths.push(fuser_ng::DirectoryEntry {
+        name: ".".into(),
+        ttl: Duration::from_secs(10),
+        attr: attr.try_into()?,
+    });
+    if !path.is_empty() {
+        let parent: VirtualPathBuf = format!("{}/..", path.as_str()).into();
+        let attr = fs.as_ref().metadata(&parent)?;
+        common_paths.push(fuser_ng::DirectoryEntry {
             name: "..".into(),
-            kind: fuser_ng::FileType::Directory,
-        },
-    ];
+            ttl: Duration::from_secs(10),
+            attr: attr.try_into()?,
+        });
+    }
 
     let result = common_paths
         .into_iter()
@@ -497,18 +510,17 @@ fn readdir<T: ReadOnlyFileSystem + ?Sized>(
                     Err(error) => Some(Err(error)),
                     Ok(entry) => {
                         let name: OsString = entry.file_name.into();
-                        let kind = match entry.file_type? {
-                            FileType::File => Some(fuser_ng::FileType::RegularFile),
-                            FileType::Directory => Some(fuser_ng::FileType::Directory),
-                            FileType::SymLink => Some(fuser_ng::FileType::Symlink),
-                            _ => None, // ignore anything that isnt a regular file or a directory
-                        };
-                        Some(Ok(fuser_ng::DirectoryEntry { name, kind: kind? }))
+                        Some(Ok(fuser_ng::DirectoryEntry {
+                            name,
+                            ttl: Duration::from_secs(10),
+                            attr: entry.metadata.try_into().ok()?,
+                        }))
                     }
                 })
                 .collect::<std::io::Result<Vec<_>>>()?,
         )
         .collect();
+
     debug!("readdir ok for path {:?}", path);
     Ok(result)
 }

@@ -122,7 +122,7 @@ impl Iterator for NativeDirEntries {
     type Item = std::io::Result<FsDirEntry>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.0.next().map(|entry| entry.map(|v| v.into()))
+        self.0.next().map(|entry| entry.and_then(TryInto::try_into))
     }
 }
 

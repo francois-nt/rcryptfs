@@ -58,8 +58,7 @@ impl Display for FsTime {
 /// Directory entry with name, type, and metadata.
 pub struct FsDirEntry {
     pub file_name: String,
-    pub file_type: Option<FileType>,
-    pub metadata: Option<Metadata>,
+    pub metadata: Metadata,
 }
 
 impl FsDirEntry {
@@ -67,33 +66,25 @@ impl FsDirEntry {
     pub fn with_name(self, new_name: String) -> Self {
         Self {
             file_name: new_name,
-            file_type: self.file_type,
             metadata: self.metadata,
         }
     }
 }
 
-impl From<std::fs::DirEntry> for FsDirEntry {
-    fn from(value: std::fs::DirEntry) -> Self {
-        Self {
+impl TryFrom<std::fs::DirEntry> for FsDirEntry {
+    type Error = std::io::Error;
+    fn try_from(value: std::fs::DirEntry) -> std::io::Result<Self> {
+        Ok(Self {
             file_name: value.file_name().to_string_lossy().into_owned(),
-            file_type: value.file_type().ok().map(|v| v.into()),
-            metadata: value.metadata().ok().map(|v| v.into()),
-        }
+            metadata: value.metadata()?.into(),
+        })
     }
 }
 
 impl Display for FsDirEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.file_name)?;
-        if let Some(file_type) = &self.file_type {
-            write!(f, "\t{}", file_type)?;
-        } else {
-            write!(f, "\t<no_filetype>")?;
-        }
-        if let Some(metadata) = &self.metadata {
-            write!(f, "\t{}", metadata)?;
-        }
+        write!(f, "\t{}", self.metadata)?;
         Ok(())
     }
 }
