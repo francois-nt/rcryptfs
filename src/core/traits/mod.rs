@@ -9,13 +9,12 @@ mod filesystem;
 mod helpers;
 mod storage_fs;
 
+pub use crypto_backend::*;
+pub(crate) use entry_storage::forward_storage_fs_operations;
 pub use entry_storage::{
     AsyncEntryStorage, EntryStorage, StorageDirEntry, StorageDirectory, StorageEntryKind,
     StorageFileSystemAccess, StorageMetadata,
 };
-pub(crate) use entry_storage::forward_storage_fs_operations;
-pub use storage_fs::StorageFileSystem;
-pub use crypto_backend::*;
 pub use filesystem::*;
 pub(crate) use helpers::temp_file_path;
 use helpers::{
@@ -23,3 +22,4 @@ use helpers::{
     default_mknode, default_read_symlink, default_remove, default_remove_dir, default_rename,
     default_set_permissions, default_set_time,
 };
+pub use storage_fs::StorageFileSystem;
