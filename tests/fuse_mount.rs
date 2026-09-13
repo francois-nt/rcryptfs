@@ -2,8 +2,11 @@
 
 use anyhow::Result;
 use filetime::{FileTime, set_file_times};
-use rcryptfs::core::{FsBackend, Utf8Path, is_native_dir_empty};
-use rcryptfs::{CryptoMator, GoCryptFs, SetBackgroundChild, wait_child_mounted};
+use rcryptfs::core::{Utf8Path, is_native_dir_empty};
+use rcryptfs::{
+    CryptoMator, CryptomatorBackend, GoCryptFs, GoCryptFsBackend, SetBackgroundChild,
+    wait_child_mounted,
+};
 use std::fmt::Debug;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -49,10 +52,12 @@ impl BackendKind {
     fn init(self, cipher_root: &Utf8Path, password: &str) {
         match self {
             Self::GoCryptFs => {
-                GoCryptFs::<FsBackend>::init_with_default_params(cipher_root, password).unwrap();
+                GoCryptFs::<GoCryptFsBackend>::init_with_default_params(cipher_root, password)
+                    .unwrap();
             }
             Self::CryptoMator => {
-                CryptoMator::<FsBackend>::init_with_default_params(cipher_root, password).unwrap();
+                CryptoMator::<CryptomatorBackend>::init_with_default_params(cipher_root, password)
+                    .unwrap();
             }
         }
     }

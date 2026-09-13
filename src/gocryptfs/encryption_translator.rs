@@ -199,13 +199,6 @@ impl<T: Backend> EncryptionTranslator for GoCryptFs<T> {
 
         Ok(header)
     }
-    /// Generates a random initialization vector for directories.
-    fn generate_diriv(&self) -> Vec<u8> {
-        let mut iv = vec![0u8; 16];
-        rand::rng().fill_bytes(&mut iv);
-        iv
-    }
-
     /// Converts plain file size to cipher file size.
     fn plain_size_to_cipher(&self, plain_size: u64) -> u64 {
         if plain_size == 0 {

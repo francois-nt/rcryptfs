@@ -1,17 +1,55 @@
-use std::sync::Arc;
-
 use super::GoCryptFs;
 use crate::core::{
-    Backend, CipherPathLayout, EncryptionLayout, EncryptionTranslator, FsBackend, FsDirEntry,
-    OrIoError, PathCacheAccess, Result, StorageFileSystem, VirtualPath, VirtualPathBuf,
-    default_remove_cached_plain_path, temp_file_path,
+    DirectoryContentLayout, DirectoryLayout, EncryptionLayout, EncryptionTranslator, EntryStorage,
+    FsBackend, PathCacheAccess, PathLayout, Result, RootDirectoryToken, StorageFileSystemAccess,
+    VirtualPath, VirtualPathBuf, default_remove_cached_plain_path,
 };
-use anyhow::{Context, anyhow};
 
-impl<F: StorageFileSystem> CipherPathLayout for GoCryptFs<FsBackend<F>> {
-    type StorageFs = F;
-    fn storage_fs(&self) -> &Self::StorageFs {
-        self.backend.storage_fs()
+/// Canonical GoCryptFS directory policy.
+pub(super) struct GoCryptFsDirectoryLayout;
+
+impl DirectoryContentLayout for GoCryptFsDirectoryLayout {
+    fn detached_directory_contents_path(
+        &self,
+        entry_path: &VirtualPath,
+        _token: &[u8],
+    ) -> Result<VirtualPathBuf> {
+        Ok(entry_path.to_owned())
+    }
+}
+
+impl DirectoryLayout for GoCryptFsDirectoryLayout {
+    fn generate_directory_token(&self) -> Vec<u8> {
+        let mut token = vec![0; 16];
+        rand::fill(&mut token[..]);
+        token
+    }
+
+    fn validate_directory_token(&self, token: &[u8], _is_root: bool) -> Result<()> {
+        anyhow::ensure!(
+            token.len() == 16,
+            "GoCryptFS directory token has length {}, expected 16",
+            token.len()
+        );
+        Ok(())
+    }
+
+    fn root_directory_token(&self) -> RootDirectoryToken {
+        RootDirectoryToken::Persisted
+    }
+}
+
+impl<S> PathLayout for GoCryptFs<FsBackend<S>>
+where
+    S: EntryStorage + StorageFileSystemAccess,
+{
+    type EntryStorage = S;
+
+    fn entry_storage(&self) -> &Self::EntryStorage {
+        self.backend.entry_storage()
+    }
+    fn directory_layout(&self) -> &dyn DirectoryLayout {
+        self.directory_layout.as_ref()
     }
     fn remove_cached_plain_path(&self, plain_path: &VirtualPath) {
         default_remove_cached_plain_path(&self.backend, plain_path);
@@ -43,13 +81,17 @@ impl<F: StorageFileSystem> CipherPathLayout for GoCryptFs<FsBackend<F>> {
                             let cipher_part = self.plain_name_to_cipher(dir_iv, plain_part)?;
                             absolute_path = cipher_parent.join(cipher_part);
                         } else {
-                            let dir_iv = read_diriv(self.storage_fs(), &absolute_path)?;
+                            let directory = self
+                                .entry_storage()
+                                .resolve_directory(&absolute_path, self.directory_layout())?;
 
+                            absolute_path = directory.contents_path;
                             cache.insert(
                                 partial_plain_path.as_str().into(),
-                                (dir_iv.to_vec(), absolute_path.clone()),
+                                (directory.token.clone(), absolute_path.clone()),
                             );
-                            let cipher_part = self.plain_name_to_cipher(&dir_iv, plain_part)?;
+                            let cipher_part =
+                                self.plain_name_to_cipher(&directory.token, plain_part)?;
                             absolute_path.push(cipher_part);
                         }
 
@@ -60,102 +102,19 @@ impl<F: StorageFileSystem> CipherPathLayout for GoCryptFs<FsBackend<F>> {
             }
         })
     }
-    /// Creates a temporary name for a given path.
-    fn create_temp_name(&self, path: &str, is_dir_iv: bool) -> VirtualPathBuf {
-        // Temporary names are deterministic on purpose. This assumes a single
-        // rcryptfs process owns a backend at a time; concurrent multi-process
-        // access to the same encrypted root is undefined behavior.
-        temp_file_path(path, is_dir_iv)
-    }
-    fn get_dir_iv_file(&self, cipher_folder_path: &VirtualPath) -> VirtualPathBuf {
-        cipher_folder_path.join("gocryptfs.diriv")
-    }
 }
 
-impl<F: StorageFileSystem> EncryptionLayout for GoCryptFs<FsBackend<F>> {
-    /// Lists directory entries with plain names.
-    fn list_dir_plain_names(
-        self: Arc<Self>,
-        plain_path: &VirtualPath,
-    ) -> std::io::Result<
-        impl Iterator<Item = std::io::Result<(FsDirEntry, VirtualPathBuf)>> + 'static,
-    > {
-        let plain_path: VirtualPathBuf = plain_path.into();
-        let cipher_path = self.plain_path_to_cipher(&plain_path).or_invalid()?;
-        let dir_iv = read_diriv(self.storage_fs(), &cipher_path).or_invalid()?;
-
-        Ok(self
-            .storage_fs()
-            .read_dir(&cipher_path)?
-            .filter_map(move |entry| {
-                match map_dir_entry(self.as_ref(), &cipher_path, &dir_iv, entry) {
-                    Ok(Some((plain_name, cipher_path))) => Some(Ok((plain_name, cipher_path))),
-                    Ok(None) => None,
-                    Err(e) => Some(Err(e)),
-                }
-            }))
-
-        // //std::fs::metadata(path)
-        // Ok(std::fs::read_dir(&cipher_path)?.filter_map(move |entry| {
-        //     match map_dir_entry(self, &cipher_path, &dir_iv, entry) {
-        //         Ok(Some((plain_name, cipher_path))) => Some(Ok((plain_name, cipher_path))),
-        //         Ok(None) => None,
-        //         Err(e) => Some(Err(e)),
-        //     }
-        // }))
-    }
-}
-
-/// Reads the directory initialization vector from a cipher directory.
-fn read_diriv(fs: &impl StorageFileSystem, cipher_dir: &VirtualPath) -> Result<[u8; 16]> {
-    let p = cipher_dir.join("gocryptfs.diriv");
-    let data = fs.read(&p, 0, 17).context(format!("read {:?}", p))?;
-    if data.len() != 16 {
-        return Err(anyhow!("diriv has len {}, expected 16", data.len()));
-    }
-    let mut iv = [0u8; 16];
-    iv.copy_from_slice(&data);
-    Ok(iv)
-}
-
-/// Checks if a directory entry is a special gocryptfs file.
-fn is_special_entry(name: &str) -> bool {
-    name.starts_with("temp.")
-        || name == "gocryptfs.diriv"
-        || name == "gocryptfs.conf"
-        || (name.starts_with("gocryptfs.longname.") && name.ends_with(".name"))
-}
-
-/// Maps a cipher directory entry to its plain equivalent.
-fn map_dir_entry(
-    this: &impl EncryptionLayout,
-    cipher_path: &VirtualPath,
-    dir_iv: &[u8],
-    entry: std::io::Result<FsDirEntry>,
-) -> std::io::Result<Option<(FsDirEntry, VirtualPathBuf)>> {
-    match entry {
-        Ok(entry) => {
-            let cipher_name = entry.file_name.clone();
-            if is_special_entry(&cipher_name) {
-                Ok(None)
-            } else {
-                let plain_name = this
-                    .cipher_name_to_plain(dir_iv, &cipher_name)
-                    .or_invalid()?;
-                Ok(Some((
-                    entry.with_name(plain_name),
-                    cipher_path.join(&cipher_name),
-                )))
-            }
-        }
-        Err(e) => Err(e),
-    }
-}
+impl<S> EncryptionLayout for GoCryptFs<FsBackend<S>> where S: EntryStorage + StorageFileSystemAccess {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{EncryptionLayout, FileType, FsBackend, StorageFileSystem, Utf8Path};
+    use crate::GoCryptFsBackend;
+    use crate::core::{
+        EncryptionLayout, FileType, NativeFileSystem, StorageFileSystem, StorageFileSystemAccess,
+        Utf8Path,
+    };
+    use std::sync::Arc;
     use tempfile::tempdir;
 
     /// Creates a borrowed plain path for tests.
@@ -163,12 +122,17 @@ mod tests {
         VirtualPath::new(path)
     }
 
+    /// Returns the raw filesystem used by a test backend.
+    fn raw_storage(backend: &GoCryptFs<GoCryptFsBackend>) -> &NativeFileSystem {
+        backend.entry_storage().storage_fs()
+    }
+
     /// Creates a freshly initialized GoCryptFS backend rooted in a temp directory.
-    fn test_backend() -> (tempfile::TempDir, GoCryptFs<FsBackend>) {
+    fn test_backend() -> (tempfile::TempDir, GoCryptFs<GoCryptFsBackend>) {
         let temp_dir = tempdir().unwrap();
         let root = Utf8Path::from_path(temp_dir.path()).unwrap();
-        GoCryptFs::<FsBackend>::init_with_default_params(root, "password").unwrap();
-        let backend = GoCryptFs::<FsBackend>::try_new(root, "password").unwrap();
+        GoCryptFs::<GoCryptFsBackend>::init_with_default_params(root, "password").unwrap();
+        let backend = GoCryptFs::<GoCryptFsBackend>::try_new(root, "password").unwrap();
         (temp_dir, backend)
     }
 
@@ -213,28 +177,6 @@ mod tests {
     }
 
     #[test]
-    fn create_temp_name_and_diriv_file_match_expected_shape() {
-        let (_temp_dir, backend) = test_backend();
-
-        let temp_path = backend.create_temp_name("docs", false);
-        let temp_diriv_path = backend.create_temp_name("docs", true);
-        let diriv_path = backend.get_dir_iv_file(VirtualPath::new("tmp/cipher-dir"));
-
-        assert_eq!(temp_path.parent(), Some(VirtualPath::root()));
-        assert!(
-            temp_path
-                .file_name()
-                .unwrap_or_default()
-                .starts_with("temp.")
-        );
-        assert!(temp_diriv_path.as_str().ends_with(".diriv"));
-        assert_eq!(
-            diriv_path,
-            VirtualPath::new("tmp/cipher-dir").join("gocryptfs.diriv")
-        );
-    }
-
-    #[test]
     fn list_dir_plain_names_returns_plain_entries_and_filters_special_files() {
         let (_temp_dir, backend) = test_backend();
 
@@ -245,12 +187,10 @@ mod tests {
         backend.create_symlink(p("link"), "../target.txt").unwrap();
 
         let root_cipher = backend.plain_path_to_cipher(p("")).unwrap();
-        backend
-            .storage_fs()
+        raw_storage(&backend)
             .put(&root_cipher.join("gocryptfs.conf"), b"ignored")
             .unwrap();
-        backend
-            .storage_fs()
+        raw_storage(&backend)
             .put(&root_cipher.join("temp.junk"), b"ignored")
             .unwrap();
 
@@ -278,8 +218,7 @@ mod tests {
         let cipher_path = backend.plain_path_to_cipher(p("file.txt")).unwrap();
         let header = backend.generate_cipher_header().unwrap();
         let cipher = backend.plain_block_to_cipher(&header, 0, plain).unwrap();
-        backend
-            .storage_fs()
+        raw_storage(&backend)
             .put(
                 &cipher_path,
                 &[header.as_slice(), cipher.as_slice()].concat(),
@@ -301,7 +240,7 @@ mod tests {
             .unwrap();
         let cipher_path = backend.plain_path_to_cipher(p("file.txt")).unwrap();
 
-        assert!(backend.storage_fs().exists(&cipher_path).unwrap());
+        assert!(raw_storage(&backend).exists(&cipher_path).unwrap());
         assert!(metadata.file_type == FileType::File);
         assert_eq!(u16::from(metadata.permissions), 0o640);
     }
@@ -312,10 +251,10 @@ mod tests {
 
         let metadata = backend.mkdir(p("docs"), Some(0o750_u16.into())).unwrap();
         let cipher_path = backend.plain_path_to_cipher(p("docs")).unwrap();
-        let diriv_path = backend.get_dir_iv_file(&cipher_path);
+        let diriv_path = cipher_path.join("gocryptfs.diriv");
 
-        assert!(backend.storage_fs().exists(&cipher_path).unwrap());
-        assert!(backend.storage_fs().exists(&diriv_path).unwrap());
+        assert!(raw_storage(&backend).exists(&cipher_path).unwrap());
+        assert!(raw_storage(&backend).exists(&diriv_path).unwrap());
         assert!(metadata.file_type == FileType::Directory);
         assert_eq!(u16::from(metadata.permissions), 0o750);
     }
@@ -331,7 +270,7 @@ mod tests {
 
         backend.remove(p("file.txt")).unwrap();
 
-        assert!(!backend.storage_fs().exists(&cipher_path).unwrap());
+        assert!(!raw_storage(&backend).exists(&cipher_path).unwrap());
     }
 
     #[test]
@@ -340,12 +279,12 @@ mod tests {
 
         backend.mkdir(p("docs"), Some(0o755_u16.into())).unwrap();
         let cipher_path = backend.plain_path_to_cipher(p("docs")).unwrap();
-        let diriv_path = backend.get_dir_iv_file(&cipher_path);
+        let diriv_path = cipher_path.join("gocryptfs.diriv");
 
         backend.remove_dir(p("docs")).unwrap();
 
-        assert!(!backend.storage_fs().exists(&cipher_path).unwrap());
-        assert!(!backend.storage_fs().exists(&diriv_path).unwrap());
+        assert!(!raw_storage(&backend).exists(&cipher_path).unwrap());
+        assert!(!raw_storage(&backend).exists(&diriv_path).unwrap());
     }
 
     #[test]

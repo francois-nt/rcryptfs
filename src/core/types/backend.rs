@@ -1,6 +1,7 @@
 use super::NativeFileSystem;
-use crate::core::{Backend, PathCacheAccess, StorageFileSystem, VirtualPathBuf};
-use camino::{Utf8Path, Utf8PathBuf};
+use crate::core::{
+    Backend, EntryStorage, PathCacheAccess, StorageFileSystemAccess, VirtualPathBuf,
+};
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
 
@@ -8,22 +9,27 @@ use std::collections::BTreeMap;
 pub type CipherPathCacheEntry = (Vec<u8>, VirtualPathBuf);
 
 /// Backend state shared by one encrypted layout.
-pub struct FsBackend<F: StorageFileSystem = NativeFileSystem> {
-    storage_fs: F,
+pub struct FsBackend<S: EntryStorage> {
+    entry_storage: S,
     path_cache: Mutex<BTreeMap<String, CipherPathCacheEntry>>,
 }
 
-impl<F: StorageFileSystem> FsBackend<F> {
-    /// Creates a backend backed by the provided rooted storage implementation.
-    pub fn new(storage_fs: F) -> Self {
+impl<S: EntryStorage> FsBackend<S> {
+    /// Creates a backend backed by the provided entry storage.
+    pub fn new(entry_storage: S) -> Self {
         Self {
-            storage_fs,
+            entry_storage,
             path_cache: Default::default(),
         }
     }
+
+    /// Returns the entry storage owned by this backend.
+    pub fn entry_storage(&self) -> &S {
+        &self.entry_storage
+    }
 }
 
-impl<F: StorageFileSystem> PathCacheAccess for FsBackend<F> {
+impl<S: EntryStorage> PathCacheAccess for FsBackend<S> {
     /// Gives temporary mutable access to the plain-to-cipher path cache.
     fn with_path_cache<Res, Op: FnOnce(&mut BTreeMap<String, CipherPathCacheEntry>) -> Res>(
         &self,
@@ -33,23 +39,11 @@ impl<F: StorageFileSystem> PathCacheAccess for FsBackend<F> {
     }
 }
 
-impl From<Utf8PathBuf> for FsBackend {
-    fn from(value: Utf8PathBuf) -> Self {
-        Self::new(NativeFileSystem::new(value))
-    }
-}
+impl<S: EntryStorage + StorageFileSystemAccess> Backend for FsBackend<S> {
+    type StorageFs = S::StorageFs;
 
-impl From<&Utf8Path> for FsBackend {
-    fn from(value: &Utf8Path) -> Self {
-        Self::new(NativeFileSystem::new(value.into()))
-    }
-}
-
-impl<F: StorageFileSystem> Backend for FsBackend<F> {
-    type StorageFs = F;
-
-    fn storage_fs(&self) -> &F {
-        &self.storage_fs
+    fn storage_fs(&self) -> &Self::StorageFs {
+        self.entry_storage.storage_fs()
     }
 }
 
@@ -64,5 +58,270 @@ impl Backend for MemoryBackend {
 
     fn storage_fs(&self) -> &NativeFileSystem {
         &self.storage_fs
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{
+        DirectoryContentLayout, DirectoryLayout, EncryptionLayout, EntryStorage,
+        RootDirectoryToken, Utf8Path, VirtualPath, XattrLayout,
+    };
+    use crate::{CryptoMator, CryptomatorEntryStorage, GoCryptFs, GoCryptFsEntryStorage};
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use sha2::{Digest, Sha256};
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    #[derive(Clone, Copy)]
+    enum MatrixTokenKind {
+        GoCryptFs,
+        Cryptomator,
+    }
+
+    /// Configurable directory policy used to exercise storage permutations.
+    struct MatrixDirectoryLayout {
+        token_kind: MatrixTokenKind,
+        detached: bool,
+    }
+
+    impl DirectoryContentLayout for MatrixDirectoryLayout {
+        fn detached_directory_contents_path(
+            &self,
+            entry_path: &VirtualPath,
+            token: &[u8],
+        ) -> crate::core::Result<VirtualPathBuf> {
+            if !self.detached {
+                return Ok(entry_path.to_owned());
+            }
+            let name = URL_SAFE_NO_PAD.encode(Sha256::digest(token));
+            Ok(VirtualPath::new("objects").join(name))
+        }
+    }
+
+    impl DirectoryLayout for MatrixDirectoryLayout {
+        fn generate_directory_token(&self) -> Vec<u8> {
+            match self.token_kind {
+                MatrixTokenKind::GoCryptFs => {
+                    let mut token = vec![0; 16];
+                    rand::fill(&mut token[..]);
+                    token
+                }
+                MatrixTokenKind::Cryptomator => uuid::Uuid::new_v4().to_string().into_bytes(),
+            }
+        }
+
+        fn validate_directory_token(&self, token: &[u8], is_root: bool) -> crate::core::Result<()> {
+            match self.token_kind {
+                MatrixTokenKind::GoCryptFs => {
+                    anyhow::ensure!(token.len() == 16, "expected a 16-byte directory token");
+                }
+                MatrixTokenKind::Cryptomator if is_root && token.is_empty() => {}
+                MatrixTokenKind::Cryptomator => {
+                    uuid::Uuid::parse_str(std::str::from_utf8(token)?)?;
+                }
+            }
+            Ok(())
+        }
+
+        fn root_directory_token(&self) -> RootDirectoryToken {
+            match self.token_kind {
+                MatrixTokenKind::GoCryptFs => RootDirectoryToken::Persisted,
+                MatrixTokenKind::Cryptomator => RootDirectoryToken::Implicit(Vec::new()),
+            }
+        }
+    }
+
+    /// Creates a policy matching one crypto and one storage topology.
+    fn matrix_layout(token_kind: MatrixTokenKind, detached: bool) -> Arc<dyn DirectoryLayout> {
+        Arc::new(MatrixDirectoryLayout {
+            token_kind,
+            detached,
+        })
+    }
+
+    /// Creates a nested directory tree and checks the selected storage topology.
+    fn create_matrix_tree<T: EncryptionLayout>(
+        backend: &T,
+        detached: bool,
+        expected_root_token_len: usize,
+    ) {
+        let root = backend
+            .entry_storage()
+            .resolve_directory(VirtualPath::root(), backend.directory_layout())
+            .unwrap();
+        assert_eq!(root.token.len(), expected_root_token_len);
+
+        backend.mkdir(VirtualPath::new("docs"), None).unwrap();
+        let entry_path = backend
+            .plain_path_to_cipher(VirtualPath::new("docs"))
+            .unwrap();
+        let directory = backend
+            .entry_storage()
+            .resolve_directory(&entry_path, backend.directory_layout())
+            .unwrap();
+        assert_eq!(directory.entry_path != directory.contents_path, detached);
+
+        backend
+            .mknode(VirtualPath::new("docs/note.txt"), None)
+            .unwrap();
+    }
+
+    /// Verifies that a newly-opened composition can read the persisted tree.
+    fn assert_matrix_tree<T: EncryptionLayout + 'static>(backend: T) {
+        let entries = Arc::new(backend)
+            .list_dir_plain_names(VirtualPath::new("docs"))
+            .unwrap()
+            .collect::<std::io::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0.file_name, "note.txt");
+    }
+
+    /// Asserts that one composed crypto and storage type exposes the complete runtime layout.
+    fn assert_encryption_layout<T: EncryptionLayout + XattrLayout>() {}
+
+    #[test]
+    fn crypto_layers_accept_the_opposite_entry_storage_type() {
+        type GoCryptoWithC9rStorage =
+            GoCryptFs<FsBackend<CryptomatorEntryStorage<NativeFileSystem>>>;
+        type CryptomatorCryptoWithDirectStorage =
+            CryptoMator<FsBackend<GoCryptFsEntryStorage<NativeFileSystem>>>;
+
+        assert_encryption_layout::<GoCryptoWithC9rStorage>();
+        assert_encryption_layout::<CryptomatorCryptoWithDirectStorage>();
+    }
+
+    #[test]
+    fn go_crypto_with_direct_storage_reopens_directory_tree() {
+        let temp_dir = tempdir().unwrap();
+        let root = Utf8Path::from_path(temp_dir.path()).unwrap().to_owned();
+        let directory_layout = matrix_layout(MatrixTokenKind::GoCryptFs, false);
+        let backend = FsBackend::new(GoCryptFsEntryStorage::new(NativeFileSystem::new(
+            root.clone(),
+        )));
+        GoCryptFs::init_with_backend_and_directory_layout(
+            &backend,
+            "password",
+            directory_layout.as_ref(),
+        )
+        .unwrap();
+        let cryptfs = GoCryptFs::try_new_with_backend_and_directory_layout(
+            backend,
+            "password",
+            directory_layout.clone(),
+        )
+        .unwrap();
+        create_matrix_tree(&cryptfs, false, 16);
+        drop(cryptfs);
+
+        let backend = FsBackend::new(GoCryptFsEntryStorage::new(NativeFileSystem::new(root)));
+        let reopened = GoCryptFs::try_new_with_backend_and_directory_layout(
+            backend,
+            "password",
+            directory_layout,
+        )
+        .unwrap();
+        assert_matrix_tree(reopened);
+    }
+
+    #[test]
+    fn go_crypto_with_c9r_storage_reopens_directory_tree() {
+        let temp_dir = tempdir().unwrap();
+        let root = Utf8Path::from_path(temp_dir.path()).unwrap().to_owned();
+        let directory_layout = matrix_layout(MatrixTokenKind::GoCryptFs, true);
+        let backend = FsBackend::new(CryptomatorEntryStorage::new(NativeFileSystem::new(
+            root.clone(),
+        )));
+        GoCryptFs::init_with_backend_and_directory_layout(
+            &backend,
+            "password",
+            directory_layout.as_ref(),
+        )
+        .unwrap();
+        let cryptfs = GoCryptFs::try_new_with_backend_and_directory_layout(
+            backend,
+            "password",
+            directory_layout.clone(),
+        )
+        .unwrap();
+        create_matrix_tree(&cryptfs, true, 16);
+        drop(cryptfs);
+
+        let backend = FsBackend::new(CryptomatorEntryStorage::new(NativeFileSystem::new(root)));
+        let reopened = GoCryptFs::try_new_with_backend_and_directory_layout(
+            backend,
+            "password",
+            directory_layout,
+        )
+        .unwrap();
+        assert_matrix_tree(reopened);
+    }
+
+    #[test]
+    fn cryptomator_crypto_with_direct_storage_reopens_directory_tree() {
+        let temp_dir = tempdir().unwrap();
+        let root = Utf8Path::from_path(temp_dir.path()).unwrap().to_owned();
+        let directory_layout = matrix_layout(MatrixTokenKind::Cryptomator, false);
+        let backend = FsBackend::new(GoCryptFsEntryStorage::new(NativeFileSystem::new(
+            root.clone(),
+        )));
+        CryptoMator::init_with_backend_and_directory_layout(
+            &backend,
+            "password",
+            directory_layout.as_ref(),
+        )
+        .unwrap();
+        let cryptfs = CryptoMator::try_new_with_backend_and_directory_layout(
+            backend,
+            "password",
+            directory_layout.clone(),
+        )
+        .unwrap();
+        create_matrix_tree(&cryptfs, false, 0);
+        drop(cryptfs);
+
+        let backend = FsBackend::new(GoCryptFsEntryStorage::new(NativeFileSystem::new(root)));
+        let reopened = CryptoMator::try_new_with_backend_and_directory_layout(
+            backend,
+            "password",
+            directory_layout,
+        )
+        .unwrap();
+        assert_matrix_tree(reopened);
+    }
+
+    #[test]
+    fn cryptomator_crypto_with_c9r_storage_reopens_directory_tree() {
+        let temp_dir = tempdir().unwrap();
+        let root = Utf8Path::from_path(temp_dir.path()).unwrap().to_owned();
+        let directory_layout = matrix_layout(MatrixTokenKind::Cryptomator, true);
+        let backend = FsBackend::new(CryptomatorEntryStorage::new(NativeFileSystem::new(
+            root.clone(),
+        )));
+        CryptoMator::init_with_backend_and_directory_layout(
+            &backend,
+            "password",
+            directory_layout.as_ref(),
+        )
+        .unwrap();
+        let cryptfs = CryptoMator::try_new_with_backend_and_directory_layout(
+            backend,
+            "password",
+            directory_layout.clone(),
+        )
+        .unwrap();
+        create_matrix_tree(&cryptfs, true, 0);
+        drop(cryptfs);
+
+        let backend = FsBackend::new(CryptomatorEntryStorage::new(NativeFileSystem::new(root)));
+        let reopened = CryptoMator::try_new_with_backend_and_directory_layout(
+            backend,
+            "password",
+            directory_layout,
+        )
+        .unwrap();
+        assert_matrix_tree(reopened);
     }
 }

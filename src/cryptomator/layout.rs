@@ -1,86 +1,120 @@
-use std::sync::Arc;
-
 use super::CryptoMator;
 use crate::core::{
-    Backend, CipherPathLayout, EncryptionLayout, EncryptionTranslator, FileType, FsBackend,
-    FsDirEntry, Metadata, OrIoError, PathCacheAccess, Permissions, Result, StorageFileSystem,
-    VirtualPath, VirtualPathBuf, default_remove_cached_plain_path, temp_file_path,
+    DirectoryContentLayout, DirectoryLayout, EncryptionLayout, EncryptionTranslator, EntryStorage,
+    FsBackend, OrIoError, PathCacheAccess, PathLayout, Result, RootDirectoryToken,
+    StorageFileSystemAccess, VirtualPath, VirtualPathBuf, default_remove_cached_plain_path,
 };
-use anyhow::{Context, anyhow};
 
-/// Reads the directory id vector from a cipher directory.
-fn read_dirid(
-    fs: &impl StorageFileSystem,
-    cipher_dir: &VirtualPath,
-    is_root: bool,
-) -> Result<String> {
-    if is_root {
-        return Ok(String::default());
+/// Canonical Cryptomator directory policy derived from the SIV key.
+pub(super) struct CryptomatorDirectoryLayout {
+    siv_key: [u8; 64],
+}
+
+impl CryptomatorDirectoryLayout {
+    /// Creates the canonical directory policy from derived key material.
+    pub(super) fn new(siv_key: [u8; 64]) -> Self {
+        Self { siv_key }
     }
-    let p = cipher_dir.join("dir.c9r");
-    let data = String::from_utf8(fs.read(&p, 0, 37)?).context(format!("read {:?}", p))?;
-    if data.len() != 36 {
-        return Err(anyhow!("dirid has len {}, expected 36", data.len()));
+}
+
+impl DirectoryContentLayout for CryptomatorDirectoryLayout {
+    fn detached_directory_contents_path(
+        &self,
+        _entry_path: &VirtualPath,
+        token: &[u8],
+    ) -> Result<VirtualPathBuf> {
+        super::inner::dir_id_to_storage_path(&self.siv_key, str::from_utf8(token)?)
     }
-    Ok(data)
+}
+
+impl DirectoryLayout for CryptomatorDirectoryLayout {
+    fn generate_directory_token(&self) -> Vec<u8> {
+        uuid::Uuid::new_v4().to_string().into_bytes()
+    }
+
+    fn validate_directory_token(&self, token: &[u8], is_root: bool) -> Result<()> {
+        if is_root && token.is_empty() {
+            return Ok(());
+        }
+        uuid::Uuid::parse_str(str::from_utf8(token)?)?;
+        Ok(())
+    }
+
+    fn root_directory_token(&self) -> RootDirectoryToken {
+        RootDirectoryToken::Implicit(Vec::new())
+    }
 }
 
 /// Resolves a plain folder path to its storage directory and dir id.
-fn folder_path_to_cipher_and_dirid<F: StorageFileSystem>(
-    this: &CryptoMator<FsBackend<F>>,
+fn folder_path_to_cipher_and_dirid<S>(
+    this: &CryptoMator<FsBackend<S>>,
     plain_path: &VirtualPath,
-) -> Result<(VirtualPathBuf, Vec<u8>)> {
+) -> Result<(VirtualPathBuf, Vec<u8>)>
+where
+    S: EntryStorage + StorageFileSystemAccess,
+{
     this.backend.with_path_cache(|cache| {
         if let Some((dir_id, cipher_path)) = cache.get(plain_path.as_str()) {
             Ok((cipher_path.to_owned(), dir_id.clone()))
         } else {
             if plain_path.as_str().is_empty() {
-                let cipher_path = this.dir_id_to_storage_path(&String::default())?;
-                cache.insert(String::default(), (Vec::default(), cipher_path.clone()));
-                return Ok((cipher_path, Vec::default()));
+                let directory = this
+                    .entry_storage()
+                    .resolve_directory(VirtualPath::root(), this.directory_layout())?;
+                cache.insert(
+                    String::default(),
+                    (directory.token.clone(), directory.contents_path.clone()),
+                );
+                return Ok((directory.contents_path, directory.token));
             }
 
             let mut partial_plain_path = VirtualPathBuf::from("");
             let mut absolute_path = VirtualPathBuf::default();
-            let mut is_root = true;
             for plain_part in plain_path.iter() {
                 if let Some((dir_id, cipher_parent)) = cache.get(partial_plain_path.as_str()) {
                     let cipher_part = this.plain_name_to_cipher(dir_id, plain_part)?;
                     absolute_path = cipher_parent.join(cipher_part);
                 } else {
-                    let dir_id = read_dirid(this.storage_fs(), &absolute_path, is_root)?;
-
-                    absolute_path = this.dir_id_to_storage_path(&dir_id)?;
+                    let directory = this
+                        .entry_storage()
+                        .resolve_directory(&absolute_path, this.directory_layout())?;
+                    absolute_path = directory.contents_path;
                     cache.insert(
                         partial_plain_path.as_str().into(),
-                        (dir_id.as_bytes().into(), absolute_path.clone()),
+                        (directory.token.clone(), absolute_path.clone()),
                     );
-                    let cipher_part = this.plain_name_to_cipher(dir_id.as_bytes(), plain_part)?;
+                    let cipher_part = this.plain_name_to_cipher(&directory.token, plain_part)?;
                     absolute_path.push(cipher_part);
                 }
                 partial_plain_path.push(plain_part);
-                if is_root {
-                    is_root = false
-                }
             }
 
-            let dir_id = read_dirid(this.storage_fs(), &absolute_path, is_root)?;
-            absolute_path = this.dir_id_to_storage_path(&dir_id)?;
+            let directory = this
+                .entry_storage()
+                .resolve_directory(&absolute_path, this.directory_layout())?;
+            absolute_path = directory.contents_path;
 
             cache.insert(
                 partial_plain_path.as_str().into(),
-                (dir_id.as_bytes().into(), absolute_path.clone()),
+                (directory.token.clone(), absolute_path.clone()),
             );
 
-            Ok((absolute_path, dir_id.as_bytes().into()))
+            Ok((absolute_path, directory.token))
         }
     })
 }
 
-impl<F: StorageFileSystem> CipherPathLayout for CryptoMator<FsBackend<F>> {
-    type StorageFs = F;
-    fn storage_fs(&self) -> &Self::StorageFs {
-        self.backend.storage_fs()
+impl<S> PathLayout for CryptoMator<FsBackend<S>>
+where
+    S: EntryStorage + StorageFileSystemAccess,
+{
+    type EntryStorage = S;
+
+    fn entry_storage(&self) -> &Self::EntryStorage {
+        self.backend.entry_storage()
+    }
+    fn directory_layout(&self) -> &dyn DirectoryLayout {
+        self.directory_layout.as_ref()
     }
     /// Resolves one logical path to its visible storage entry inside the parent storage directory.
     fn plain_path_to_cipher(&self, plain_path: &VirtualPath) -> Result<VirtualPathBuf> {
@@ -94,292 +128,26 @@ impl<F: StorageFileSystem> CipherPathLayout for CryptoMator<FsBackend<F>> {
         let cipher_name = self.plain_name_to_cipher(&dir_id, name)?;
         Ok(cipher_parent_path.join(cipher_name))
     }
-    /// Creates a temporary path inside the cipher root for rename-based updates.
-    fn create_temp_name(&self, path: &str, is_dir_iv: bool) -> VirtualPathBuf {
-        temp_file_path(path, is_dir_iv)
-    }
     /// Drops one cached plain path and all cached descendants derived from it.
     fn remove_cached_plain_path(&self, plain_path: &VirtualPath) {
         default_remove_cached_plain_path(&self.backend, plain_path);
     }
-    /// Returns the marker file that makes a visible entry behave like a logical directory.
-    fn get_dir_iv_file(&self, cipher_folder_path: &VirtualPath) -> VirtualPathBuf {
-        cipher_folder_path.join("dir.c9r")
-    }
 }
 
-impl<F: StorageFileSystem> EncryptionLayout for CryptoMator<FsBackend<F>> {
-    fn list_dir_plain_names(
-        self: Arc<Self>,
-        plain_path: &VirtualPath,
-    ) -> std::io::Result<
-        impl Iterator<Item = std::io::Result<(FsDirEntry, VirtualPathBuf)>> + 'static,
-    > {
-        // Directory listings come from the storage directory identified by the folder dir id.
-        let (cipher_path, dir_id) =
-            folder_path_to_cipher_and_dirid(self.as_ref(), plain_path).or_invalid()?;
-        // let plain_path: Utf8PathBuf = plain_path.into();
-        // let cipher_path = self.plain_path_to_cipher(&plain_path)?;
-        // let dir_id = if plain_path == "" {
-        //     "".into()
-        // } else {
-        //     read_dirid(&cipher_path)?
-        // };
-        // let cipher_path = self.dir_id_to_storage_path(&dir_id)?;
-        log::debug!("read_dir on {}", cipher_path);
-        Ok(self
-            .storage_fs()
-            .read_dir(&cipher_path)?
-            .filter_map(move |entry| {
-                match &entry {
-                    Ok(entry) => log::debug!("> entry Ok {entry}"),
-                    Err(e) => log::debug!("> entry Err {e}"),
-                };
-                match map_dir_entry(self.as_ref(), &cipher_path, &dir_id, entry) {
-                    Ok(Some((plain_name, cipher_path))) => Some(Ok((plain_name, cipher_path))),
-                    Ok(None) => None,
-                    Err(e) => Some(Err(e)),
-                }
-            }))
-
-        // Ok(std::fs::read_dir(&cipher_path)?.filter_map(move |entry| {
-        //     log::debug!("> entry {:?}", entry);
-        //     match map_dir_entry(self, &cipher_path, &dir_id, entry) {
-        //         Ok(Some((plain_name, cipher_path))) => Some(Ok((plain_name, cipher_path))),
-        //         Ok(None) => None,
-        //         Err(e) => Some(Err(e)),
-        //     }
-        // }))
-    }
-
-    fn metadata(&self, plain_path: &VirtualPath) -> std::io::Result<Metadata> {
-        // Metadata must be rewritten from the raw storage view to the logical Cryptomator view.
-        let cipher_path = self.plain_path_to_cipher(plain_path).or_invalid()?;
-        log::debug!("metadata on [{plain_path}] : {cipher_path}");
-        let mut metadata = self.storage_fs().metadata(&cipher_path)?;
-        metadata
-            .adjust(self, &cipher_path, plain_path.is_empty())
-            .or_io_error(libc::EBADF)?;
-        Ok(metadata)
-    }
-
-    fn mkdir(
-        &self,
-        plain_path: &VirtualPath,
-        permissions: Option<Permissions>,
-    ) -> std::io::Result<Metadata> {
-        log::debug!("mkdir on {plain_path}");
-        // A logical directory is represented twice: once as a visible entry with dir.c9r,
-        // and once as its storage directory addressed by the generated dir id.
-        let parent = plain_path.parent().unwrap_or_else(VirtualPath::root);
-        let name = plain_path.file_name().or_invalid()?;
-
-        log::debug!("parent {parent} - name {name}");
-
-        let cached = self.backend.with_path_cache(|cache| {
-            if let Some((parent_dir_id, cipher_parent_path)) = cache.get(parent.as_str()) {
-                log::debug!("found {parent} in cache! {cipher_parent_path}");
-                Some((
-                    str::from_utf8(parent_dir_id).unwrap_or_default().into(),
-                    cipher_parent_path.clone(),
-                ))
-            } else {
-                None
-            }
-        });
-        let (parent_dir_id, cipher_parent_path) = match cached {
-            Some((parent_dir_id, cipher_parent_path)) => (parent_dir_id, cipher_parent_path),
-            None => {
-                let is_root = parent.as_str().is_empty();
-                let cipher_parent_path = self.plain_path_to_cipher(parent).or_invalid()?;
-                log::debug!("computed cipher_parent_path for {parent} - {cipher_parent_path}");
-                let parent_dir_id =
-                    read_dirid(self.storage_fs(), &cipher_parent_path, is_root).or_invalid()?;
-                (parent_dir_id, cipher_parent_path)
-            }
-        };
-
-        log::debug!("cipher parent path is {cipher_parent_path}");
-
-        let cipher_name = self
-            .plain_name_to_cipher(parent_dir_id.as_bytes(), name)
-            .or_invalid()?;
-        log::debug!("cipher_name is {cipher_name}");
-        let new_dir_iv = self.generate_diriv();
-        let cipher_path = cipher_parent_path.join(cipher_name);
-        log::debug!("cipher_path is {cipher_path}");
-        self.storage_fs().mkdir(&cipher_path, None)?;
-        let new_dir_iv_file = self.get_dir_iv_file(&cipher_path);
-        log::debug!("new_dir_iv_file is {new_dir_iv_file}");
-        self.storage_fs()
-            .put(&new_dir_iv_file, &new_dir_iv)
-            .or_invalid()?;
-
-        self.mkdir_storage_path(str::from_utf8(&new_dir_iv).unwrap_or_default())
-            .or_invalid()?;
-        match permissions {
-            Some(permissions) => self.storage_fs().set_permissions(&cipher_path, permissions),
-            None => self.storage_fs().metadata(&cipher_path),
-        }
-    }
-    fn mknode(
-        &self,
-        plain_path: &VirtualPath,
-        permissions: Option<Permissions>,
-    ) -> std::io::Result<Metadata> {
-        // Empty logical files are materialized with a header immediately.
-        let cipher_path = self.plain_path_to_cipher(plain_path).or_invalid()?;
-        self.storage_fs()
-            .put(&cipher_path, &self.generate_cipher_header().or_invalid()?)
-            .or_invalid()?;
-        match permissions {
-            Some(permissions) => self.storage_fs().set_permissions(&cipher_path, permissions),
-            None => self.storage_fs().metadata(&cipher_path),
-        }
-    }
-    fn remove_dir(&self, plain_path: &VirtualPath) -> std::io::Result<()> {
-        // Removing a logical directory must remove both its visible entry and its storage directory.
-        let cipher_path = self.plain_path_to_cipher(plain_path).or_invalid()?;
-        let is_root = plain_path.is_empty();
-        let dir_id = read_dirid(self.storage_fs(), &cipher_path, is_root).or_invalid()?;
-
-        let children_path = self.dir_id_to_storage_path(&dir_id).or_invalid()?;
-        self.storage_fs()
-            .remove_dir(&children_path)
-            .inspect_err(|e| log::error!("cant rmdir on {children_path} - {e}"))?;
-        self.storage_fs()
-            .remove_dir_all(&cipher_path)
-            .inspect_err(|e| log::error!("cant rmdir all on {cipher_path} - {e}"))?;
-        self.remove_cached_plain_path(plain_path);
-        Ok(())
-    }
-    fn remove(&self, plain_path: &VirtualPath) -> std::io::Result<()> {
-        // Logical symlinks are stored as directories, so removal depends on the visible entry type.
-        let cipher_path = self.plain_path_to_cipher(plain_path).or_invalid()?;
-        let meta = self.storage_fs().metadata(&cipher_path)?;
-        match meta.file_type {
-            FileType::File => self.storage_fs().remove(&cipher_path),
-            _ => self.storage_fs().remove_dir_all(&cipher_path),
-        }
-    }
-    fn read_symlink(&self, plain_path: &VirtualPath) -> std::io::Result<String> {
-        // Logical symlink targets live in the symlink.c9r payload inside the visible entry.
-        let cipher_path = self.plain_path_to_cipher(plain_path).or_invalid()?;
-        let symlink_content = cipher_path.join("symlink.c9r");
-        let data = self
-            .storage_fs()
-            .read(&symlink_content, 0, 1024)
-            .or_invalid()?;
-        let target = self.cipher_metavalue_to_plain(&data).or_invalid()?;
-        Ok(str::from_utf8(&target).or_invalid()?.into())
-    }
-    /// Ignores chmod on logical symlinks so the backing directory stays traversable.
-    fn set_permissions(
-        &self,
-        path: &VirtualPath,
-        permissions: Permissions,
-    ) -> std::io::Result<Metadata> {
-        let metadata = self.metadata(path)?;
-        if metadata.file_type == FileType::SymLink {
-            return Ok(metadata);
-        }
-        let cipher_path = self.plain_path_to_cipher(path).or_invalid()?;
-        self.storage_fs().set_permissions(&cipher_path, permissions)
-    }
-    /// Creates a logical symlink as a visible directory containing one encrypted target payload.
-    fn create_symlink(&self, plain_path: &VirtualPath, target: &str) -> std::io::Result<Metadata> {
-        let cipher_path = self.plain_path_to_cipher(plain_path).or_invalid()?;
-        let cipher_target = self
-            .plain_metavalue_to_cipher(target.as_bytes())
-            .or_invalid()?;
-        self.storage_fs().mkdir(&cipher_path, None)?;
-        self.storage_fs()
-            .put(&cipher_path.join("symlink.c9r"), &cipher_target)?;
-        let mut meta = self.storage_fs().metadata(&cipher_path)?;
-        meta.adjust(self, &cipher_path, false).or_invalid()?;
-        Ok(meta)
-    }
-}
-
-fn is_special_entry(name: &str) -> bool {
-    name == "dirid.c9r"
-}
-
-/// Adjusts raw lower-fs metadata to the logical Cryptomator view.
-trait AdujstMetadata {
-    fn adjust<T: EncryptionLayout>(
-        &mut self,
-        this: &T,
-        path: &VirtualPath,
-        is_root: bool,
-    ) -> Result<()>;
-}
-
-impl AdujstMetadata for Metadata {
-    fn adjust<T: EncryptionLayout>(
-        &mut self,
-        this: &T,
-        path: &VirtualPath,
-        is_root: bool,
-    ) -> Result<()> {
-        if self.file_type == FileType::File {
-            self.len = this.cipher_size_to_plain(self.len)?;
-            self.blocks = 1 + self.len / T::PLAIN_BLOCK_LEN;
-        } else if self.file_type == FileType::Directory {
-            if !is_root {
-                let dir = path.join("dir.c9r");
-                if !this.storage_fs().exists(&dir)? {
-                    let symlink = path.join("symlink.c9r");
-                    if this.storage_fs().exists(&symlink)? {
-                        self.file_type = FileType::SymLink;
-                        self.permissions = 0o777_u16.into();
-                    } else {
-                        self.file_type = FileType::Other;
-                    }
-                }
-            }
-        } else {
-            self.file_type = FileType::Other;
-        }
-        Ok(())
-    }
-}
-
-/// Maps one storage entry to its plain directory entry when it should be visible.
-fn map_dir_entry(
-    this: &impl EncryptionLayout,
-    cipher_path: &VirtualPath,
-    dir_iv: &[u8],
-    entry: std::io::Result<FsDirEntry>,
-) -> std::io::Result<Option<(FsDirEntry, VirtualPathBuf)>> {
-    match entry {
-        Ok(mut entry) => {
-            let cipher_name = entry.file_name.clone();
-
-            if is_special_entry(&cipher_name) {
-                Ok(None)
-            } else {
-                entry
-                    .metadata
-                    .adjust(this, &cipher_path.join(&cipher_name), false)
-                    .or_invalid()?;
-                let plain_name = this
-                    .cipher_name_to_plain(dir_iv, &cipher_name)
-                    .or_invalid()?;
-                Ok(Some((
-                    entry.with_name(plain_name),
-                    cipher_path.join(&cipher_name),
-                )))
-            }
-        }
-        Err(e) => Err(e),
-    }
+impl<S> EncryptionLayout for CryptoMator<FsBackend<S>> where
+    S: EntryStorage + StorageFileSystemAccess
+{
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{CipherPathLayout, EncryptionLayout, FileType, FsBackend, Utf8Path};
+    use crate::CryptomatorBackend;
+    use crate::core::{
+        EncryptionLayout, FileType, NativeFileSystem, PathLayout, StorageFileSystem,
+        StorageFileSystemAccess, Utf8Path,
+    };
+    use std::sync::Arc;
     use tempfile::tempdir;
 
     /// Creates a borrowed plain path for tests.
@@ -387,8 +155,13 @@ mod tests {
         VirtualPath::new(path)
     }
 
+    /// Returns the raw filesystem used by a test backend.
+    fn raw_storage(backend: &CryptoMator<CryptomatorBackend>) -> &NativeFileSystem {
+        backend.entry_storage().storage_fs()
+    }
+
     /// Creates a deterministic Cryptomator backend with a materialized root storage directory.
-    fn test_backend() -> (tempfile::TempDir, CryptoMator<FsBackend>) {
+    fn test_backend() -> (tempfile::TempDir, CryptoMator<CryptomatorBackend>) {
         let temp_dir = tempdir().unwrap();
         let root = Utf8Path::from_path(temp_dir.path()).unwrap();
 
@@ -397,14 +170,15 @@ mod tests {
             *byte = i as u8;
         }
 
-        let backend = CryptoMator {
+        let backend: CryptoMator<CryptomatorBackend> = CryptoMator {
             backend: root.into(),
+            directory_layout: Arc::new(CryptomatorDirectoryLayout::new(siv_key)),
             siv_key,
         };
 
         backend
-            .storage_fs()
-            .mkdir_all(&backend.dir_id_to_storage_path("").unwrap())
+            .entry_storage()
+            .initialize_root_directory(backend.directory_layout())
             .unwrap();
 
         (temp_dir, backend)
@@ -441,23 +215,44 @@ mod tests {
     }
 
     #[test]
+    fn list_dir_plain_names_reads_detached_directory_contents() {
+        let (_temp_dir, backend) = test_backend();
+        backend.mkdir(p("docs"), Some(0o755_u16.into())).unwrap();
+        backend
+            .mknode(p("docs/note.txt"), Some(0o644_u16.into()))
+            .unwrap();
+
+        let entries: Vec<_> = Arc::from(backend)
+            .list_dir_plain_names(p("docs"))
+            .unwrap()
+            .map(|entry| entry.unwrap().0.file_name)
+            .collect();
+
+        assert_eq!(entries, ["note.txt"]);
+    }
+
+    #[test]
     fn metadata_reports_empty_plain_file_for_header_only_node() {
         let (_temp_dir, backend) = test_backend();
 
-        backend
+        let created_metadata = backend
             .mknode(p("empty.txt"), Some(0o644_u16.into()))
             .unwrap();
 
         let cipher_path = backend.plain_path_to_cipher(p("empty.txt")).unwrap();
-        let raw_metadata = backend.storage_fs().metadata(&cipher_path).unwrap();
+        let raw_metadata = raw_storage(&backend).metadata(&cipher_path).unwrap();
         let plain_metadata = backend.metadata(p("empty.txt")).unwrap();
+        let duplicate_error = backend.mknode(p("empty.txt"), None).err().unwrap();
 
         assert_eq!(
             raw_metadata.len,
-            CryptoMator::<FsBackend>::HEADER_LEN as u64
+            CryptoMator::<CryptomatorBackend>::HEADER_LEN as u64
         );
         assert_eq!(plain_metadata.len, 0);
         assert!(plain_metadata.file_type == FileType::File);
+        assert_eq!(created_metadata.len, 0);
+        assert_eq!(u16::from(created_metadata.permissions), 0o644);
+        assert_eq!(duplicate_error.kind(), std::io::ErrorKind::AlreadyExists);
     }
 
     #[test]
@@ -467,17 +262,22 @@ mod tests {
         backend.mkdir(p("docs"), Some(0o755_u16.into())).unwrap();
 
         let cipher_path = backend.plain_path_to_cipher(p("docs")).unwrap();
-        let dir_id = read_dirid(backend.storage_fs(), &cipher_path, false).unwrap();
-        let storage_path = backend.dir_id_to_storage_path(&dir_id).unwrap();
+        let directory = backend
+            .entry_storage()
+            .resolve_directory(&cipher_path, backend.directory_layout())
+            .unwrap();
 
-        assert!(backend.storage_fs().exists(&cipher_path).unwrap());
+        assert!(raw_storage(&backend).exists(&cipher_path).unwrap());
         assert!(
-            backend
-                .storage_fs()
+            raw_storage(&backend)
                 .exists(&cipher_path.join("dir.c9r"))
                 .unwrap()
         );
-        assert!(backend.storage_fs().exists(&storage_path).unwrap());
+        assert!(
+            raw_storage(&backend)
+                .exists(&directory.contents_path)
+                .unwrap()
+        );
         assert!(backend.metadata(p("docs")).unwrap().file_type == FileType::Directory);
     }
 
@@ -487,13 +287,19 @@ mod tests {
 
         backend.mkdir(p("docs"), Some(0o755_u16.into())).unwrap();
         let cipher_path = backend.plain_path_to_cipher(p("docs")).unwrap();
-        let dir_id = read_dirid(backend.storage_fs(), &cipher_path, false).unwrap();
-        let storage_path = backend.dir_id_to_storage_path(&dir_id).unwrap();
+        let directory = backend
+            .entry_storage()
+            .resolve_directory(&cipher_path, backend.directory_layout())
+            .unwrap();
 
         backend.remove_dir(p("docs")).unwrap();
 
-        assert!(!backend.storage_fs().exists(&cipher_path).unwrap());
-        assert!(!backend.storage_fs().exists(&storage_path).unwrap());
+        assert!(!raw_storage(&backend).exists(&cipher_path).unwrap());
+        assert!(
+            !raw_storage(&backend)
+                .exists(&directory.contents_path)
+                .unwrap()
+        );
     }
 
     #[test]
@@ -505,21 +311,24 @@ mod tests {
             .unwrap();
         let file_path = backend.plain_path_to_cipher(p("file.txt")).unwrap();
         backend.remove(p("file.txt")).unwrap();
-        assert!(!backend.storage_fs().exists(&file_path).unwrap());
+        assert!(!raw_storage(&backend).exists(&file_path).unwrap());
 
         backend.create_symlink(p("link"), "../target.txt").unwrap();
         let symlink_path = backend.plain_path_to_cipher(p("link")).unwrap();
         backend.remove(p("link")).unwrap();
-        assert!(!backend.storage_fs().exists(&symlink_path).unwrap());
+        assert!(!raw_storage(&backend).exists(&symlink_path).unwrap());
     }
 
     #[test]
     fn list_dir_plain_names_filters_special_entries() {
         let (_temp_dir, backend) = test_backend();
-        let root_storage = backend.dir_id_to_storage_path("").unwrap();
+        let root_storage = backend
+            .entry_storage()
+            .resolve_directory(VirtualPath::root(), backend.directory_layout())
+            .unwrap()
+            .contents_path;
 
-        backend
-            .storage_fs()
+        raw_storage(&backend)
             .put(&root_storage.join("dirid.c9r"), b"internal")
             .unwrap();
 

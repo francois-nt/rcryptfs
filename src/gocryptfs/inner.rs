@@ -1,5 +1,8 @@
-use super::GoCryptFs;
-use crate::core::{Backend, FsBackend, Result, StorageFileSystem};
+use super::{GoCryptFs, GoCryptFsBackend, layout::GoCryptFsDirectoryLayout};
+use crate::core::{
+    Backend, DirectoryLayout, EntryStorage, FsBackend, Result, StorageFileSystem,
+    StorageFileSystemAccess,
+};
 use crate::{Utf8Path, VirtualPath};
 use aes::{Aes256, cipher::generic_array::GenericArray};
 use aes_gcm::{
@@ -12,12 +15,14 @@ use hkdf::Hkdf;
 use scrypt::{Params as ScryptParams, scrypt};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::sync::Arc;
 
 /// Derives encryption keys from master key and feature flags.
 fn derive_keys<T: Backend>(
     backend: T,
     master_key: &[u8; 32],
     feature_flags: &[String],
+    directory_layout: Arc<dyn DirectoryLayout>,
 ) -> Result<GoCryptFs<T>> {
     let has = |flag: &str| feature_flags.iter().any(|f| f == flag);
 
@@ -48,6 +53,7 @@ fn derive_keys<T: Backend>(
     }
     Ok(GoCryptFs {
         backend,
+        directory_layout,
         gcm_key,
         eme_key,
         raw64,
@@ -245,7 +251,7 @@ impl<T: Backend> GoCryptFs<T> {
         Self::PLAIN_BLOCK_LEN + (Self::TAG_LEN + Self::NONCE_LEN) as u64;
 }
 
-impl GoCryptFs<FsBackend> {
+impl GoCryptFs<GoCryptFsBackend> {
     /// Initializes a new GoCryptFS-compatible backend with default parameters.
     pub fn init_with_default_params(root_path: &Utf8Path, password: &str) -> Result<Vec<u8>> {
         let backend = root_path.into();
@@ -257,9 +263,21 @@ impl GoCryptFs<FsBackend> {
     }
 }
 
-impl<F: StorageFileSystem> GoCryptFs<FsBackend<F>> {
-    /// Initializes a GoCryptFS-compatible repository on the provided storage backend.
-    pub fn init_with_backend(backend: &FsBackend<F>, password: &str) -> Result<Vec<u8>> {
+impl<S> GoCryptFs<FsBackend<S>>
+where
+    S: EntryStorage + StorageFileSystemAccess,
+{
+    /// Initializes the GoCryptFS crypto configuration over an entry representation.
+    pub fn init_with_backend(backend: &FsBackend<S>, password: &str) -> Result<Vec<u8>> {
+        Self::init_with_backend_and_directory_layout(backend, password, &GoCryptFsDirectoryLayout)
+    }
+
+    /// Initializes the crypto configuration with explicit directory policies.
+    pub fn init_with_backend_and_directory_layout(
+        backend: &FsBackend<S>,
+        password: &str,
+        directory_layout: &dyn DirectoryLayout,
+    ) -> Result<Vec<u8>> {
         let root_path = VirtualPath::root();
         let storage_fs = backend.storage_fs();
         if !storage_fs.is_dir_empty(root_path)? {
@@ -268,7 +286,6 @@ impl<F: StorageFileSystem> GoCryptFs<FsBackend<F>> {
         // Best effort rollback in case of error
         let rollback = |_: &std::io::Error| {
             let _ = storage_fs.remove("gocryptfs.conf".into());
-            let _ = storage_fs.remove("gocryptfs.diriv".into());
         };
         let (config, master_key) = GoCryptfsConfig::try_new(password)?;
         let json_config = serde_json::to_vec_pretty(&config)?;
@@ -276,17 +293,28 @@ impl<F: StorageFileSystem> GoCryptFs<FsBackend<F>> {
             .put_new("gocryptfs.conf".into(), &json_config)
             .inspect_err(rollback)?;
 
-        // The root directory uses its own DirIV file just like any other directory.
-        let mut root_dir_iv = [0u8; 16];
-        rand::fill(&mut root_dir_iv);
-        storage_fs
-            .put_new("gocryptfs.diriv".into(), &root_dir_iv)
+        backend
+            .entry_storage()
+            .initialize_root_directory(directory_layout)
             .inspect_err(rollback)?;
 
         Ok(master_key)
     }
-    /// Opens a GoCryptFS repository from the provided storage backend.
-    pub fn try_new_with_backend(backend: FsBackend<F>, password: &str) -> Result<Self> {
+    /// Opens a GoCryptFS crypto configuration over an entry representation.
+    pub fn try_new_with_backend(backend: FsBackend<S>, password: &str) -> Result<Self> {
+        Self::try_new_with_backend_and_directory_layout(
+            backend,
+            password,
+            Arc::new(GoCryptFsDirectoryLayout),
+        )
+    }
+
+    /// Opens a GoCryptFS crypto configuration with explicit directory policies.
+    pub fn try_new_with_backend_and_directory_layout(
+        backend: FsBackend<S>,
+        password: &str,
+        directory_layout: Arc<dyn DirectoryLayout>,
+    ) -> Result<Self> {
         let config_data = backend.storage_fs().read_all("gocryptfs.conf".into())?;
         let config: GoCryptfsConfig = serde_json::from_slice(&config_data)?;
 
@@ -295,6 +323,7 @@ impl<F: StorageFileSystem> GoCryptFs<FsBackend<F>> {
             backend,
             master_key.as_slice().try_into()?,
             &config.feature_flags,
+            directory_layout,
         )
     }
 }
@@ -316,7 +345,13 @@ mod tests {
             "LongNames".to_string(),
             "Raw64".to_string(),
         ];
-        derive_keys(MemoryBackend::default(), &master_key, &feature_flags).unwrap()
+        derive_keys(
+            MemoryBackend::default(),
+            &master_key,
+            &feature_flags,
+            Arc::new(GoCryptFsDirectoryLayout),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -379,7 +414,7 @@ mod tests {
         let root = Utf8Path::from_path(temp_dir.path()).unwrap();
 
         let master_key =
-            GoCryptFs::<FsBackend>::init_with_default_params(root, "password").unwrap();
+            GoCryptFs::<GoCryptFsBackend>::init_with_default_params(root, "password").unwrap();
 
         assert_eq!(master_key.len(), 32);
         assert!(root.join("gocryptfs.conf").exists());
@@ -392,7 +427,8 @@ mod tests {
         let root = Utf8Path::from_path(temp_dir.path()).unwrap();
         std::fs::write(root.join("already-there"), b"x").unwrap();
 
-        let err = GoCryptFs::<FsBackend>::init_with_default_params(root, "password").unwrap_err();
+        let err =
+            GoCryptFs::<GoCryptFsBackend>::init_with_default_params(root, "password").unwrap_err();
 
         assert!(err.to_string().contains("must be empty"));
     }
@@ -402,8 +438,8 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let root = Utf8Path::from_path(temp_dir.path()).unwrap();
 
-        GoCryptFs::<FsBackend>::init_with_default_params(root, "password").unwrap();
-        let reopened = GoCryptFs::<FsBackend>::try_new(root, "password").unwrap();
+        GoCryptFs::<GoCryptFsBackend>::init_with_default_params(root, "password").unwrap();
+        let reopened = GoCryptFs::<GoCryptFsBackend>::try_new(root, "password").unwrap();
 
         let header = reopened.generate_cipher_header().unwrap();
         let plain = b"roundtrip after init";

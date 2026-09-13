@@ -1,7 +1,7 @@
 use super::GoCryptFs;
 use crate::core::{
-    CipherPathLayout, EncryptionTranslator, FsBackend, OrIoError, StorageFileSystem, VirtualPath,
-    XattrLayout,
+    EncryptionTranslator, EntryStorage, FsBackend, OrIoError, PathLayout, StorageFileSystemAccess,
+    VirtualPath, XattrLayout,
 };
 
 const XATTR_IV: &[u8] = b"xattr_name_iv_xx";
@@ -51,30 +51,34 @@ fn cipher_xattr_value_to_plain(
         .or_invalid()
 }
 
-impl<F: StorageFileSystem> XattrLayout for GoCryptFs<FsBackend<F>> {
+impl<S> XattrLayout for GoCryptFs<FsBackend<S>>
+where
+    S: EntryStorage + StorageFileSystemAccess,
+{
     fn get_xattr(&self, path: &VirtualPath, name: &str) -> std::io::Result<Vec<u8>> {
         let cipher_path = self.plain_path_to_cipher(path).or_invalid()?;
         let cipher_name = plain_xattr_name_to_cipher(self, name).or_invalid()?;
 
-        let cipher_xattr_value = self.storage_fs().get_xattr(&cipher_path, &cipher_name)?;
+        let cipher_xattr_value = self.entry_storage().get_xattr(&cipher_path, &cipher_name)?;
         cipher_xattr_value_to_plain(self, &cipher_xattr_value).or_invalid()
     }
     fn set_xattr(&self, path: &VirtualPath, name: &str, value: &[u8]) -> std::io::Result<()> {
         let cipher_path = self.plain_path_to_cipher(path).or_invalid()?;
         let cipher_name = plain_xattr_name_to_cipher(self, name).or_invalid()?;
         let cipher_xattr_value = plain_xattr_value_to_cipher(self, value).or_invalid()?;
-        self.storage_fs()
+        self.entry_storage()
             .set_xattr(&cipher_path, &cipher_name, &cipher_xattr_value)
     }
     fn remove_xattr(&self, path: &VirtualPath, name: &str) -> std::io::Result<()> {
         let cipher_path = self.plain_path_to_cipher(path).or_invalid()?;
         let cipher_name = plain_xattr_name_to_cipher(self, name).or_invalid()?;
-        self.storage_fs().remove_xattr(&cipher_path, &cipher_name)
+        self.entry_storage()
+            .remove_xattr(&cipher_path, &cipher_name)
     }
     fn list_xattr(&self, path: &VirtualPath) -> std::io::Result<Vec<String>> {
         let cipher_path = self.plain_path_to_cipher(path).or_invalid()?;
         Ok(self
-            .storage_fs()
+            .entry_storage()
             .list_xattr(&cipher_path)?
             .into_iter()
             .filter_map(|name| cipher_xattr_name_to_plain(self, &name).ok())

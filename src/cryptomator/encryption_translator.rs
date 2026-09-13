@@ -160,10 +160,6 @@ impl<T: Backend> EncryptionTranslator for CryptoMator<T> {
         );
         Ok(out)
     }
-    /// Cryptomator uses UUID strings as directory identifiers.
-    fn generate_diriv(&self) -> Vec<u8> {
-        uuid::Uuid::new_v4().to_string().into()
-    }
     fn plain_block_to_cipher(
         &self,
         header: &[u8],
@@ -259,6 +255,9 @@ mod tests {
 
         CryptoMator {
             backend: MemoryBackend::default(),
+            directory_layout: std::sync::Arc::new(
+                super::super::layout::CryptomatorDirectoryLayout::new(siv_key),
+            ),
             siv_key,
         }
     }

@@ -1,6 +1,7 @@
+use super::{CryptomatorBackend, layout::CryptomatorDirectoryLayout};
 use crate::core::{
-    Backend, CipherPathLayout, EncryptionTranslator, FsBackend, MasterKey, Result,
-    StorageFileSystem, Utf8Path, VirtualPath, VirtualPathBuf, XattrLayout,
+    Backend, DirectoryLayout, EncryptionTranslator, EntryStorage, FsBackend, MasterKey, Result,
+    StorageFileSystem, StorageFileSystemAccess, Utf8Path, VirtualPath, VirtualPathBuf, XattrLayout,
 };
 use aes_gcm::{
     Aes256Gcm,
@@ -17,6 +18,7 @@ use scrypt::{Params as ScryptParams, scrypt};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
+use std::sync::Arc;
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 type HmacSha256 = Hmac<Sha256>;
@@ -242,7 +244,7 @@ impl MasterKey for CryptomatorMasterKeys {
     }
 }
 
-impl CryptoMator<FsBackend> {
+impl CryptoMator<CryptomatorBackend> {
     /// Initializes a new Cryptomator-compatible backend with default parameters.
     pub fn init_with_default_params(
         root_path: &Utf8Path,
@@ -258,11 +260,36 @@ impl CryptoMator<FsBackend> {
     }
 }
 
-impl<F: StorageFileSystem> CryptoMator<FsBackend<F>> {
-    /// Initializes a Cryptomator repository on the provided storage backend.
+impl<S> CryptoMator<FsBackend<S>>
+where
+    S: EntryStorage + StorageFileSystemAccess,
+{
+    /// Initializes the Cryptomator crypto configuration over an entry representation.
     pub fn init_with_backend(
-        backend: &FsBackend<F>,
+        backend: &FsBackend<S>,
         password: &str,
+    ) -> Result<CryptomatorMasterKeys> {
+        let (config, master_keys) = CryptoMatorConfig::try_new(password)?;
+        let directory_layout = CryptomatorDirectoryLayout::new(master_keys.siv_key());
+        Self::write_config_and_initialize_root(backend, &config, master_keys, &directory_layout)
+    }
+
+    /// Initializes the crypto configuration with explicit directory policies.
+    pub fn init_with_backend_and_directory_layout(
+        backend: &FsBackend<S>,
+        password: &str,
+        directory_layout: &dyn DirectoryLayout,
+    ) -> Result<CryptomatorMasterKeys> {
+        let (config, master_keys) = CryptoMatorConfig::try_new(password)?;
+        Self::write_config_and_initialize_root(backend, &config, master_keys, directory_layout)
+    }
+
+    /// Writes the crypto configuration and initializes its root representation.
+    fn write_config_and_initialize_root(
+        backend: &FsBackend<S>,
+        config: &CryptoMatorConfig,
+        master_keys: CryptomatorMasterKeys,
+        directory_layout: &dyn DirectoryLayout,
     ) -> Result<CryptomatorMasterKeys> {
         let root_path = VirtualPath::root();
         let storage_fs = backend.storage_fs();
@@ -273,10 +300,8 @@ impl<F: StorageFileSystem> CryptoMator<FsBackend<F>> {
         let rollback = |_: &std::io::Error| {
             let _ = storage_fs.remove("masterkey.cryptomator".into());
             let _ = storage_fs.remove("vault.cryptomator".into());
-            let _ = storage_fs.remove_dir_all("d".into());
         };
 
-        let (config, master_keys) = CryptoMatorConfig::try_new(password)?;
         let json_config = serde_json::to_vec_pretty(&config)?;
         storage_fs
             .put_new("masterkey.cryptomator".into(), &json_config)
@@ -287,15 +312,16 @@ impl<F: StorageFileSystem> CryptoMator<FsBackend<F>> {
             .put_new("vault.cryptomator".into(), vault.as_bytes())
             .inspect_err(rollback)?;
 
-        let siv_key = master_keys.siv_key();
-        let storage_path = dir_id_to_storage_path(&siv_key, "")?;
-        storage_fs.mkdir_all(&storage_path).inspect_err(rollback)?;
+        backend
+            .entry_storage()
+            .initialize_root_directory(directory_layout)
+            .inspect_err(rollback)?;
 
         Ok(master_keys)
     }
 
-    /// Opens a Cryptomator repository from the provided storage backend.
-    pub fn try_new_with_backend(backend: FsBackend<F>, password: &str) -> Result<Self> {
+    /// Opens a Cryptomator crypto configuration over an entry representation.
+    pub fn try_new_with_backend(backend: FsBackend<S>, password: &str) -> Result<Self> {
         let config_data = backend
             .storage_fs()
             .read_all("masterkey.cryptomator".into())?;
@@ -303,24 +329,37 @@ impl<F: StorageFileSystem> CryptoMator<FsBackend<F>> {
 
         let keys = derive_keys(password, &config)?;
         let siv_key = keys.siv_key();
-        Ok(CryptoMator { backend, siv_key })
+        let directory_layout = Arc::new(CryptomatorDirectoryLayout::new(siv_key));
+        Ok(CryptoMator {
+            backend,
+            directory_layout,
+            siv_key,
+        })
     }
 
-    pub(super) fn mkdir_storage_path(&self, dir_id: &str) -> Result<()> {
-        let full_path = self.dir_id_to_storage_path(dir_id)?;
-        self.storage_fs()
-            .mkdir(full_path.parent().unwrap_or_else(VirtualPath::root), None)?;
-        self.storage_fs().mkdir(&full_path, None)?;
-        Ok(())
-    }
+    /// Opens a Cryptomator crypto configuration with explicit directory policies.
+    pub fn try_new_with_backend_and_directory_layout(
+        backend: FsBackend<S>,
+        password: &str,
+        directory_layout: Arc<dyn DirectoryLayout>,
+    ) -> Result<Self> {
+        let config_data = backend
+            .storage_fs()
+            .read_all("masterkey.cryptomator".into())?;
+        let config: CryptoMatorConfig = serde_json::from_slice(&config_data)?;
 
-    pub(super) fn dir_id_to_storage_path(&self, dir_id: &str) -> Result<VirtualPathBuf> {
-        dir_id_to_storage_path(&self.siv_key, dir_id)
+        let keys = derive_keys(password, &config)?;
+        let siv_key = keys.siv_key();
+        Ok(CryptoMator {
+            backend,
+            directory_layout,
+            siv_key,
+        })
     }
 }
 
 /// Computes the storage directory for a Cryptomator directory identifier.
-fn dir_id_to_storage_path(siv_key: &[u8; 64], dir_id: &str) -> Result<VirtualPathBuf> {
+pub(super) fn dir_id_to_storage_path(siv_key: &[u8; 64], dir_id: &str) -> Result<VirtualPathBuf> {
     use aes_siv::aead::KeyInit;
     let mut siv = Aes256Siv::new_from_slice(siv_key)?;
     let enc_dir_id = siv

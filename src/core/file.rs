@@ -451,24 +451,24 @@ impl<T: EncryptionTranslator, F: FileHandle> SetLen for CryptFsFile<T, F> {
 #[cfg(test)]
 mod tests {
     use crate::core::*;
-    use crate::{CryptoMator, GoCryptFs};
+    use crate::{CryptoMator, CryptomatorBackend, GoCryptFs, GoCryptFsBackend};
     use std::sync::Arc;
     use tempfile::tempdir;
 
     /// Creates a test file backed by a freshly initialized GoCryptFS repository.
     fn open_gocryptfs_test_file() -> (
         tempfile::TempDir,
-        CryptFsFile<GoCryptFs<FsBackend>, std::fs::File>,
+        CryptFsFile<GoCryptFs<GoCryptFsBackend>, std::fs::File>,
     ) {
         let temp_dir = tempdir().unwrap();
         let root = Utf8Path::from_path(temp_dir.path()).unwrap();
-        GoCryptFs::<FsBackend>::init_with_default_params(root, "password").unwrap();
-        let backend = Arc::new(GoCryptFs::<FsBackend>::try_new(root, "password").unwrap());
+        GoCryptFs::<GoCryptFsBackend>::init_with_default_params(root, "password").unwrap();
+        let backend = Arc::new(GoCryptFs::<GoCryptFsBackend>::try_new(root, "password").unwrap());
 
         let mut options = FileOpenOptions::default();
         options.read(true).write(true).create(true);
         let cipher_file = backend
-            .storage_fs()
+            .entry_storage()
             .open_file_with("cipher.bin".into(), options)
             .unwrap();
         let file = CryptFsFile::try_from_file(cipher_file, backend, false).unwrap();
@@ -479,17 +479,18 @@ mod tests {
     /// Creates a test file backed by a freshly initialized Cryptomator repository.
     fn open_cryptomator_test_file() -> (
         tempfile::TempDir,
-        CryptFsFile<CryptoMator<FsBackend>, std::fs::File>,
+        CryptFsFile<CryptoMator<CryptomatorBackend>, std::fs::File>,
     ) {
         let temp_dir = tempdir().unwrap();
         let root = Utf8Path::from_path(temp_dir.path()).unwrap();
-        CryptoMator::<FsBackend>::init_with_default_params(root, "password").unwrap();
-        let backend = Arc::new(CryptoMator::<FsBackend>::try_new(root, "password").unwrap());
+        CryptoMator::<CryptomatorBackend>::init_with_default_params(root, "password").unwrap();
+        let backend =
+            Arc::new(CryptoMator::<CryptomatorBackend>::try_new(root, "password").unwrap());
 
         let mut options = FileOpenOptions::default();
         options.read(true).write(true).create(true);
         let cipher_file = backend
-            .storage_fs()
+            .entry_storage()
             .open_file_with("cipher.bin".into(), options)
             .unwrap();
         let file = CryptFsFile::try_from_file(cipher_file, backend, false).unwrap();
@@ -576,7 +577,8 @@ mod tests {
     #[test]
     fn gocryptfs_aligned_extension_to_next_block_reencodes_previous_last_block() {
         let (_temp_dir, file) = open_gocryptfs_test_file();
-        let block_len = <GoCryptFs<FsBackend> as EncryptionTranslator>::PLAIN_BLOCK_LEN as usize;
+        let block_len =
+            <GoCryptFs<GoCryptFsBackend> as EncryptionTranslator>::PLAIN_BLOCK_LEN as usize;
         let offset_in_block = 64usize;
         let first = sample_data(728);
         let tail = b"tail";
@@ -603,7 +605,8 @@ mod tests {
     #[test]
     fn gocryptfs_aligned_gap_extension_reencodes_previous_last_block() {
         let (_temp_dir, file) = open_gocryptfs_test_file();
-        let block_len = <GoCryptFs<FsBackend> as EncryptionTranslator>::PLAIN_BLOCK_LEN as usize;
+        let block_len =
+            <GoCryptFs<GoCryptFsBackend> as EncryptionTranslator>::PLAIN_BLOCK_LEN as usize;
         let offset_in_block = 64usize;
         let first = sample_data(728);
         let tail = b"tail";
@@ -646,7 +649,8 @@ mod tests {
     #[test]
     fn truncate_from_exact_block_boundary_reencodes_new_partial_last_block() {
         let (_temp_dir, file) = open_gocryptfs_test_file();
-        let block_len = <GoCryptFs<FsBackend> as EncryptionTranslator>::PLAIN_BLOCK_LEN as usize;
+        let block_len =
+            <GoCryptFs<GoCryptFsBackend> as EncryptionTranslator>::PLAIN_BLOCK_LEN as usize;
         let full = sample_data(2 * block_len);
         let truncated_len = block_len + 100;
 
@@ -664,19 +668,23 @@ mod tests {
     fn cryptomator_open_materializes_header_for_empty_file() {
         let temp_dir = tempdir().unwrap();
         let root = Utf8Path::from_path(temp_dir.path()).unwrap();
-        CryptoMator::<FsBackend>::init_with_default_params(root, "password").unwrap();
-        let backend = Arc::new(CryptoMator::<FsBackend>::try_new(root, "password").unwrap());
+        CryptoMator::<CryptomatorBackend>::init_with_default_params(root, "password").unwrap();
+        let backend =
+            Arc::new(CryptoMator::<CryptomatorBackend>::try_new(root, "password").unwrap());
 
         let mut options = FileOpenOptions::default();
         options.read(true).write(true).create(true);
         let cipher_file = backend
-            .storage_fs()
+            .entry_storage()
             .open_file_with("cipher.bin".into(), options)
             .unwrap();
         let _file = CryptFsFile::try_from_file(cipher_file, backend, false).unwrap();
 
         let raw_len = std::fs::metadata(root.join("cipher.bin")).unwrap().len();
-        assert_eq!(raw_len, CryptoMator::<FsBackend>::HEADER_LEN as u64);
+        assert_eq!(
+            raw_len,
+            CryptoMator::<CryptomatorBackend>::HEADER_LEN as u64
+        );
     }
 
     #[test]
