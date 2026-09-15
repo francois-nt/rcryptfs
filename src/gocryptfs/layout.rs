@@ -1,8 +1,8 @@
 use super::GoCryptFs;
 use crate::core::{
     DirectoryContentLayout, DirectoryLayout, EncryptionLayout, EncryptionTranslator, EntryStorage,
-    FsBackend, PathCacheAccess, PathLayout, Result, RootDirectoryToken, StorageFileSystemAccess,
-    VirtualPath, VirtualPathBuf, default_remove_cached_plain_path,
+    FsBackend, PathCacheAccess, PathLayout, Result, RootDirectoryToken, VirtualPath,
+    VirtualPathBuf, default_remove_cached_plain_path,
 };
 
 /// Canonical GoCryptFS directory policy.
@@ -41,7 +41,7 @@ impl DirectoryLayout for GoCryptFsDirectoryLayout {
 
 impl<S> PathLayout for GoCryptFs<FsBackend<S>>
 where
-    S: EntryStorage + StorageFileSystemAccess,
+    S: EntryStorage,
 {
     type EntryStorage = S;
 
@@ -104,16 +104,13 @@ where
     }
 }
 
-impl<S> EncryptionLayout for GoCryptFs<FsBackend<S>> where S: EntryStorage + StorageFileSystemAccess {}
+impl<S: EntryStorage> EncryptionLayout for GoCryptFs<FsBackend<S>> {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::GoCryptFsBackend;
-    use crate::core::{
-        EncryptionLayout, FileType, NativeFileSystem, StorageFileSystem, StorageFileSystemAccess,
-        Utf8Path,
-    };
+    use crate::core::{EncryptionLayout, FileType, NativeFileSystem, StorageFileSystem, Utf8Path};
     use std::sync::Arc;
     use tempfile::tempdir;
 

@@ -1,8 +1,8 @@
 use crate::{
     VirtualPathBuf,
     core::{
-        FileOpenOptions, FileSystem, FileSystemHandler, FileType, Metadata, OpenFileTable,
-        OrIoError, ReadOnlyFileSystem, VirtualPath,
+        FileCapabilities, FileHandle, FileOpenOptions, FileSystem, FileSystemHandler, FileType,
+        Metadata, OpenFileTable, OrIoError, ReadOnlyFileSystem, VirtualPath,
     },
 };
 use fuser_ng::{EntryName, EntryRef, FileAttr, Filesystem, RequestInfo, ResolvedPath};
@@ -99,6 +99,7 @@ impl HasFlag for u32 {
 fn open<T: FileSystem + ?Sized, C: OpenFileTable>(
     backend: &T,
     open_files: &C,
+    inode: u64,
     path: &VirtualPath,
     flags: u32,
     mode: Option<u32>,
@@ -124,12 +125,39 @@ fn open<T: FileSystem + ?Sized, C: OpenFileTable>(
 
     debug!("open options are {:?}", options);
 
-    let file = if options.is_readonly() {
-        backend.open_readonly(path)?
+    let capabilities = if write {
+        FileCapabilities::ReadWrite
     } else {
-        backend.open_file_with(path, options)?
+        FileCapabilities::ReadOnly
     };
-    Ok(open_files.insert(file))
+    open_files.open(inode, capabilities, truncate, || {
+        if options.is_readonly() {
+            backend.open_readonly(path)
+        } else {
+            backend.open_file_with(path, options)
+        }
+    })
+}
+
+/// Accesses an open file by handle first, then by inode when no handle was supplied.
+fn access_open_file<C, U, F>(
+    open_files: &C,
+    inode: Option<u64>,
+    fh: Option<u64>,
+    capabilities: FileCapabilities,
+    handler: F,
+) -> std::io::Result<Option<U>>
+where
+    C: OpenFileTable,
+    F: FnOnce(&dyn FileHandle) -> std::io::Result<U>,
+{
+    if let Some(fh) = fh {
+        return open_files.access(fh, handler).map(Some);
+    }
+    match inode {
+        Some(inode) => open_files.access_inode(inode, capabilities, handler),
+        None => Ok(None),
+    }
 }
 
 impl<C: OpenFileTable> Filesystem for FileSystemHandler<C> {
@@ -212,7 +240,14 @@ impl<C: OpenFileTable> Filesystem for FileSystemHandler<C> {
         debug!("create on path {:?} with flags {flags}", path);
         sanitize!(path, spath);
         //let path = EntryRef::Resolved(path);
-        let fh = open(self.as_ref(), self.open_files(), spath, flags, Some(mode))?;
+        let fh = open(
+            self.as_ref(),
+            self.open_files(),
+            path.ino(),
+            spath,
+            flags,
+            Some(mode),
+        )?;
         debug!("got fh {fh}");
         let attr = self
             .getattr(req, &EntryRef::Resolved(path.clone()), None)?
@@ -277,15 +312,19 @@ impl<C: OpenFileTable> Filesystem for FileSystemHandler<C> {
         mtime: Option<std::time::SystemTime>,
     ) -> fuser_ng::ResultEmpty {
         log::debug!("utimens on {:?} {:?} {:?} {:?}", path, fh, atime, mtime);
+        let inode = path.ino();
         sanitize!(path);
         if atime.is_none() && mtime.is_none() {
             log::error!("error in utimens on {:?} {:?} {:?}", path, atime, mtime);
             return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
         }
-        //if let Some(fh) = fh {
-        //log::error!("flushing file {fh} before utimens");
-        //self.open_files().access(fh, |file| file.flush()).libc_err()?;
-        //}
+        let _ = access_open_file(
+            self.open_files(),
+            Some(inode),
+            fh,
+            FileCapabilities::ReadWrite,
+            |file| file.flush(),
+        )?;
         self.as_ref().set_time(path, atime, mtime)
     }
 
@@ -295,7 +334,14 @@ impl<C: OpenFileTable> Filesystem for FileSystemHandler<C> {
             log::error!("open on path {:?} with flags {flags}", path);
         }
         sanitize!(path, spath);
-        let fh = open(self.as_ref(), self.open_files(), spath, flags, None)?;
+        let fh = open(
+            self.as_ref(),
+            self.open_files(),
+            path.ino(),
+            spath,
+            flags,
+            None,
+        )?;
         Ok((fh, 0))
     }
     fn read(
@@ -346,13 +392,13 @@ impl<C: OpenFileTable> Filesystem for FileSystemHandler<C> {
             "release on path {:?} with fh {fh} flags {flags} lock_owner {lock_owner} flush {flush}",
             path
         );
-        if flush {
-            let _ = self.open_files().access(fh, |f| f.flush());
-        }
-
-        self.open_files().release(fh)?;
-
-        Ok(())
+        let flush_result = if flush {
+            self.open_files().access(fh, |file| file.flush())
+        } else {
+            Ok(())
+        };
+        let release_result = self.open_files().release(fh);
+        flush_result.and(release_result)
     }
     fn fsync(
         &self,
@@ -373,8 +419,7 @@ impl<C: OpenFileTable> Filesystem for FileSystemHandler<C> {
         _lock_owner: u64,
     ) -> fuser_ng::ResultEmpty {
         log::debug!("flush on path {:?} with fh {fh}", path);
-        let _ = self.open_files().access(fh, |file| file.flush());
-        Ok(())
+        self.open_files().access(fh, |file| file.flush())
     }
     fn truncate(
         &self,
@@ -384,12 +429,19 @@ impl<C: OpenFileTable> Filesystem for FileSystemHandler<C> {
         size: u64,
     ) -> fuser_ng::ResultEmpty {
         log::debug!("truncate on path {:?} with fh {:?} size {size}", path, fh);
-        if let Some(fh) = fh {
-            self.open_files().access(fh, |file| file.set_len(size))
-        } else {
-            sanitize!(path);
-            self.as_ref().truncate(path, size)
+        if access_open_file(
+            self.open_files(),
+            Some(path.ino()),
+            fh,
+            FileCapabilities::ReadWrite,
+            |file| file.set_len(size),
+        )?
+        .is_some()
+        {
+            return Ok(());
         }
+        sanitize!(path);
+        self.as_ref().truncate(path, size)
     }
     fn getxattr(
         &self,
@@ -464,13 +516,8 @@ impl<C: OpenFileTable> Filesystem for FileSystemHandler<C> {
     ) -> impl Iterator<Item = fuser_ng::ResultReaddirBatch> + Send + 'static {
         std::iter::once(readdir(self, path))
     }
-    fn getattr(
-        &self,
-        req: RequestInfo,
-        path: &EntryRef,
-        _fh: Option<u64>,
-    ) -> fuser_ng::ResultEntry {
-        getattr(self, req, path)
+    fn getattr(&self, req: RequestInfo, path: &EntryRef, fh: Option<u64>) -> fuser_ng::ResultEntry {
+        getattr(self, self.open_files(), req, path, fh)
     }
     fn access(&self, req: RequestInfo, path: &ResolvedPath, mask: u32) -> fuser_ng::ResultEmpty {
         access(self, req, path, mask)
@@ -525,16 +572,33 @@ fn readdir<T: ReadOnlyFileSystem + ?Sized>(
     Ok(result)
 }
 
-fn getattr<T: ReadOnlyFileSystem + ?Sized>(
+fn getattr<T: ReadOnlyFileSystem + ?Sized, C: OpenFileTable>(
     fs: impl AsRef<T>,
+    open_files: &C,
     _req: RequestInfo,
     path: &EntryRef,
+    fh: Option<u64>,
 ) -> fuser_ng::ResultEntry {
     debug!("gettatr on path {:?}", path);
+    let inode = match path {
+        EntryRef::Resolved(path) => Some(path.ino()),
+        EntryRef::Lookup(_) => None,
+    };
+    let logical_metadata =
+        access_open_file(open_files, inode, fh, FileCapabilities::ReadOnly, |file| {
+            Ok((file.size()?, file.get_modified()?))
+        })?;
     sanitize!(path);
     let attr: (_, FileAttr) = fs
         .as_ref()
         .metadata(path)
+        .map(|mut metadata| {
+            if let Some((size, modified)) = logical_metadata {
+                metadata.len = size;
+                metadata.modified = modified;
+            }
+            metadata
+        })
         .inspect(|m| {
             debug!("metadata ok for path {:?} {m}", path);
         })
@@ -618,7 +682,7 @@ fn read<C: OpenFileTable>(
 
     let mut buffer = vec![0; size as usize];
 
-    if let Ok(bytes_read) = open_files.access(fh, |file| file.read_at(offset, &mut buffer)) {
+    if let Ok(bytes_read) = open_files.access(fh, |file| file.read_all_at(offset, &mut buffer)) {
         debug!("read ok with len {bytes_read}");
         callback(Ok(&buffer[0..bytes_read]))
     } else {

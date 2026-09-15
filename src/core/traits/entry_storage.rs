@@ -1,6 +1,6 @@
 use super::{
-    DirectoryLayout, FileHandle, FileOpenOptions, Metadata, Permissions, StorageFileSystem,
-    VirtualPath, VirtualPathBuf,
+    DirectoryLayout, FileHandle, FileOpenOptions, Metadata, Permissions, VirtualPath,
+    VirtualPathBuf,
 };
 use std::{future::Future, time::SystemTime};
 
@@ -43,15 +43,6 @@ pub struct StorageDirectory {
     pub contents_path: VirtualPathBuf,
     /// Opaque directory identifier or initialization vector.
     pub token: Vec<u8>,
-}
-
-/// Exposes a raw filesystem for repository setup and diagnostics.
-pub trait StorageFileSystemAccess: Send + Sync + 'static {
-    /// Raw filesystem owned by the storage representation.
-    type StorageFs: StorageFileSystem;
-
-    /// Returns the raw filesystem outside the encrypted runtime path.
-    fn storage_fs(&self) -> &Self::StorageFs;
 }
 
 /// Generates selected trivial forwards from an entry storage to its raw filesystem field.

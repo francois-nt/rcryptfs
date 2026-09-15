@@ -1,7 +1,6 @@
 use super::{GoCryptFs, GoCryptFsBackend, layout::GoCryptFsDirectoryLayout};
 use crate::core::{
-    Backend, DirectoryLayout, EntryStorage, FsBackend, Result, StorageFileSystem,
-    StorageFileSystemAccess,
+    Backend, ConfigFileSystemAccess, DirectoryLayout, EntryStorage, FsBackend, Result,
 };
 use crate::{Utf8Path, VirtualPath};
 use aes::{Aes256, cipher::generic_array::GenericArray};
@@ -265,7 +264,7 @@ impl GoCryptFs<GoCryptFsBackend> {
 
 impl<S> GoCryptFs<FsBackend<S>>
 where
-    S: EntryStorage + StorageFileSystemAccess,
+    S: EntryStorage + ConfigFileSystemAccess,
 {
     /// Initializes the GoCryptFS crypto configuration over an entry representation.
     pub fn init_with_backend(backend: &FsBackend<S>, password: &str) -> Result<Vec<u8>> {
@@ -279,17 +278,17 @@ where
         directory_layout: &dyn DirectoryLayout,
     ) -> Result<Vec<u8>> {
         let root_path = VirtualPath::root();
-        let storage_fs = backend.storage_fs();
-        if !storage_fs.is_dir_empty(root_path)? {
+        let config_fs = backend.config_fs();
+        if !config_fs.is_empty()? {
             bail!("Directory {root_path} must be empty!");
         }
         // Best effort rollback in case of error
         let rollback = |_: &std::io::Error| {
-            let _ = storage_fs.remove("gocryptfs.conf".into());
+            let _ = config_fs.remove("gocryptfs.conf".into());
         };
         let (config, master_key) = GoCryptfsConfig::try_new(password)?;
         let json_config = serde_json::to_vec_pretty(&config)?;
-        storage_fs
+        config_fs
             .put_new("gocryptfs.conf".into(), &json_config)
             .inspect_err(rollback)?;
 
@@ -315,7 +314,7 @@ where
         password: &str,
         directory_layout: Arc<dyn DirectoryLayout>,
     ) -> Result<Self> {
-        let config_data = backend.storage_fs().read_all("gocryptfs.conf".into())?;
+        let config_data = backend.config_fs().read_all("gocryptfs.conf".into())?;
         let config: GoCryptfsConfig = serde_json::from_slice(&config_data)?;
 
         let master_key = get_master_key(password, &config)?;
@@ -346,7 +345,7 @@ mod tests {
             "Raw64".to_string(),
         ];
         derive_keys(
-            MemoryBackend::default(),
+            MemoryBackend,
             &master_key,
             &feature_flags,
             Arc::new(GoCryptFsDirectoryLayout),

@@ -8,28 +8,41 @@ use std::{fmt::Display, time::SystemTime};
 
 /// Provides positioned reads without changing a shared file cursor.
 pub trait ReadAt {
+    /// Performs one positioned read and returns the number of bytes read.
+    ///
+    /// A successful read may return fewer bytes than the buffer can hold.
     fn read_at(&self, pos: u64, buf: &mut [u8]) -> std::io::Result<usize>;
-    /// Reads exactly `buf.len()` bytes unless EOF is reached first.
-    fn read_exact_at(&self, mut pos: u64, mut buf: &mut [u8]) -> std::io::Result<()> {
+
+    /// Repeats positioned reads until the buffer is full, EOF is reached, or an error occurs.
+    fn read_all_at(&self, mut pos: u64, mut buf: &mut [u8]) -> std::io::Result<usize> {
+        let requested = buf.len();
         while !buf.is_empty() {
             match self.read_at(pos, buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    let tmp = buf;
-                    buf = &mut tmp[n..];
-                    pos += n as u64;
+                    buf = &mut buf[n..];
+                    if !buf.is_empty() {
+                        pos = pos
+                            .checked_add(n as u64)
+                            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?;
+                    }
                 }
-                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
             }
         }
-        if !buf.is_empty() {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "failed to fill whole buffer",
-            ))
-        } else {
+        Ok(requested - buf.len())
+    }
+
+    /// Fills the entire buffer or returns an error, including unexpected EOF.
+    fn read_exact_at(&self, pos: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        let expected = buf.len();
+        let actual = self.read_all_at(pos, buf)?;
+
+        if actual == expected {
             Ok(())
+        } else {
+            Err(std::io::ErrorKind::UnexpectedEof.into())
         }
     }
 }
@@ -94,9 +107,33 @@ pub trait FileHandle:
 {
 }
 
+/// Access capabilities required from a physical file handle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileCapabilities {
+    /// The handle only needs to support reads.
+    ReadOnly,
+    /// The handle must support both reads and writes.
+    ReadWrite,
+}
+
+impl FileCapabilities {
+    /// Returns whether these capabilities cover another open request.
+    pub fn contains(self, required: Self) -> bool {
+        matches!(self, Self::ReadWrite) || self == required
+    }
+}
+
 impl<T: ReadAt + ?Sized> ReadAt for Box<T> {
     fn read_at(&self, pos: u64, buf: &mut [u8]) -> std::io::Result<usize> {
         (**self).read_at(pos, buf)
+    }
+
+    fn read_all_at(&self, pos: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+        (**self).read_all_at(pos, buf)
+    }
+
+    fn read_exact_at(&self, pos: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        (**self).read_exact_at(pos, buf)
     }
 }
 
@@ -147,8 +184,20 @@ impl<T> FileHandle for T where
 
 /// Maps stable identifiers to open file handles.
 pub trait OpenFileTable: Default {
-    /// Inserts a file and returns its unique handle identifier.
-    fn insert(&self, file: Box<dyn FileHandle>) -> u64;
+    /// Opens an inode and returns a unique identifier for this open reference.
+    ///
+    /// Implementations may share one physical handle between references to the
+    /// same inode. `replace_existing` requests a fresh shared handle after an
+    /// operation such as truncation has reset the underlying file.
+    fn open<F>(
+        &self,
+        inode: u64,
+        capabilities: FileCapabilities,
+        replace_existing: bool,
+        opener: F,
+    ) -> std::io::Result<u64>
+    where
+        F: FnOnce() -> std::io::Result<Box<dyn FileHandle>>;
 
     /// Releases an open file handle.
     fn release(&self, id: u64) -> std::io::Result<()>;
@@ -159,6 +208,16 @@ pub trait OpenFileTable: Default {
         id: u64,
         handler: F,
     ) -> std::io::Result<U>;
+
+    /// Accesses a shared inode handle when it provides the required capabilities.
+    fn access_inode<U, F: FnOnce(&dyn FileHandle) -> std::io::Result<U>>(
+        &self,
+        _inode: u64,
+        _capabilities: FileCapabilities,
+        _handler: F,
+    ) -> std::io::Result<Option<U>> {
+        Ok(None)
+    }
 }
 
 /// Trait for read-only filesystem operations.
@@ -399,5 +458,47 @@ impl<T> ErrorMapper<T> for Option<T> {
     }
     fn or_libc_error(self, error: i32) -> Result<T, i32> {
         self.ok_or(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ReadAt;
+
+    struct ShortReader(&'static [u8]);
+
+    impl ReadAt for ShortReader {
+        fn read_at(&self, pos: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+            let Ok(pos) = usize::try_from(pos) else {
+                return Ok(0);
+            };
+            let Some(source) = self.0.get(pos..) else {
+                return Ok(0);
+            };
+            let len = source.len().min(buf.len()).min(2);
+            buf[..len].copy_from_slice(&source[..len]);
+            Ok(len)
+        }
+    }
+
+    #[test]
+    fn read_all_at_retries_short_reads() {
+        let reader = ShortReader(b"abcdef");
+        let mut buffer = [0; 5];
+
+        let bytes_read = reader.read_all_at(1, &mut buffer).unwrap();
+
+        assert_eq!(bytes_read, buffer.len());
+        assert_eq!(&buffer, b"bcdef");
+    }
+
+    #[test]
+    fn read_exact_at_reports_unexpected_eof_after_short_reads() {
+        let reader = ShortReader(b"abc");
+        let mut buffer = [0; 4];
+
+        let error = reader.read_exact_at(0, &mut buffer).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
     }
 }

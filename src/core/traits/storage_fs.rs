@@ -51,6 +51,18 @@ pub trait StorageFileSystem: Send + Sync + 'static {
         permissions: Option<Permissions>,
     ) -> std::io::Result<Metadata>;
     fn rename(&self, old_path: &VirtualPath, new_path: &VirtualPath) -> std::io::Result<()>;
+    /// Atomically renames an entry and fails if the destination already exists.
+    fn rename_no_replace(
+        &self,
+        old_path: &VirtualPath,
+        new_path: &VirtualPath,
+    ) -> std::io::Result<()> {
+        let _ = (old_path, new_path);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "atomic no-replace rename is not supported",
+        ))
+    }
     /// Removes a non-directory entry.
     fn remove(&self, path: &VirtualPath) -> std::io::Result<()>;
     /// Removes an empty directory.
@@ -92,9 +104,21 @@ pub trait StorageFileSystem: Send + Sync + 'static {
         options.read(true);
         self.open_file_with(path, options)?.read_at(offset, buffer)
     }
+    /// Repeats positioned reads until the buffer is full, EOF is reached, or an error occurs.
+    fn read_all_at(
+        &self,
+        path: &VirtualPath,
+        offset: u64,
+        buffer: &mut [u8],
+    ) -> std::io::Result<usize> {
+        let mut options = FileOpenOptions::default();
+        options.read(true);
+        self.open_file_with(path, options)?
+            .read_all_at(offset, buffer)
+    }
     fn read(&self, path: &VirtualPath, offset: u64, size: usize) -> std::io::Result<Vec<u8>> {
         let mut buffer = vec![0; size];
-        let bytes_read = self.read_at(path, offset, &mut buffer)?;
+        let bytes_read = self.read_all_at(path, offset, &mut buffer)?;
         buffer.truncate(bytes_read);
         Ok(buffer)
     }

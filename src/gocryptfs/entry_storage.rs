@@ -1,8 +1,8 @@
 use crate::core::{
-    DirectoryLayout, EntryStorage, FileType, FsBackend, NativeFileSystem, OrIoError, Permissions,
-    RootDirectoryToken, StorageDirEntry, StorageDirectory, StorageEntryKind, StorageFileSystem,
-    StorageFileSystemAccess, StorageMetadata, Utf8Path, Utf8PathBuf, VirtualPath, VirtualPathBuf,
-    forward_storage_fs_operations, temp_file_path,
+    ConfigFileSystem, ConfigFileSystemAccess, DirectoryLayout, EntryStorage, FileType, FsBackend,
+    NativeFileSystem, OrIoError, Permissions, RootDirectoryToken, StorageDirEntry,
+    StorageDirectory, StorageEntryKind, StorageFileSystem, StorageMetadata, Utf8Path, Utf8PathBuf,
+    VirtualPath, VirtualPathBuf, forward_storage_fs_operations, temp_file_path,
 };
 
 const GOCRYPTFS_DIRIV: &str = "gocryptfs.diriv";
@@ -36,9 +36,10 @@ impl<F: StorageFileSystem> GoCryptFsEntryStorage<F> {
         Self { storage_fs }
     }
 
-    /// Returns the wrapped raw storage filesystem.
-    pub fn into_inner(self) -> F {
-        self.storage_fs
+    /// Returns the raw filesystem for representation-level tests.
+    #[cfg(test)]
+    pub(crate) fn storage_fs(&self) -> &F {
+        &self.storage_fs
     }
 
     /// Resolves and validates the configured token for one directory.
@@ -88,11 +89,31 @@ impl From<&Utf8Path> for FsBackend<GoCryptFsEntryStorage<NativeFileSystem>> {
     }
 }
 
-impl<F: StorageFileSystem> StorageFileSystemAccess for GoCryptFsEntryStorage<F> {
-    type StorageFs = F;
+impl<F: StorageFileSystem> ConfigFileSystem for GoCryptFsEntryStorage<F> {
+    fn is_empty(&self) -> std::io::Result<bool> {
+        self.storage_fs.is_dir_empty(VirtualPath::root())
+    }
 
-    fn storage_fs(&self) -> &Self::StorageFs {
-        &self.storage_fs
+    fn exists(&self, path: &VirtualPath) -> std::io::Result<bool> {
+        self.storage_fs.exists(path)
+    }
+
+    fn read_all(&self, path: &VirtualPath) -> std::io::Result<Vec<u8>> {
+        self.storage_fs.read_all(path)
+    }
+
+    fn put_new(&self, path: &VirtualPath, data: &[u8]) -> std::io::Result<()> {
+        self.storage_fs.put_new(path, data)
+    }
+
+    fn remove(&self, path: &VirtualPath) -> std::io::Result<()> {
+        self.storage_fs.remove(path)
+    }
+}
+
+impl<F: StorageFileSystem> ConfigFileSystemAccess for GoCryptFsEntryStorage<F> {
+    fn config_fs(&self) -> &dyn ConfigFileSystem {
+        self
     }
 }
 

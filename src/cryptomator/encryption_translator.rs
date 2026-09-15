@@ -254,7 +254,7 @@ mod tests {
         }
 
         CryptoMator {
-            backend: MemoryBackend::default(),
+            backend: MemoryBackend,
             directory_layout: std::sync::Arc::new(
                 super::super::layout::CryptomatorDirectoryLayout::new(siv_key),
             ),

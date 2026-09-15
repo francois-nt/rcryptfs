@@ -1,7 +1,7 @@
 use super::{CryptoMator, CryptomatorBackend};
 use crate::core::{
-    Backend, BackendProvider, DirectoryLayout, EncryptedFileSystem, EntryStorage, FileCachePolicy,
-    FileSystem, FsBackend, MasterKey, Result, StorageFileSystem, StorageFileSystemAccess,
+    BackendProvider, ConfigFileSystemAccess, DirectoryLayout, EncryptedFileSystem, EntryStorage,
+    FileCachePolicy, FileSystem, FsBackend, MasterKey, Result,
 };
 use crate::{Utf8Path, register_provider};
 use std::sync::Arc;
@@ -15,10 +15,10 @@ impl CryptoMatorBuilder {
     /// Checks whether an entry representation contains a Cryptomator crypto configuration.
     pub fn probe_backend<S>(backend: &FsBackend<S>) -> bool
     where
-        S: EntryStorage + StorageFileSystemAccess,
+        S: EntryStorage + ConfigFileSystemAccess,
     {
         backend
-            .storage_fs()
+            .config_fs()
             .exists("vault.cryptomator".into())
             .unwrap_or(false)
     }
@@ -30,7 +30,7 @@ impl CryptoMatorBuilder {
         cache_policy: Box<dyn FileCachePolicy>,
     ) -> Result<Box<dyn FileSystem>>
     where
-        S: EntryStorage + StorageFileSystemAccess,
+        S: EntryStorage + ConfigFileSystemAccess,
     {
         let cryptfs: EncryptedFileSystem<CryptoMator<FsBackend<S>>> = (
             CryptoMator::try_new_with_backend(backend, password)?,
@@ -48,7 +48,7 @@ impl CryptoMatorBuilder {
         cache_policy: Box<dyn FileCachePolicy>,
     ) -> Result<Box<dyn FileSystem>>
     where
-        S: EntryStorage + StorageFileSystemAccess,
+        S: EntryStorage + ConfigFileSystemAccess,
     {
         let cryptfs: EncryptedFileSystem<CryptoMator<FsBackend<S>>> = (
             CryptoMator::try_new_with_backend_and_directory_layout(
@@ -68,7 +68,7 @@ impl CryptoMatorBuilder {
         password: &str,
     ) -> Result<Box<dyn MasterKey>>
     where
-        S: EntryStorage + StorageFileSystemAccess,
+        S: EntryStorage + ConfigFileSystemAccess,
     {
         CryptoMator::init_with_backend(backend, password)
             .map(|keys| -> Box<dyn MasterKey> { Box::new(keys) })
@@ -81,7 +81,7 @@ impl CryptoMatorBuilder {
         directory_layout: &dyn DirectoryLayout,
     ) -> Result<Box<dyn MasterKey>>
     where
-        S: EntryStorage + StorageFileSystemAccess,
+        S: EntryStorage + ConfigFileSystemAccess,
     {
         CryptoMator::init_with_backend_and_directory_layout(backend, password, directory_layout)
             .map(|keys| -> Box<dyn MasterKey> { Box::new(keys) })

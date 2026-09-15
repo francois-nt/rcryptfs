@@ -1,8 +1,5 @@
 use super::super::CipherPathCacheEntry;
-use super::{
-    EntryStorage, FsDirEntry, Metadata, Permissions, Result, StorageFileSystem, VirtualPath,
-    VirtualPathBuf,
-};
+use super::{EntryStorage, FsDirEntry, Metadata, Permissions, Result, VirtualPath, VirtualPathBuf};
 use super::{
     default_create_symlink, default_list_dir_plain_names, default_metadata, default_mkdir,
     default_mknode, default_read_symlink, default_remove, default_remove_dir, default_rename,
@@ -11,10 +8,7 @@ use super::{
 use std::sync::Arc;
 use std::{collections::BTreeMap, time::SystemTime};
 /// Marker trait for backend implementations.
-pub trait Backend {
-    type StorageFs: StorageFileSystem;
-    fn storage_fs(&self) -> &Self::StorageFs;
-}
+pub trait Backend {}
 
 /// Provides synchronized access to the plain-to-cipher path cache.
 pub trait PathCacheAccess {

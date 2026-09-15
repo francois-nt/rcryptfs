@@ -87,6 +87,87 @@ fn set_times_nofollow(
     }
 }
 
+/// Atomically renames an entry without replacing an existing destination.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn rename_noreplace(old_path: &Utf8Path, new_path: &Utf8Path) -> std::io::Result<()> {
+    let old_path = CString::new(old_path.as_str())
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    let new_path = CString::new(new_path.as_str())
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    // SAFETY: both paths are valid NUL-terminated strings for the duration of the call.
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            old_path.as_ptr(),
+            libc::AT_FDCWD,
+            new_path.as_ptr(),
+            libc::RENAME_NOREPLACE as _,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// Atomically renames an entry without replacing an existing destination.
+#[cfg(target_vendor = "apple")]
+fn rename_noreplace(old_path: &Utf8Path, new_path: &Utf8Path) -> std::io::Result<()> {
+    let old_path = CString::new(old_path.as_str())
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    let new_path = CString::new(new_path.as_str())
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    // SAFETY: both paths are valid NUL-terminated strings for the duration of the call.
+    let result =
+        unsafe { libc::renamex_np(old_path.as_ptr(), new_path.as_ptr(), libc::RENAME_EXCL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// Reports the lack of an atomic no-replace rename primitive on this platform.
+#[cfg(all(
+    unix,
+    not(any(target_os = "linux", target_os = "android")),
+    not(target_vendor = "apple")
+))]
+fn rename_noreplace(_old_path: &Utf8Path, _new_path: &Utf8Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "atomic no-replace rename is not supported on this Unix platform",
+    ))
+}
+
+/// Atomically renames an entry without replacing an existing destination.
+#[cfg(windows)]
+fn rename_noreplace(old_path: &Utf8Path, new_path: &Utf8Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+
+    let old_path: Vec<u16> = old_path
+        .as_std_path()
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let new_path: Vec<u16> = new_path
+        .as_std_path()
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    // SAFETY: both vectors are NUL-terminated and remain alive during the call.
+    let result = unsafe { MoveFileExW(old_path.as_ptr(), new_path.as_ptr(), 0) };
+    if result != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
 /// Updates selected timestamps without following the final symbolic link.
 #[cfg(windows)]
 fn set_times_nofollow(
@@ -149,28 +230,10 @@ impl Size for std::fs::File {
 
 impl ReadAt for std::fs::File {
     fn read_at(&self, pos: u64, buf: &mut [u8]) -> std::io::Result<usize> {
-        let mut total = 0;
-
-        while total < buf.len() {
-            let offset = pos
-                .checked_add(total as u64)
-                .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?;
-
-            #[cfg(unix)]
-            let result = std::os::unix::fs::FileExt::read_at(self, &mut buf[total..], offset);
-
-            #[cfg(windows)]
-            let result = std::os::windows::fs::FileExt::seek_read(self, &mut buf[total..], offset);
-
-            match result {
-                Ok(0) => break, // EOF
-                Ok(n) => total += n,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e),
-            }
-        }
-
-        Ok(total)
+        #[cfg(unix)]
+        return std::os::unix::fs::FileExt::read_at(self, buf, pos);
+        #[cfg(windows)]
+        return std::os::windows::fs::FileExt::seek_read(self, buf, pos);
     }
 }
 
@@ -277,6 +340,14 @@ impl StorageFileSystem for NativeFileSystem {
 
     fn rename(&self, old_path: &VirtualPath, new_path: &VirtualPath) -> std::io::Result<()> {
         std::fs::rename(self.resolve(old_path)?, self.resolve(new_path)?)
+    }
+
+    fn rename_no_replace(
+        &self,
+        old_path: &VirtualPath,
+        new_path: &VirtualPath,
+    ) -> std::io::Result<()> {
+        rename_noreplace(&self.resolve(old_path)?, &self.resolve(new_path)?)
     }
 
     fn remove(&self, path: &VirtualPath) -> std::io::Result<()> {
@@ -438,6 +509,39 @@ mod tests {
         fs.truncate(path, 3).unwrap();
 
         assert_eq!(fs.read_all(path).unwrap(), b"abc");
+    }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        windows
+    ))]
+    #[test]
+    fn native_fs_rename_no_replace_preserves_existing_directory() {
+        let temp_dir = tempdir().unwrap();
+        let root = Utf8Path::from_path(temp_dir.path()).unwrap().to_owned();
+        let fs = NativeFileSystem::new(root);
+        let source = VirtualPath::new("source");
+        let destination = VirtualPath::new("destination");
+
+        fs.mkdir(source, None).unwrap();
+        fs.put(&source.join("child"), b"source").unwrap();
+        fs.mkdir(destination, None).unwrap();
+        fs.put(&destination.join("child"), b"destination").unwrap();
+
+        let error = fs.rename_no_replace(source, destination).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(fs.read_all(&source.join("child")).unwrap(), b"source");
+        assert_eq!(
+            fs.read_all(&destination.join("child")).unwrap(),
+            b"destination"
+        );
+
+        fs.remove_dir_all(destination).unwrap();
+        fs.rename_no_replace(source, destination).unwrap();
+        assert!(!fs.exists(source).unwrap());
+        assert_eq!(fs.read_all(&destination.join("child")).unwrap(), b"source");
     }
 
     #[cfg(unix)]

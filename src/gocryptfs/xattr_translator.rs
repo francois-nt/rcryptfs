@@ -1,7 +1,6 @@
 use super::GoCryptFs;
 use crate::core::{
-    EncryptionTranslator, EntryStorage, FsBackend, OrIoError, PathLayout, StorageFileSystemAccess,
-    VirtualPath, XattrLayout,
+    EncryptionTranslator, EntryStorage, FsBackend, OrIoError, PathLayout, VirtualPath, XattrLayout,
 };
 
 const XATTR_IV: &[u8] = b"xattr_name_iv_xx";
@@ -53,7 +52,7 @@ fn cipher_xattr_value_to_plain(
 
 impl<S> XattrLayout for GoCryptFs<FsBackend<S>>
 where
-    S: EntryStorage + StorageFileSystemAccess,
+    S: EntryStorage,
 {
     fn get_xattr(&self, path: &VirtualPath, name: &str) -> std::io::Result<Vec<u8>> {
         let cipher_path = self.plain_path_to_cipher(path).or_invalid()?;

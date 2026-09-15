@@ -1,7 +1,7 @@
 use super::{CryptomatorBackend, layout::CryptomatorDirectoryLayout};
 use crate::core::{
-    Backend, DirectoryLayout, EncryptionTranslator, EntryStorage, FsBackend, MasterKey, Result,
-    StorageFileSystem, StorageFileSystemAccess, Utf8Path, VirtualPath, VirtualPathBuf, XattrLayout,
+    Backend, ConfigFileSystemAccess, DirectoryLayout, EncryptionTranslator, EntryStorage,
+    FsBackend, MasterKey, Result, Utf8Path, VirtualPath, VirtualPathBuf, XattrLayout,
 };
 use aes_gcm::{
     Aes256Gcm,
@@ -262,7 +262,7 @@ impl CryptoMator<CryptomatorBackend> {
 
 impl<S> CryptoMator<FsBackend<S>>
 where
-    S: EntryStorage + StorageFileSystemAccess,
+    S: EntryStorage + ConfigFileSystemAccess,
 {
     /// Initializes the Cryptomator crypto configuration over an entry representation.
     pub fn init_with_backend(
@@ -292,23 +292,23 @@ where
         directory_layout: &dyn DirectoryLayout,
     ) -> Result<CryptomatorMasterKeys> {
         let root_path = VirtualPath::root();
-        let storage_fs = backend.storage_fs();
-        if !storage_fs.is_dir_empty(root_path)? {
+        let config_fs = backend.config_fs();
+        if !config_fs.is_empty()? {
             bail!("Directory {root_path} must be empty!");
         }
 
         let rollback = |_: &std::io::Error| {
-            let _ = storage_fs.remove("masterkey.cryptomator".into());
-            let _ = storage_fs.remove("vault.cryptomator".into());
+            let _ = config_fs.remove("masterkey.cryptomator".into());
+            let _ = config_fs.remove("vault.cryptomator".into());
         };
 
         let json_config = serde_json::to_vec_pretty(&config)?;
-        storage_fs
+        config_fs
             .put_new("masterkey.cryptomator".into(), &json_config)
             .inspect_err(rollback)?;
 
         let vault = generate_vault_cryptomator(&master_keys, "SIV_GCM", 220)?;
-        storage_fs
+        config_fs
             .put_new("vault.cryptomator".into(), vault.as_bytes())
             .inspect_err(rollback)?;
 
@@ -323,7 +323,7 @@ where
     /// Opens a Cryptomator crypto configuration over an entry representation.
     pub fn try_new_with_backend(backend: FsBackend<S>, password: &str) -> Result<Self> {
         let config_data = backend
-            .storage_fs()
+            .config_fs()
             .read_all("masterkey.cryptomator".into())?;
         let config: CryptoMatorConfig = serde_json::from_slice(&config_data)?;
 
@@ -344,7 +344,7 @@ where
         directory_layout: Arc<dyn DirectoryLayout>,
     ) -> Result<Self> {
         let config_data = backend
-            .storage_fs()
+            .config_fs()
             .read_all("masterkey.cryptomator".into())?;
         let config: CryptoMatorConfig = serde_json::from_slice(&config_data)?;
 

@@ -76,7 +76,7 @@ impl<T: EncryptionTranslator, F: FileHandle> CryptFsFile<T, F> {
         let mut cipher_buffer = vec![0; T::CIPHER_BLOCK_LEN as usize];
         let buffer_len = plain_buffer.len();
 
-        let bytes_read = self.cipher_file.read_at(
+        let bytes_read = self.cipher_file.read_all_at(
             T::HEADER_LEN as u64 + block_no * T::CIPHER_BLOCK_LEN,
             &mut cipher_buffer,
         )?;

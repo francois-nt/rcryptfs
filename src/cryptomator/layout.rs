@@ -1,8 +1,8 @@
 use super::CryptoMator;
 use crate::core::{
     DirectoryContentLayout, DirectoryLayout, EncryptionLayout, EncryptionTranslator, EntryStorage,
-    FsBackend, OrIoError, PathCacheAccess, PathLayout, Result, RootDirectoryToken,
-    StorageFileSystemAccess, VirtualPath, VirtualPathBuf, default_remove_cached_plain_path,
+    FsBackend, OrIoError, PathCacheAccess, PathLayout, Result, RootDirectoryToken, VirtualPath,
+    VirtualPathBuf, default_remove_cached_plain_path,
 };
 
 /// Canonical Cryptomator directory policy derived from the SIV key.
@@ -51,7 +51,7 @@ fn folder_path_to_cipher_and_dirid<S>(
     plain_path: &VirtualPath,
 ) -> Result<(VirtualPathBuf, Vec<u8>)>
 where
-    S: EntryStorage + StorageFileSystemAccess,
+    S: EntryStorage,
 {
     this.backend.with_path_cache(|cache| {
         if let Some((dir_id, cipher_path)) = cache.get(plain_path.as_str()) {
@@ -106,7 +106,7 @@ where
 
 impl<S> PathLayout for CryptoMator<FsBackend<S>>
 where
-    S: EntryStorage + StorageFileSystemAccess,
+    S: EntryStorage,
 {
     type EntryStorage = S;
 
@@ -134,18 +134,14 @@ where
     }
 }
 
-impl<S> EncryptionLayout for CryptoMator<FsBackend<S>> where
-    S: EntryStorage + StorageFileSystemAccess
-{
-}
+impl<S: EntryStorage> EncryptionLayout for CryptoMator<FsBackend<S>> {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::CryptomatorBackend;
     use crate::core::{
-        EncryptionLayout, FileType, NativeFileSystem, PathLayout, StorageFileSystem,
-        StorageFileSystemAccess, Utf8Path,
+        EncryptionLayout, FileType, NativeFileSystem, PathLayout, StorageFileSystem, Utf8Path,
     };
     use std::sync::Arc;
     use tempfile::tempdir;

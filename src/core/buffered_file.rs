@@ -1,5 +1,6 @@
 use super::{FileHandle, ModifiedTime, OrIoError, ReadAt, SetLen, SetSync, Size, WriteAt};
 use parking_lot::Mutex;
+use std::time::SystemTime;
 
 struct State {
     // next expected position if sequential writing
@@ -8,6 +9,7 @@ struct State {
     buffer_offset: u64,
     buffer_len: usize,
     buffer: Vec<u8>,
+    modified: Option<SystemTime>,
 }
 
 /// Buffers sequential plain-text writes so full encryption blocks can be flushed together.
@@ -26,6 +28,7 @@ impl<W> BufferedFile<W> {
                 buffer_offset: 0,
                 buffer_len: 0,
                 buffer: vec![0; block_len],
+                modified: None,
             }
             .into(),
             block_len,
@@ -41,16 +44,17 @@ impl<W: FileHandle> BufferedFile<W> {
         drop(state);
         Ok(())
     }
-    /// Writes the current staged block and restores the backing file modification time.
+    /// Writes staged data and then persists its logical modification time.
     fn flush_staging_locked(&self, state: &mut State) -> std::io::Result<()> {
-        if state.buffer_len == 0 {
-            return Ok(());
+        if state.buffer_len != 0 {
+            self.inner
+                .write_all_at(state.buffer_offset, &state.buffer[..state.buffer_len])?;
+            state.buffer_len = 0;
         }
-        let modified = self.inner.get_modified()?;
-        self.inner
-            .write_all_at(state.buffer_offset, &state.buffer[..state.buffer_len])?;
-        self.inner.set_modified_time(modified)?;
-        state.buffer_len = 0;
+        if let Some(modified) = state.modified {
+            self.inner.set_modified_time(modified)?;
+            state.modified = None;
+        }
         Ok(())
     }
 
@@ -69,7 +73,7 @@ impl<W: FileHandle> ReadAt for BufferedFile<W> {
 
         let state = self.state.lock();
         if state.buffer_len == 0 {
-            return self.inner.read_at(pos, buf);
+            return self.inner.read_all_at(pos, buf);
         }
 
         let read_end = pos.saturating_add(buf.len() as u64);
@@ -78,10 +82,10 @@ impl<W: FileHandle> ReadAt for BufferedFile<W> {
 
         // If the requested range does not touch staged data, read directly from the inner file.
         if read_end <= staged_start || staged_end <= pos {
-            return self.inner.read_at(pos, buf);
+            return self.inner.read_all_at(pos, buf);
         }
 
-        let bytes_read = self.inner.read_at(pos, buf)?;
+        let bytes_read = self.inner.read_all_at(pos, buf)?;
 
         // Overlay the staged bytes on top of the physical read result.
         let overlap_start = pos.max(staged_start);
@@ -117,16 +121,21 @@ impl<W: FileHandle> Size for BufferedFile<W> {
 }
 
 impl<W: FileHandle> ModifiedTime for BufferedFile<W> {
-    /// Returns the backing file modification time.
-    fn get_modified(&self) -> std::io::Result<std::time::SystemTime> {
-        let _state = self.state.lock();
-        self.inner.get_modified()
+    /// Returns the logical modification time, including staged writes.
+    fn get_modified(&self) -> std::io::Result<SystemTime> {
+        let state = self.state.lock();
+        state.modified.map_or_else(|| self.inner.get_modified(), Ok)
     }
 
-    /// Updates the backing file modification time without racing a flush.
-    fn set_modified_time(&self, modified_time: std::time::SystemTime) -> std::io::Result<()> {
-        let _state = self.state.lock();
-        self.inner.set_modified_time(modified_time)
+    /// Updates the logical modification time without forcing staged data to disk.
+    fn set_modified_time(&self, modified_time: SystemTime) -> std::io::Result<()> {
+        let mut state = self.state.lock();
+        if state.buffer_len != 0 || state.modified.is_some() {
+            state.modified = Some(modified_time);
+            Ok(())
+        } else {
+            self.inner.set_modified_time(modified_time)
+        }
     }
 }
 
@@ -146,8 +155,12 @@ impl<W: FileHandle> SetSync for BufferedFile<W> {
 
 impl<W: FileHandle> WriteAt for BufferedFile<W> {
     fn write_at(&self, pos: u64, mut data: &[u8]) -> std::io::Result<usize> {
+        if data.is_empty() {
+            return Ok(0);
+        }
+
         let mut state = self.state.lock();
-        let mut has_written = false;
+        let modified = SystemTime::now();
         match state.sequential_end {
             None => state.sequential_end = Some(pos),
             Some(end) if end != pos => {
@@ -175,7 +188,7 @@ impl<W: FileHandle> WriteAt for BufferedFile<W> {
                     if let Err(e) = self.inner.write_all_at(off, chunk) {
                         return if done > 0 { Ok(done) } else { Err(e) };
                     }
-                    has_written = true;
+                    state.modified = None;
                     off += self.block_len as u64;
                 }
 
@@ -199,8 +212,10 @@ impl<W: FileHandle> WriteAt for BufferedFile<W> {
                 .min(self.block_len - state.buffer_len);
 
             let prev_len = state.buffer_len;
+            let prev_modified = state.modified;
             state.buffer[prev_len..prev_len + take].copy_from_slice(&data[..take]);
             state.buffer_len += take;
+            state.modified = Some(modified);
 
             data = &data[take..];
             done += take;
@@ -213,17 +228,14 @@ impl<W: FileHandle> WriteAt for BufferedFile<W> {
                     .write_all_at(state.buffer_offset, &state.buffer[..state.buffer_len])
                 {
                     state.buffer_len = prev_len;
+                    state.modified = prev_modified;
                     state.sequential_end = Some(state.buffer_offset + state.buffer_len as u64);
                     done -= take;
                     return if done > 0 { Ok(done) } else { Err(e) };
                 }
-                has_written = true;
                 state.buffer_len = 0;
+                state.modified = None;
             }
-        }
-        if !has_written {
-            // no physical writing, but we change the modification time as if there had been one.
-            let _ = self.inner.set_modified_time(std::time::SystemTime::now());
         }
 
         Ok(done)
@@ -248,6 +260,26 @@ mod tests {
 
         assert_eq!(buffered.size().unwrap(), 103);
         assert_file_handle(&buffered);
+    }
+
+    #[test]
+    fn modification_time_remains_logical_until_flush() {
+        let file = tempfile::tempfile().unwrap();
+        let initial = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        let requested = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(2_000_000);
+        file.set_modified_time(initial).unwrap();
+        let buffered = BufferedFile::new(file, 16);
+
+        buffered.write_all_at(0, b"abc").unwrap();
+        assert!(buffered.get_modified().unwrap() > initial);
+        assert_eq!(buffered.inner.get_modified().unwrap(), initial);
+
+        buffered.set_modified_time(requested).unwrap();
+        assert_eq!(buffered.get_modified().unwrap(), requested);
+        assert_eq!(buffered.inner.get_modified().unwrap(), initial);
+
+        buffered.flush().unwrap();
+        assert_eq!(buffered.inner.get_modified().unwrap(), requested);
     }
 
     fn assert_file_handle(_file: &impl FileHandle) {}

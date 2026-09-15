@@ -1,7 +1,4 @@
-use super::NativeFileSystem;
-use crate::core::{
-    Backend, EntryStorage, PathCacheAccess, StorageFileSystemAccess, VirtualPathBuf,
-};
+use crate::core::{Backend, ConfigFileSystemAccess, EntryStorage, PathCacheAccess, VirtualPathBuf};
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
 
@@ -39,33 +36,25 @@ impl<S: EntryStorage> PathCacheAccess for FsBackend<S> {
     }
 }
 
-impl<S: EntryStorage + StorageFileSystemAccess> Backend for FsBackend<S> {
-    type StorageFs = S::StorageFs;
+impl<S: EntryStorage> Backend for FsBackend<S> {}
 
-    fn storage_fs(&self) -> &Self::StorageFs {
-        self.entry_storage.storage_fs()
+impl<S: EntryStorage + ConfigFileSystemAccess> ConfigFileSystemAccess for FsBackend<S> {
+    fn config_fs(&self) -> &dyn crate::core::ConfigFileSystem {
+        self.entry_storage.config_fs()
     }
 }
 
 /// In-memory backend for testing.
 #[derive(Default)]
-pub struct MemoryBackend {
-    storage_fs: NativeFileSystem,
-}
+pub struct MemoryBackend;
 
-impl Backend for MemoryBackend {
-    type StorageFs = NativeFileSystem;
-
-    fn storage_fs(&self) -> &NativeFileSystem {
-        &self.storage_fs
-    }
-}
+impl Backend for MemoryBackend {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::{
-        DirectoryContentLayout, DirectoryLayout, EncryptionLayout, EntryStorage,
+        DirectoryContentLayout, DirectoryLayout, EncryptionLayout, EntryStorage, NativeFileSystem,
         RootDirectoryToken, Utf8Path, VirtualPath, XattrLayout,
     };
     use crate::{CryptoMator, CryptomatorEntryStorage, GoCryptFs, GoCryptFsEntryStorage};
