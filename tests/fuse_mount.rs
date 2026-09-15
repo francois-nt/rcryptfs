@@ -192,6 +192,40 @@ fn mount_allows_basic_file_roundtrip_for_all_backends() {
 }
 
 #[test]
+fn mount_exposes_staged_file_state_before_last_release() {
+    let password = "test-password";
+
+    for backend in BackendKind::ALL {
+        let (_cipher_dir, _mount_dir, mounted) = mount_backend(backend, password).unwrap();
+        let file_path = mounted.mount_point().join("staged.txt");
+        let mut writer = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&file_path)
+            .unwrap();
+
+        writer.write_all(b"abc").unwrap();
+        assert_eq!(std::fs::metadata(&file_path).unwrap().len(), 3);
+        assert_eq!(std::fs::read(&file_path).unwrap(), b"abc");
+
+        let atime = FileTime::from_unix_time(1_700_000_000, 0);
+        let mtime = FileTime::from_unix_time(1_700_000_123, 0);
+        set_file_times(&file_path, atime, mtime).unwrap();
+        assert_eq!(
+            FileTime::from_last_modification_time(&std::fs::metadata(&file_path).unwrap())
+                .unix_seconds(),
+            mtime.unix_seconds()
+        );
+
+        writer.set_len(2).unwrap();
+        drop(writer);
+        assert_eq!(std::fs::read(&file_path).unwrap(), b"ab");
+    }
+}
+
+#[test]
 fn mount_respects_create_new_for_all_backends() {
     let password = "test-password";
 

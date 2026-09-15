@@ -14,7 +14,10 @@ pub use cryptomator::{
 pub use daemonize::{
     SetBackgroundChild, is_background_child, respawn_in_background, wait_child_mounted,
 };
-pub use gocryptfs::{GoCryptFs, GoCryptFsBackend, GoCryptFsBuilder, GoCryptFsEntryStorage};
+pub use gocryptfs::{
+    GoCryptFs, GoCryptFsBackend, GoCryptFsBuilder, GoCryptFsEntryStorage,
+    GoCryptFsEntryStorageOptions,
+};
 
 #[cfg(unix)]
 mod fuse_impl;

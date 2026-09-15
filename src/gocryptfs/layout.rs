@@ -208,6 +208,36 @@ mod tests {
     }
 
     #[test]
+    fn long_plain_name_roundtrips_through_gocryptfs_storage() {
+        let (_temp_dir, backend) = test_backend();
+        let long_name = "a".repeat(200);
+        backend
+            .mknode(VirtualPath::new(&long_name), Some(0o644_u16.into()))
+            .unwrap();
+
+        let raw_entries = raw_storage(&backend)
+            .read_dir(VirtualPath::root())
+            .unwrap()
+            .collect::<std::io::Result<Vec<_>>>()
+            .unwrap();
+        assert!(raw_entries.iter().any(|entry| {
+            entry.file_name.starts_with("gocryptfs.longname.")
+                && !entry.file_name.ends_with(".name")
+        }));
+        assert!(raw_entries.iter().any(|entry| {
+            entry.file_name.starts_with("gocryptfs.longname.") && entry.file_name.ends_with(".name")
+        }));
+
+        let entries = Arc::new(backend)
+            .list_dir_plain_names(VirtualPath::root())
+            .unwrap()
+            .collect::<std::io::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0.file_name, long_name);
+    }
+
+    #[test]
     fn metadata_reports_plain_file_size() {
         let (_temp_dir, backend) = test_backend();
 

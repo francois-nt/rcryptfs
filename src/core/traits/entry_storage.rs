@@ -48,6 +48,22 @@ pub struct StorageDirectory {
 /// Generates selected trivial forwards from an entry storage to its raw filesystem field.
 macro_rules! forward_storage_fs_operations {
     ($storage_fs_ty:ty, $field:ident;) => {};
+    ($storage_fs_ty:ty, $field:ident; map_path = $map_path:expr;) => {};
+    (
+        $storage_fs_ty:ty,
+        $field:ident;
+        map_path = $map_path:expr;
+        $operation:ident $(, $remaining:ident)* $(,)?
+    ) => {
+        $crate::core::forward_storage_fs_operations!(
+            @one $storage_fs_ty, $field, $operation, $map_path
+        );
+        $crate::core::forward_storage_fs_operations!(
+            $storage_fs_ty, $field;
+            map_path = $map_path;
+            $($remaining),*
+        );
+    };
     (
         $storage_fs_ty:ty,
         $field:ident;
@@ -60,7 +76,14 @@ macro_rules! forward_storage_fs_operations {
             $storage_fs_ty, $field; $($remaining),*
         );
     };
-    (@one $storage_fs_ty:ty, $field:ident, open_file_with) => {
+    (@bind_path $self:ident, $path:ident => $mapped_path:ident) => {
+        let $mapped_path = $path;
+    };
+    (@bind_path $self:ident, $path:ident => $mapped_path:ident, $map_path:expr) => {
+        let mapped_path_owned = ($map_path)($self, $path);
+        let $mapped_path = mapped_path_owned.as_path();
+    };
+    (@one $storage_fs_ty:ty, $field:ident, open_file_with $(, $map_path:expr)?) => {
         type OpenHandle =
             <$storage_fs_ty as $crate::core::StorageFileSystem>::OpenHandle;
 
@@ -69,117 +92,147 @@ macro_rules! forward_storage_fs_operations {
             path: &$crate::core::VirtualPath,
             options: $crate::core::FileOpenOptions,
         ) -> std::io::Result<Self::OpenHandle> {
+            $crate::core::forward_storage_fs_operations!(
+                @bind_path self, path => mapped_path $(, $map_path)?
+            );
             <$storage_fs_ty as $crate::core::StorageFileSystem>::open_file_with(
                 &self.$field,
-                path,
+                mapped_path,
                 options,
             )
         }
     };
-    (@one $storage_fs_ty:ty, $field:ident, rename) => {
+    (@one $storage_fs_ty:ty, $field:ident, rename $(, $map_path:expr)?) => {
         fn rename(
             &self,
             old_path: &$crate::core::VirtualPath,
             new_path: &$crate::core::VirtualPath,
         ) -> std::io::Result<()> {
+            $crate::core::forward_storage_fs_operations!(
+                @bind_path self, old_path => mapped_old_path $(, $map_path)?
+            );
+            $crate::core::forward_storage_fs_operations!(
+                @bind_path self, new_path => mapped_new_path $(, $map_path)?
+            );
             <$storage_fs_ty as $crate::core::StorageFileSystem>::rename(
                 &self.$field,
-                old_path,
-                new_path,
+                mapped_old_path,
+                mapped_new_path,
             )
         }
     };
-    (@one $storage_fs_ty:ty, $field:ident, set_permissions) => {
+    (@one $storage_fs_ty:ty, $field:ident, set_permissions $(, $map_path:expr)?) => {
         fn set_permissions(
             &self,
             path: &$crate::core::VirtualPath,
             permissions: $crate::core::Permissions,
         ) -> std::io::Result<()> {
+            $crate::core::forward_storage_fs_operations!(
+                @bind_path self, path => mapped_path $(, $map_path)?
+            );
             <$storage_fs_ty as $crate::core::StorageFileSystem>::set_permissions(
                 &self.$field,
-                path,
+                mapped_path,
                 permissions,
             )
             .map(|_| ())
         }
     };
-    (@one $storage_fs_ty:ty, $field:ident, set_time) => {
+    (@one $storage_fs_ty:ty, $field:ident, set_time $(, $map_path:expr)?) => {
         fn set_time(
             &self,
             path: &$crate::core::VirtualPath,
             atime: Option<std::time::SystemTime>,
             mtime: Option<std::time::SystemTime>,
         ) -> std::io::Result<()> {
+            $crate::core::forward_storage_fs_operations!(
+                @bind_path self, path => mapped_path $(, $map_path)?
+            );
             <$storage_fs_ty as $crate::core::StorageFileSystem>::set_time(
                 &self.$field,
-                path,
+                mapped_path,
                 atime,
                 mtime,
             )
         }
     };
-    (@one $storage_fs_ty:ty, $field:ident, chown) => {
+    (@one $storage_fs_ty:ty, $field:ident, chown $(, $map_path:expr)?) => {
         fn chown(
             &self,
             path: &$crate::core::VirtualPath,
             uid: Option<u32>,
             gid: Option<u32>,
         ) -> std::io::Result<()> {
+            $crate::core::forward_storage_fs_operations!(
+                @bind_path self, path => mapped_path $(, $map_path)?
+            );
             <$storage_fs_ty as $crate::core::StorageFileSystem>::chown(
                 &self.$field,
-                path,
+                mapped_path,
                 uid,
                 gid,
             )
         }
     };
-    (@one $storage_fs_ty:ty, $field:ident, get_xattr) => {
+    (@one $storage_fs_ty:ty, $field:ident, get_xattr $(, $map_path:expr)?) => {
         fn get_xattr(
             &self,
             path: &$crate::core::VirtualPath,
             name: &str,
         ) -> std::io::Result<Vec<u8>> {
+            $crate::core::forward_storage_fs_operations!(
+                @bind_path self, path => mapped_path $(, $map_path)?
+            );
             <$storage_fs_ty as $crate::core::StorageFileSystem>::get_xattr(
                 &self.$field,
-                path,
+                mapped_path,
                 name,
             )
         }
     };
-    (@one $storage_fs_ty:ty, $field:ident, list_xattr) => {
+    (@one $storage_fs_ty:ty, $field:ident, list_xattr $(, $map_path:expr)?) => {
         fn list_xattr(
             &self,
             path: &$crate::core::VirtualPath,
         ) -> std::io::Result<Vec<String>> {
+            $crate::core::forward_storage_fs_operations!(
+                @bind_path self, path => mapped_path $(, $map_path)?
+            );
             <$storage_fs_ty as $crate::core::StorageFileSystem>::list_xattr(
                 &self.$field,
-                path,
+                mapped_path,
             )
         }
     };
-    (@one $storage_fs_ty:ty, $field:ident, remove_xattr) => {
+    (@one $storage_fs_ty:ty, $field:ident, remove_xattr $(, $map_path:expr)?) => {
         fn remove_xattr(
             &self,
             path: &$crate::core::VirtualPath,
             name: &str,
         ) -> std::io::Result<()> {
+            $crate::core::forward_storage_fs_operations!(
+                @bind_path self, path => mapped_path $(, $map_path)?
+            );
             <$storage_fs_ty as $crate::core::StorageFileSystem>::remove_xattr(
                 &self.$field,
-                path,
+                mapped_path,
                 name,
             )
         }
     };
-    (@one $storage_fs_ty:ty, $field:ident, set_xattr) => {
+    (@one $storage_fs_ty:ty, $field:ident, set_xattr $(, $map_path:expr)?) => {
         fn set_xattr(
             &self,
             path: &$crate::core::VirtualPath,
             name: &str,
             value: &[u8],
         ) -> std::io::Result<()> {
+            $crate::core::forward_storage_fs_operations!(
+                @bind_path self, path => mapped_path $(, $map_path)?
+            );
             <$storage_fs_ty as $crate::core::StorageFileSystem>::set_xattr(
                 &self.$field,
-                path,
+                mapped_path,
                 name,
                 value,
             )
@@ -192,6 +245,8 @@ pub(crate) use forward_storage_fs_operations;
 ///
 /// Paths, directory tokens, and symlink payloads are opaque. Implementations
 /// know the on-disk representation but do not encrypt or decrypt their values.
+/// Entry-operation paths have an already-resolved physical parent and an
+/// encoded logical final component. Paths returned by this trait are physical.
 pub trait EntryStorage: Send + Sync + 'static {
     /// Handle returned when opening a represented regular file.
     type OpenHandle: FileHandle;

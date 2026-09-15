@@ -20,7 +20,7 @@ pub struct GoCryptFs<T: Backend = GoCryptFsBackend> {
     raw64: bool,
 }
 pub use builder::GoCryptFsBuilder;
-pub use entry_storage::GoCryptFsEntryStorage;
+pub use entry_storage::{GoCryptFsEntryStorage, GoCryptFsEntryStorageOptions};
 
 /// Backend using the GoCryptFS entry representation.
 pub type GoCryptFsBackend<F = NativeFileSystem> = FsBackend<GoCryptFsEntryStorage<F>>;
