@@ -5,7 +5,7 @@
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, FromArgMatches, Parser, builder::PossibleValuesParser};
 use rcryptfs::core::{
-    FileSystemHandler, LockedOpenFileTable, NoCache, build_filesystem, get_providers_name,
+    FileCache, FileSystemHandler, LockedOpenFileTable, build_filesystem, get_providers_name,
     init_filesystem, is_native_dir_empty,
 };
 use rcryptfs::{is_background_child, platform, respawn_in_background};
@@ -189,8 +189,11 @@ fn main() -> Result<()> {
             let password = read_password(true, false)?;
             log::set_logger(&LOGGER).map_err(|e| anyhow::anyhow!("{e}"))?;
             log::set_max_level(log::LevelFilter::Error);
-            let cryptfs =
-                build_filesystem(cli_args.folder_path.as_str().into(), &password, NoCache)?;
+            let cryptfs = build_filesystem(
+                cli_args.folder_path.as_str().into(),
+                &password,
+                FileCache::default().with_cache_write(),
+            )?;
             let handler: FileSystemHandler<LockedOpenFileTable> = cryptfs.into();
             // CLI mode reuses stdin after password entry, so the platform layer restores an interactive input when needed.
             platform::prepare_cli_stdin(stdin_is_piped())?;
@@ -239,7 +242,11 @@ fn run_mount(mount_args: &MountArgs, is_background_child: bool) -> Result<()> {
         );
     }
     let password = read_password(false, is_background_child)?;
-    let cryptfs = build_filesystem(mount_args.folder_path.as_str().into(), &password, NoCache)?;
+    let cryptfs = build_filesystem(
+        mount_args.folder_path.as_str().into(),
+        &password,
+        FileCache::default().with_cache_write(),
+    )?;
     if !is_background_child {
         println!("Decrypting master key");
     }
