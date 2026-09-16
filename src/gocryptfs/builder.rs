@@ -1,10 +1,9 @@
 use super::{GoCryptFs, GoCryptFsBackend};
 use crate::core::{
-    BackendProvider, ConfigFileSystemAccess, DirectoryLayout, EncryptedFileSystem, EntryStorage,
-    FileCachePolicy, FileSystem, FsBackend, MasterKey, Result,
+    BackendProvider, ConfigFileSystemAccess, EncryptedFileSystem, EntryStorage, FileCachePolicy,
+    FileSystem, FsBackend, MasterKey, Result,
 };
 use crate::{Utf8Path, register_provider};
-use std::sync::Arc;
 
 struct GoCryptFSMasterKey(Vec<u8>);
 impl MasterKey for GoCryptFSMasterKey {
@@ -46,28 +45,6 @@ impl GoCryptFsBuilder {
         Ok(Box::new(cryptfs))
     }
 
-    /// Builds a GoCryptFS crypto layer with explicit directory policies.
-    pub fn try_build_with_backend_and_directory_layout<S>(
-        backend: FsBackend<S>,
-        password: &str,
-        directory_layout: Arc<dyn DirectoryLayout>,
-        cache_policy: Box<dyn FileCachePolicy>,
-    ) -> Result<Box<dyn FileSystem>>
-    where
-        S: EntryStorage + ConfigFileSystemAccess,
-    {
-        let cryptfs: EncryptedFileSystem<GoCryptFs<FsBackend<S>>> = (
-            GoCryptFs::try_new_with_backend_and_directory_layout(
-                backend,
-                password,
-                directory_layout,
-            )?,
-            cache_policy,
-        )
-            .into();
-        Ok(Box::new(cryptfs))
-    }
-
     /// Initializes a GoCryptFS crypto configuration over an entry representation.
     pub fn init_with_backend<S>(
         backend: &FsBackend<S>,
@@ -77,19 +54,6 @@ impl GoCryptFsBuilder {
         S: EntryStorage + ConfigFileSystemAccess,
     {
         GoCryptFs::init_with_backend(backend, password)
-            .map(|key| -> Box<dyn MasterKey> { Box::new(GoCryptFSMasterKey(key)) })
-    }
-
-    /// Initializes a GoCryptFS crypto configuration with explicit directory policies.
-    pub fn init_with_backend_and_directory_layout<S>(
-        backend: &FsBackend<S>,
-        password: &str,
-        directory_layout: &dyn DirectoryLayout,
-    ) -> Result<Box<dyn MasterKey>>
-    where
-        S: EntryStorage + ConfigFileSystemAccess,
-    {
-        GoCryptFs::init_with_backend_and_directory_layout(backend, password, directory_layout)
             .map(|key| -> Box<dyn MasterKey> { Box::new(GoCryptFSMasterKey(key)) })
     }
 }

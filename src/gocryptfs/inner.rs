@@ -1,7 +1,5 @@
-use super::{GoCryptFs, GoCryptFsBackend, layout::GoCryptFsDirectoryLayout};
-use crate::core::{
-    Backend, ConfigFileSystemAccess, DirectoryLayout, EntryStorage, FsBackend, Result,
-};
+use super::{GoCryptFs, GoCryptFsBackend};
+use crate::core::{Backend, ConfigFileSystemAccess, EntryStorage, FsBackend, Result};
 use crate::{Utf8Path, VirtualPath};
 use aes::{Aes256, cipher::generic_array::GenericArray};
 use aes_gcm::{
@@ -14,14 +12,12 @@ use hkdf::Hkdf;
 use scrypt::{Params as ScryptParams, scrypt};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use std::sync::Arc;
 
 /// Derives encryption keys from master key and feature flags.
 fn derive_keys<T: Backend>(
     backend: T,
     master_key: &[u8; 32],
     feature_flags: &[String],
-    directory_layout: Arc<dyn DirectoryLayout>,
 ) -> Result<GoCryptFs<T>> {
     let has = |flag: &str| feature_flags.iter().any(|f| f == flag);
 
@@ -52,7 +48,6 @@ fn derive_keys<T: Backend>(
     }
     Ok(GoCryptFs {
         backend,
-        directory_layout,
         gcm_key,
         eme_key,
         raw64,
@@ -268,15 +263,6 @@ where
 {
     /// Initializes the GoCryptFS crypto configuration over an entry representation.
     pub fn init_with_backend(backend: &FsBackend<S>, password: &str) -> Result<Vec<u8>> {
-        Self::init_with_backend_and_directory_layout(backend, password, &GoCryptFsDirectoryLayout)
-    }
-
-    /// Initializes the crypto configuration with explicit directory policies.
-    pub fn init_with_backend_and_directory_layout(
-        backend: &FsBackend<S>,
-        password: &str,
-        directory_layout: &dyn DirectoryLayout,
-    ) -> Result<Vec<u8>> {
         let root_path = VirtualPath::root();
         let config_fs = backend.config_fs();
         if !config_fs.is_empty()? {
@@ -294,26 +280,13 @@ where
 
         backend
             .entry_storage()
-            .initialize_root_directory(directory_layout)
+            .initialize_root_directory()
             .inspect_err(rollback)?;
 
         Ok(master_key)
     }
     /// Opens a GoCryptFS crypto configuration over an entry representation.
     pub fn try_new_with_backend(backend: FsBackend<S>, password: &str) -> Result<Self> {
-        Self::try_new_with_backend_and_directory_layout(
-            backend,
-            password,
-            Arc::new(GoCryptFsDirectoryLayout),
-        )
-    }
-
-    /// Opens a GoCryptFS crypto configuration with explicit directory policies.
-    pub fn try_new_with_backend_and_directory_layout(
-        backend: FsBackend<S>,
-        password: &str,
-        directory_layout: Arc<dyn DirectoryLayout>,
-    ) -> Result<Self> {
         let config_data = backend.config_fs().read_all("gocryptfs.conf".into())?;
         let config: GoCryptfsConfig = serde_json::from_slice(&config_data)?;
 
@@ -322,7 +295,6 @@ where
             backend,
             master_key.as_slice().try_into()?,
             &config.feature_flags,
-            directory_layout,
         )
     }
 }
@@ -344,13 +316,7 @@ mod tests {
             "LongNames".to_string(),
             "Raw64".to_string(),
         ];
-        derive_keys(
-            MemoryBackend,
-            &master_key,
-            &feature_flags,
-            Arc::new(GoCryptFsDirectoryLayout),
-        )
-        .unwrap()
+        derive_keys(MemoryBackend, &master_key, &feature_flags).unwrap()
     }
 
     #[test]

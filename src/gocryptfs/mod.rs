@@ -1,5 +1,4 @@
-use crate::core::{Backend, DirectoryLayout, FsBackend, NativeFileSystem};
-use std::sync::Arc;
+use crate::core::{Backend, FsBackend, NativeFileSystem};
 
 mod builder;
 mod encryption_translator;
@@ -11,7 +10,6 @@ mod xattr_translator;
 /// GoCryptFS backend with derived content and filename encryption keys.
 pub struct GoCryptFs<T: Backend = GoCryptFsBackend> {
     backend: T,
-    directory_layout: Arc<dyn DirectoryLayout>,
     /// AES-256-GCM key for file content (blocks)
     gcm_key: [u8; 32],
     /// AES-256-EME key for filename encryption

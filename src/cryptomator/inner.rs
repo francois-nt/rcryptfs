@@ -1,7 +1,10 @@
-use super::{CryptomatorBackend, layout::CryptomatorDirectoryLayout};
+use super::{
+    CryptoMator, CryptomatorBackend, entry_storage::UnboundCryptomatorEntryStorage,
+    layout::CryptomatorDirectoryLayout,
+};
 use crate::core::{
-    Backend, ConfigFileSystemAccess, DirectoryLayout, EncryptionTranslator, EntryStorage,
-    FsBackend, MasterKey, Result, Utf8Path, VirtualPath, VirtualPathBuf, XattrLayout,
+    Backend, ConfigFileSystemAccess, EncryptionTranslator, EntryStorage, FsBackend, MasterKey,
+    NativeFileSystem, Result, Utf8Path, VirtualPath, VirtualPathBuf, XattrLayout,
 };
 use aes_gcm::{
     Aes256Gcm,
@@ -22,7 +25,6 @@ use std::sync::Arc;
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 type HmacSha256 = Hmac<Sha256>;
-use super::CryptoMator;
 
 /// JWT header stored in vault.cryptomator.
 #[derive(Serialize)]
@@ -250,13 +252,27 @@ impl CryptoMator<CryptomatorBackend> {
         root_path: &Utf8Path,
         password: &str,
     ) -> Result<CryptomatorMasterKeys> {
-        let backend = root_path.into();
-        Self::init_with_backend(&backend, password)
+        let storage =
+            UnboundCryptomatorEntryStorage::new(NativeFileSystem::new(root_path.to_owned()));
+        let (config, master_keys) = CryptoMatorConfig::try_new(password)?;
+        let directory_layout = Arc::new(CryptomatorDirectoryLayout::new(master_keys.siv_key()));
+        let backend = FsBackend::new(storage.bind(directory_layout));
+        Self::write_config_and_initialize_root(&backend, &config, master_keys)
     }
 
     /// Opens a Cryptomator repository from a local cipher root path.
     pub fn try_new(root_path: &Utf8Path, password: &str) -> Result<Self> {
-        Self::try_new_with_backend(root_path.into(), password)
+        let storage =
+            UnboundCryptomatorEntryStorage::new(NativeFileSystem::new(root_path.to_owned()));
+        let config_data = storage
+            .config_fs()
+            .read_all("masterkey.cryptomator".into())?;
+        let config: CryptoMatorConfig = serde_json::from_slice(&config_data)?;
+        let keys = derive_keys(password, &config)?;
+        let siv_key = keys.siv_key();
+        let directory_layout = Arc::new(CryptomatorDirectoryLayout::new(siv_key));
+        let backend = FsBackend::new(storage.bind(directory_layout));
+        Ok(Self { backend, siv_key })
     }
 }
 
@@ -270,18 +286,7 @@ where
         password: &str,
     ) -> Result<CryptomatorMasterKeys> {
         let (config, master_keys) = CryptoMatorConfig::try_new(password)?;
-        let directory_layout = CryptomatorDirectoryLayout::new(master_keys.siv_key());
-        Self::write_config_and_initialize_root(backend, &config, master_keys, &directory_layout)
-    }
-
-    /// Initializes the crypto configuration with explicit directory policies.
-    pub fn init_with_backend_and_directory_layout(
-        backend: &FsBackend<S>,
-        password: &str,
-        directory_layout: &dyn DirectoryLayout,
-    ) -> Result<CryptomatorMasterKeys> {
-        let (config, master_keys) = CryptoMatorConfig::try_new(password)?;
-        Self::write_config_and_initialize_root(backend, &config, master_keys, directory_layout)
+        Self::write_config_and_initialize_root(backend, &config, master_keys)
     }
 
     /// Writes the crypto configuration and initializes its root representation.
@@ -289,7 +294,6 @@ where
         backend: &FsBackend<S>,
         config: &CryptoMatorConfig,
         master_keys: CryptomatorMasterKeys,
-        directory_layout: &dyn DirectoryLayout,
     ) -> Result<CryptomatorMasterKeys> {
         let root_path = VirtualPath::root();
         let config_fs = backend.config_fs();
@@ -314,7 +318,7 @@ where
 
         backend
             .entry_storage()
-            .initialize_root_directory(directory_layout)
+            .initialize_root_directory()
             .inspect_err(rollback)?;
 
         Ok(master_keys)
@@ -329,32 +333,7 @@ where
 
         let keys = derive_keys(password, &config)?;
         let siv_key = keys.siv_key();
-        let directory_layout = Arc::new(CryptomatorDirectoryLayout::new(siv_key));
-        Ok(CryptoMator {
-            backend,
-            directory_layout,
-            siv_key,
-        })
-    }
-
-    /// Opens a Cryptomator crypto configuration with explicit directory policies.
-    pub fn try_new_with_backend_and_directory_layout(
-        backend: FsBackend<S>,
-        password: &str,
-        directory_layout: Arc<dyn DirectoryLayout>,
-    ) -> Result<Self> {
-        let config_data = backend
-            .config_fs()
-            .read_all("masterkey.cryptomator".into())?;
-        let config: CryptoMatorConfig = serde_json::from_slice(&config_data)?;
-
-        let keys = derive_keys(password, &config)?;
-        let siv_key = keys.siv_key();
-        Ok(CryptoMator {
-            backend,
-            directory_layout,
-            siv_key,
-        })
+        Ok(CryptoMator { backend, siv_key })
     }
 }
 

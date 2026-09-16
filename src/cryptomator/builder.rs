@@ -1,10 +1,9 @@
-use super::{CryptoMator, CryptomatorBackend};
+use super::{CryptoMator, entry_storage::UnboundCryptomatorEntryStorage};
 use crate::core::{
-    BackendProvider, ConfigFileSystemAccess, DirectoryLayout, EncryptedFileSystem, EntryStorage,
-    FileCachePolicy, FileSystem, FsBackend, MasterKey, Result,
+    BackendProvider, ConfigFileSystemAccess, EncryptedFileSystem, EntryStorage, FileCachePolicy,
+    FileSystem, FsBackend, MasterKey, NativeFileSystem, Result,
 };
 use crate::{Utf8Path, register_provider};
-use std::sync::Arc;
 
 /// Backend provider for Cryptomator repositories.
 pub struct CryptoMatorBuilder;
@@ -40,28 +39,6 @@ impl CryptoMatorBuilder {
         Ok(Box::new(cryptfs))
     }
 
-    /// Builds a Cryptomator crypto layer with explicit directory policies.
-    pub fn try_build_with_backend_and_directory_layout<S>(
-        backend: FsBackend<S>,
-        password: &str,
-        directory_layout: Arc<dyn DirectoryLayout>,
-        cache_policy: Box<dyn FileCachePolicy>,
-    ) -> Result<Box<dyn FileSystem>>
-    where
-        S: EntryStorage + ConfigFileSystemAccess,
-    {
-        let cryptfs: EncryptedFileSystem<CryptoMator<FsBackend<S>>> = (
-            CryptoMator::try_new_with_backend_and_directory_layout(
-                backend,
-                password,
-                directory_layout,
-            )?,
-            cache_policy,
-        )
-            .into();
-        Ok(Box::new(cryptfs))
-    }
-
     /// Initializes a Cryptomator crypto configuration over an entry representation.
     pub fn init_with_backend<S>(
         backend: &FsBackend<S>,
@@ -73,19 +50,6 @@ impl CryptoMatorBuilder {
         CryptoMator::init_with_backend(backend, password)
             .map(|keys| -> Box<dyn MasterKey> { Box::new(keys) })
     }
-
-    /// Initializes a Cryptomator crypto configuration with explicit directory policies.
-    pub fn init_with_backend_and_directory_layout<S>(
-        backend: &FsBackend<S>,
-        password: &str,
-        directory_layout: &dyn DirectoryLayout,
-    ) -> Result<Box<dyn MasterKey>>
-    where
-        S: EntryStorage + ConfigFileSystemAccess,
-    {
-        CryptoMator::init_with_backend_and_directory_layout(backend, password, directory_layout)
-            .map(|keys| -> Box<dyn MasterKey> { Box::new(keys) })
-    }
 }
 
 impl BackendProvider for CryptoMatorBuilder {
@@ -93,8 +57,11 @@ impl BackendProvider for CryptoMatorBuilder {
         "cryptomator"
     }
     fn probe(&self, root: &Utf8Path) -> bool {
-        let backend: CryptomatorBackend = root.into();
-        Self::probe_backend(&backend)
+        let storage = UnboundCryptomatorEntryStorage::new(NativeFileSystem::new(root.to_owned()));
+        storage
+            .config_fs()
+            .exists("vault.cryptomator".into())
+            .unwrap_or(false)
     }
     fn try_build(
         &self,
@@ -102,15 +69,16 @@ impl BackendProvider for CryptoMatorBuilder {
         password: &str,
         cache_policy: Box<dyn FileCachePolicy>,
     ) -> Result<Box<dyn FileSystem>> {
-        let backend: CryptomatorBackend = root.into();
-        Self::try_build_with_backend(backend, password, cache_policy)
+        let cryptfs: EncryptedFileSystem<CryptoMator> =
+            (CryptoMator::try_new(root, password)?, cache_policy).into();
+        Ok(Box::new(cryptfs))
     }
     fn init_with_default_params(
         &self,
         root: &Utf8Path,
         password: &str,
     ) -> Result<Box<dyn MasterKey>> {
-        let backend: CryptomatorBackend = root.into();
-        Self::init_with_backend(&backend, password)
+        CryptoMator::init_with_default_params(root, password)
+            .map(|keys| -> Box<dyn MasterKey> { Box::new(keys) })
     }
 }

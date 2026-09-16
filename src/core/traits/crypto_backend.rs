@@ -68,6 +68,9 @@ pub trait DirectoryContentLayout: Send + Sync {
         entry_path: &VirtualPath,
         token: &[u8],
     ) -> Result<VirtualPathBuf>;
+
+    /// Returns whether a path is a detached directory contents location.
+    fn is_detached_directory_contents_path(&self, path: &VirtualPath) -> bool;
 }
 
 /// Defines how directory tokens, roots, and detached contents are represented.
@@ -141,8 +144,6 @@ pub trait PathLayout {
     type EntryStorage: EntryStorage;
     /// Returns the representation-aware entry storage.
     fn entry_storage(&self) -> &Self::EntryStorage;
-    /// Returns the policies used to resolve and create directories.
-    fn directory_layout(&self) -> &dyn DirectoryLayout;
     /// Converts a plain path to its cipher text equivalent.
     fn plain_path_to_cipher(&self, plain_path: &VirtualPath) -> Result<VirtualPathBuf>;
 

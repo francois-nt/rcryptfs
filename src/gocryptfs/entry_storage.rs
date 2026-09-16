@@ -1,14 +1,17 @@
 use crate::core::{
-    ConfigFileSystem, ConfigFileSystemAccess, DirectoryLayout, EntryStorage, FileType, FsBackend,
+    ConfigFileSystem, ConfigFileSystemAccess, DirectoryLayout, EntryStorage, FsBackend, Metadata,
     NativeFileSystem, OrIoError, Permissions, RootDirectoryToken, StorageDirEntry,
-    StorageDirectory, StorageEntryKind, StorageFileSystem, StorageMetadata, Utf8Path, Utf8PathBuf,
-    VirtualPath, VirtualPathBuf, forward_storage_fs_operations, temp_file_path,
+    StorageDirectory, StorageFileSystem, Utf8Path, Utf8PathBuf, VirtualPath, VirtualPathBuf,
+    forward_storage_fs_operations, temp_file_path,
 };
 use base64::{
     Engine,
     engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD},
 };
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
+
+use super::layout::GoCryptFsDirectoryLayout;
 
 const GOCRYPTFS_DIRIV: &str = "gocryptfs.diriv";
 const GOCRYPTFS_LONGNAME_PREFIX: &str = "gocryptfs.longname.";
@@ -39,16 +42,6 @@ struct EntryPaths {
     sidecar: Option<VirtualPathBuf>,
 }
 
-/// Converts a native filesystem type to its GoCryptFS representation kind.
-fn direct_entry_kind(file_type: FileType) -> StorageEntryKind {
-    match file_type {
-        FileType::File => StorageEntryKind::File,
-        FileType::Directory => StorageEntryKind::Directory,
-        FileType::SymLink => StorageEntryKind::Symlink,
-        FileType::Other => StorageEntryKind::Other,
-    }
-}
-
 /// Returns whether a raw GoCryptFS entry is internal to the representation.
 fn is_direct_internal_entry(name: &str) -> bool {
     name.starts_with("temp.")
@@ -67,6 +60,7 @@ fn is_long_name_content(name: &str) -> bool {
 pub struct GoCryptFsEntryStorage<F: StorageFileSystem> {
     storage_fs: F,
     options: GoCryptFsEntryStorageOptions,
+    directory_layout: Arc<dyn DirectoryLayout>,
 }
 
 impl<F: StorageFileSystem> GoCryptFsEntryStorage<F> {
@@ -75,6 +69,19 @@ impl<F: StorageFileSystem> GoCryptFsEntryStorage<F> {
         Self {
             storage_fs,
             options: GoCryptFsEntryStorageOptions::default(),
+            directory_layout: Arc::new(GoCryptFsDirectoryLayout),
+        }
+    }
+
+    /// Creates a GoCryptFS representation with an explicit directory policy.
+    pub fn with_directory_layout(
+        storage_fs: F,
+        directory_layout: Arc<dyn DirectoryLayout>,
+    ) -> Self {
+        Self {
+            storage_fs,
+            options: GoCryptFsEntryStorageOptions::default(),
+            directory_layout,
         }
     }
 
@@ -82,6 +89,19 @@ impl<F: StorageFileSystem> GoCryptFsEntryStorage<F> {
     pub fn with_options(
         storage_fs: F,
         options: GoCryptFsEntryStorageOptions,
+    ) -> std::io::Result<Self> {
+        Self::with_options_and_directory_layout(
+            storage_fs,
+            options,
+            Arc::new(GoCryptFsDirectoryLayout),
+        )
+    }
+
+    /// Creates a GoCryptFS representation with explicit name and directory policies.
+    pub fn with_options_and_directory_layout(
+        storage_fs: F,
+        options: GoCryptFsEntryStorageOptions,
+        directory_layout: Arc<dyn DirectoryLayout>,
     ) -> std::io::Result<Self> {
         if options.long_name_max < GOCRYPTFS_MIN_LONG_NAME_MAX {
             return Err(std::io::Error::new(
@@ -94,6 +114,7 @@ impl<F: StorageFileSystem> GoCryptFsEntryStorage<F> {
         Ok(Self {
             storage_fs,
             options,
+            directory_layout,
         })
     }
 
@@ -218,11 +239,8 @@ impl<F: StorageFileSystem> GoCryptFsEntryStorage<F> {
     }
 
     /// Resolves and validates the configured token for one directory.
-    fn directory_token<L: DirectoryLayout + ?Sized>(
-        &self,
-        entry_path: &VirtualPath,
-        directory_layout: &L,
-    ) -> std::io::Result<Vec<u8>> {
+    fn directory_token(&self, entry_path: &VirtualPath) -> std::io::Result<Vec<u8>> {
+        let directory_layout = self.directory_layout.as_ref();
         let token = if entry_path.is_empty() {
             match directory_layout.root_directory_token() {
                 RootDirectoryToken::Persisted => self
@@ -295,24 +313,23 @@ impl<F: StorageFileSystem> ConfigFileSystemAccess for GoCryptFsEntryStorage<F> {
 impl<F: StorageFileSystem> EntryStorage for GoCryptFsEntryStorage<F> {
     type DirEntries = std::vec::IntoIter<std::io::Result<StorageDirEntry>>;
 
+    fn generate_directory_token(&self) -> Vec<u8> {
+        self.directory_layout.generate_directory_token()
+    }
+
     forward_storage_fs_operations!(
         F,
         storage_fs;
         map_path = |this: &Self, path: &VirtualPath| this.entry_paths(path).content;
         open_file_with,
-        set_permissions,
-        set_time,
-        chown,
         get_xattr,
         list_xattr,
         remove_xattr,
         set_xattr,
     );
 
-    fn metadata(&self, path: &VirtualPath) -> std::io::Result<StorageMetadata> {
-        let raw = self.storage_fs.metadata(&self.entry_paths(path).content)?;
-        let kind = direct_entry_kind(raw.file_type);
-        Ok(StorageMetadata { raw, kind })
+    fn metadata(&self, path: &VirtualPath) -> std::io::Result<Metadata> {
+        self.storage_fs.metadata(&self.entry_paths(path).content)
     }
 
     fn read_dir(&self, contents_path: &VirtualPath) -> std::io::Result<Self::DirEntries> {
@@ -322,7 +339,6 @@ impl<F: StorageFileSystem> EntryStorage for GoCryptFsEntryStorage<F> {
                 Ok(entry) if is_direct_internal_entry(&entry.file_name) => {}
                 Ok(entry) => {
                     let path = contents_path.join(&entry.file_name);
-                    let kind = direct_entry_kind(entry.metadata.file_type);
                     let file_name = if is_long_name_content(&entry.file_name) {
                         self.read_long_name(contents_path, &entry.file_name)
                     } else {
@@ -331,10 +347,7 @@ impl<F: StorageFileSystem> EntryStorage for GoCryptFsEntryStorage<F> {
                     entries.push(file_name.map(|file_name| StorageDirEntry {
                         file_name,
                         path,
-                        metadata: StorageMetadata {
-                            raw: entry.metadata,
-                            kind,
-                        },
+                        metadata: entry.metadata,
                     }));
                 }
                 Err(error) => entries.push(Err(error)),
@@ -343,25 +356,19 @@ impl<F: StorageFileSystem> EntryStorage for GoCryptFsEntryStorage<F> {
         Ok(entries.into_iter())
     }
 
-    fn resolve_directory<L: DirectoryLayout + ?Sized>(
-        &self,
-        entry_path: &VirtualPath,
-        directory_layout: &L,
-    ) -> std::io::Result<StorageDirectory> {
+    fn resolve_directory(&self, entry_path: &VirtualPath) -> std::io::Result<StorageDirectory> {
         let entry_path = self.entry_paths(entry_path).content;
         let directory = StorageDirectory {
             contents_path: entry_path.clone(),
-            token: self.directory_token(&entry_path, directory_layout)?,
+            token: self.directory_token(&entry_path)?,
             entry_path,
         };
         Self::validate_directory(&directory)?;
         Ok(directory)
     }
 
-    fn initialize_root_directory<L: DirectoryLayout + ?Sized>(
-        &self,
-        directory_layout: &L,
-    ) -> std::io::Result<StorageDirectory> {
+    fn initialize_root_directory(&self) -> std::io::Result<StorageDirectory> {
+        let directory_layout = self.directory_layout.as_ref();
         let token = match directory_layout.root_directory_token() {
             RootDirectoryToken::Persisted => {
                 let token = directory_layout.generate_directory_token();
@@ -391,7 +398,7 @@ impl<F: StorageFileSystem> EntryStorage for GoCryptFsEntryStorage<F> {
         path: &VirtualPath,
         initial_contents: &[u8],
         permissions: Option<Permissions>,
-    ) -> std::io::Result<StorageMetadata> {
+    ) -> std::io::Result<Metadata> {
         let paths = self.entry_paths(path);
         self.create_sidecar(path, &paths)?;
         let raw = if initial_contents.is_empty() {
@@ -420,19 +427,16 @@ impl<F: StorageFileSystem> EntryStorage for GoCryptFsEntryStorage<F> {
                 }
             }
         };
-        Ok(StorageMetadata {
-            raw,
-            kind: StorageEntryKind::File,
-        })
+        Ok(raw)
     }
 
-    fn create_directory<L: DirectoryLayout + ?Sized>(
+    fn create_directory(
         &self,
         entry_path: VirtualPathBuf,
         token: Vec<u8>,
-        directory_layout: &L,
         permissions: Option<Permissions>,
-    ) -> std::io::Result<StorageMetadata> {
+    ) -> std::io::Result<Metadata> {
+        let directory_layout = self.directory_layout.as_ref();
         let paths = self.entry_paths(&entry_path);
         let directory = StorageDirectory {
             contents_path: paths.content.clone(),
@@ -472,10 +476,7 @@ impl<F: StorageFileSystem> EntryStorage for GoCryptFsEntryStorage<F> {
                 .set_permissions(&directory.entry_path, permissions)?,
             None => self.storage_fs.metadata(&directory.entry_path)?,
         };
-        Ok(StorageMetadata {
-            raw,
-            kind: StorageEntryKind::Directory,
-        })
+        Ok(raw)
     }
 
     fn remove_directory(&self, directory: &StorageDirectory) -> std::io::Result<()> {
@@ -498,7 +499,7 @@ impl<F: StorageFileSystem> EntryStorage for GoCryptFsEntryStorage<F> {
         }
     }
 
-    fn remove_file(&self, path: &VirtualPath) -> std::io::Result<()> {
+    fn remove_entry(&self, path: &VirtualPath) -> std::io::Result<()> {
         let paths = self.entry_paths(path);
         self.storage_fs.remove(&paths.content)?;
         match paths.sidecar {
@@ -507,11 +508,7 @@ impl<F: StorageFileSystem> EntryStorage for GoCryptFsEntryStorage<F> {
         }
     }
 
-    fn create_symlink(
-        &self,
-        path: &VirtualPath,
-        target: &[u8],
-    ) -> std::io::Result<StorageMetadata> {
+    fn create_symlink(&self, path: &VirtualPath, target: &[u8]) -> std::io::Result<Metadata> {
         let paths = self.entry_paths(path);
         let target = std::str::from_utf8(target)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
@@ -523,10 +520,7 @@ impl<F: StorageFileSystem> EntryStorage for GoCryptFsEntryStorage<F> {
                 return Err(error);
             }
         };
-        Ok(StorageMetadata {
-            raw,
-            kind: StorageEntryKind::Symlink,
-        })
+        Ok(raw)
     }
 
     fn read_symlink(&self, path: &VirtualPath) -> std::io::Result<Vec<u8>> {
@@ -534,10 +528,6 @@ impl<F: StorageFileSystem> EntryStorage for GoCryptFsEntryStorage<F> {
             .storage_fs
             .read_symlink(&self.entry_paths(path).content)?
             .into_bytes())
-    }
-
-    fn remove_symlink(&self, path: &VirtualPath) -> std::io::Result<()> {
-        self.remove_file(path)
     }
 
     fn rename(&self, old_path: &VirtualPath, new_path: &VirtualPath) -> std::io::Result<()> {
@@ -560,12 +550,36 @@ impl<F: StorageFileSystem> EntryStorage for GoCryptFsEntryStorage<F> {
         }
         Ok(())
     }
+
+    fn set_permissions(
+        &self,
+        path: &VirtualPath,
+        permissions: Permissions,
+    ) -> std::io::Result<Metadata> {
+        self.storage_fs
+            .set_permissions(&self.entry_paths(path).content, permissions)
+    }
+
+    fn set_time(
+        &self,
+        path: &VirtualPath,
+        atime: Option<std::time::SystemTime>,
+        mtime: Option<std::time::SystemTime>,
+    ) -> std::io::Result<()> {
+        self.storage_fs
+            .set_time(&self.entry_paths(path).content, atime, mtime)
+    }
+
+    fn chown(&self, path: &VirtualPath, uid: Option<u32>, gid: Option<u32>) -> std::io::Result<()> {
+        self.storage_fs
+            .chown(&self.entry_paths(path).content, uid, gid)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{DirectoryContentLayout, NativeFileSystem, Utf8Path};
+    use crate::core::{DirectoryContentLayout, FileType, NativeFileSystem, Utf8Path};
     use tempfile::tempdir;
 
     struct DetachedTestLayout;
@@ -577,6 +591,10 @@ mod tests {
             _token: &[u8],
         ) -> crate::core::Result<VirtualPathBuf> {
             Ok("detached".into())
+        }
+
+        fn is_detached_directory_contents_path(&self, path: &VirtualPath) -> bool {
+            path == VirtualPath::new("detached")
         }
     }
 
@@ -605,7 +623,10 @@ mod tests {
         let root = Utf8Path::from_path(temp_dir.path()).unwrap().to_owned();
         (
             temp_dir,
-            GoCryptFsEntryStorage::new(NativeFileSystem::new(root)),
+            GoCryptFsEntryStorage::with_directory_layout(
+                NativeFileSystem::new(root),
+                Arc::new(DetachedTestLayout),
+            ),
         )
     }
 
@@ -619,26 +640,27 @@ mod tests {
         };
         (
             temp_dir,
-            GoCryptFsEntryStorage::with_options(NativeFileSystem::new(root), options).unwrap(),
+            GoCryptFsEntryStorage::with_options_and_directory_layout(
+                NativeFileSystem::new(root),
+                options,
+                Arc::new(DetachedTestLayout),
+            )
+            .unwrap(),
         )
     }
 
     #[test]
     fn gocryptfs_storage_materializes_directory_and_native_symlink() {
         let (_temp_dir, storage) = gocryptfs_storage();
-        let root = storage
-            .initialize_root_directory(&DetachedTestLayout)
-            .unwrap();
+        let root = storage.initialize_root_directory().unwrap();
         assert_eq!(root.token, vec![7; 16]);
         let entry_path = VirtualPathBuf::from("docs");
         let token = vec![7; 16];
         let metadata = storage
-            .create_directory(entry_path.clone(), token.clone(), &DetachedTestLayout, None)
+            .create_directory(entry_path.clone(), token.clone(), None)
             .unwrap();
-        assert_eq!(metadata.kind, StorageEntryKind::Directory);
-        let directory = storage
-            .resolve_directory(&entry_path, &DetachedTestLayout)
-            .unwrap();
+        assert!(metadata.file_type == FileType::Directory);
+        let directory = storage.resolve_directory(&entry_path).unwrap();
         assert_eq!(directory.entry_path, entry_path);
         assert_eq!(directory.contents_path, directory.entry_path);
         assert_eq!(directory.token, token);
@@ -646,7 +668,7 @@ mod tests {
         let metadata = storage
             .create_symlink(VirtualPath::new("link"), b"docs")
             .unwrap();
-        assert_eq!(metadata.kind, StorageEntryKind::Symlink);
+        assert!(metadata.file_type == FileType::SymLink);
         assert_eq!(
             storage.read_symlink(VirtualPath::new("link")).unwrap(),
             b"docs"
@@ -663,14 +685,14 @@ mod tests {
             .unwrap();
         assert_eq!(entries.len(), 2);
 
-        storage.remove_symlink(VirtualPath::new("link")).unwrap();
+        storage.remove_entry(VirtualPath::new("link")).unwrap();
         assert!(storage.storage_fs.metadata("link".into()).is_err());
 
         storage
             .storage_fs
             .put(VirtualPath::new("file"), b"contents")
             .unwrap();
-        storage.remove_file(VirtualPath::new("file")).unwrap();
+        storage.remove_entry(VirtualPath::new("file")).unwrap();
         assert!(storage.storage_fs.metadata("file".into()).is_err());
 
         storage.remove_directory(&directory).unwrap();
@@ -712,7 +734,7 @@ mod tests {
         assert_eq!(entries[0].file_name, logical_name);
         assert_eq!(entries[0].path, paths.content);
 
-        storage.remove_file(logical_path).unwrap();
+        storage.remove_entry(logical_path).unwrap();
         assert!(!storage.storage_fs.exists(&paths.content).unwrap());
         assert!(!storage.storage_fs.exists(&sidecar).unwrap());
     }
@@ -749,25 +771,16 @@ mod tests {
     #[test]
     fn long_directory_name_resolves_to_its_content_entry() {
         let (_temp_dir, storage) = short_name_storage();
-        storage
-            .initialize_root_directory(&DetachedTestLayout)
-            .unwrap();
+        storage.initialize_root_directory().unwrap();
         let logical_name = "encoded-directory".repeat(6);
         let logical_path = VirtualPath::new(&logical_name);
         let paths = storage.entry_paths(logical_path);
         let token = vec![7; 16];
 
         storage
-            .create_directory(
-                logical_path.to_owned(),
-                token.clone(),
-                &DetachedTestLayout,
-                None,
-            )
+            .create_directory(logical_path.to_owned(), token.clone(), None)
             .unwrap();
-        let directory = storage
-            .resolve_directory(logical_path, &DetachedTestLayout)
-            .unwrap();
+        let directory = storage.resolve_directory(logical_path).unwrap();
 
         assert_eq!(directory.entry_path, paths.content);
         assert_eq!(directory.contents_path, paths.content);
@@ -830,11 +843,8 @@ mod tests {
         storage.create_symlink(logical_path, b"target").unwrap();
 
         assert_eq!(storage.read_symlink(logical_path).unwrap(), b"target");
-        assert_eq!(
-            storage.metadata(logical_path).unwrap().kind,
-            StorageEntryKind::Symlink
-        );
-        storage.remove_symlink(logical_path).unwrap();
+        assert!(storage.metadata(logical_path).unwrap().file_type == FileType::SymLink);
+        storage.remove_entry(logical_path).unwrap();
         assert!(!storage.storage_fs.exists(&paths.content).unwrap());
         assert!(!storage.storage_fs.exists(&paths.sidecar.unwrap()).unwrap());
     }

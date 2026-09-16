@@ -1,7 +1,6 @@
 use super::{
     EncryptionLayout, EncryptionTranslator, EntryStorage, FileType, FsDirEntry, Metadata,
-    OrIoError, Permissions, StorageDirEntry, StorageEntryKind, StorageMetadata, VirtualPath,
-    VirtualPathBuf,
+    OrIoError, Permissions, StorageDirEntry, VirtualPath, VirtualPathBuf,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::Digest;
@@ -20,23 +19,15 @@ pub(super) fn default_metadata<T: EncryptionLayout + ?Sized>(
 /// Converts represented metadata to the logical encrypted-filesystem view.
 pub(crate) fn storage_metadata_to_plain<T: EncryptionTranslator + ?Sized>(
     this: &T,
-    metadata: StorageMetadata,
+    mut metadata: Metadata,
 ) -> std::io::Result<Metadata> {
-    let mut raw = metadata.raw;
-    raw.file_type = match metadata.kind {
-        StorageEntryKind::File => FileType::File,
-        StorageEntryKind::Directory => FileType::Directory,
-        StorageEntryKind::Symlink => FileType::SymLink,
-        StorageEntryKind::Other => FileType::Other,
-    };
-
-    if metadata.kind == StorageEntryKind::File {
-        raw.len = this.cipher_size_to_plain(raw.len).or_invalid()?;
-        raw.blocks = 1 + raw.len / T::PLAIN_BLOCK_LEN;
-    } else if metadata.kind == StorageEntryKind::Symlink {
-        raw.permissions = 0o777_u16.into();
+    if metadata.file_type == FileType::File {
+        metadata.len = this.cipher_size_to_plain(metadata.len).or_invalid()?;
+        metadata.blocks = 1 + metadata.len / T::PLAIN_BLOCK_LEN;
+    } else if metadata.file_type == FileType::SymLink {
+        metadata.permissions = 0o777_u16.into();
     }
-    Ok(raw)
+    Ok(metadata)
 }
 
 /// Decrypts one represented directory entry and converts its metadata.
@@ -69,9 +60,7 @@ pub(super) fn default_list_dir_plain_names<T: EncryptionLayout + ?Sized + 'stati
     } else {
         this.plain_path_to_cipher(plain_path).or_invalid()?
     };
-    let directory = this
-        .entry_storage()
-        .resolve_directory(&entry_path, this.directory_layout())?;
+    let directory = this.entry_storage().resolve_directory(&entry_path)?;
 
     Ok(this
         .entry_storage()
@@ -102,13 +91,10 @@ pub(super) fn default_mkdir<T: EncryptionLayout + ?Sized>(
     permissions: Option<Permissions>,
 ) -> std::io::Result<Metadata> {
     let entry_path = this.plain_path_to_cipher(plain_path).or_invalid()?;
-    let token = this.directory_layout().generate_directory_token();
-    let metadata = this.entry_storage().create_directory(
-        entry_path,
-        token,
-        this.directory_layout(),
-        permissions,
-    )?;
+    let token = this.entry_storage().generate_directory_token();
+    let metadata = this
+        .entry_storage()
+        .create_directory(entry_path, token, permissions)?;
     storage_metadata_to_plain(this, metadata)
 }
 
@@ -117,11 +103,7 @@ pub(super) fn default_remove<T: EncryptionLayout + ?Sized>(
     plain_path: &VirtualPath,
 ) -> std::io::Result<()> {
     let cipher_path = this.plain_path_to_cipher(plain_path).or_invalid()?;
-    let metadata = this.entry_storage().metadata(&cipher_path)?;
-    match metadata.kind {
-        StorageEntryKind::Symlink => this.entry_storage().remove_symlink(&cipher_path),
-        _ => this.entry_storage().remove_file(&cipher_path),
-    }
+    this.entry_storage().remove_entry(&cipher_path)
 }
 
 pub(super) fn default_remove_dir<T: EncryptionLayout + ?Sized>(
@@ -129,9 +111,7 @@ pub(super) fn default_remove_dir<T: EncryptionLayout + ?Sized>(
     plain_path: &VirtualPath,
 ) -> std::io::Result<()> {
     let entry_path = this.plain_path_to_cipher(plain_path).or_invalid()?;
-    let directory = this
-        .entry_storage()
-        .resolve_directory(&entry_path, this.directory_layout())?;
+    let directory = this.entry_storage().resolve_directory(&entry_path)?;
     this.entry_storage().remove_directory(&directory)?;
     this.remove_cached_plain_path(plain_path);
     Ok(())
@@ -182,13 +162,9 @@ pub(super) fn default_set_permissions<T: EncryptionLayout + ?Sized>(
     plain_path: &VirtualPath,
     permissions: Permissions,
 ) -> std::io::Result<Metadata> {
-    let metadata = default_metadata(this, plain_path)?;
-    if metadata.file_type == FileType::SymLink {
-        return Ok(metadata);
-    }
     let path = this.plain_path_to_cipher(plain_path).or_invalid()?;
-    this.entry_storage().set_permissions(&path, permissions)?;
-    default_metadata(this, plain_path)
+    let metadata = this.entry_storage().set_permissions(&path, permissions)?;
+    storage_metadata_to_plain(this, metadata)
 }
 /// Sets access and modification times.
 pub(super) fn default_set_time<T: EncryptionLayout + ?Sized>(

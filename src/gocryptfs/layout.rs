@@ -16,6 +16,10 @@ impl DirectoryContentLayout for GoCryptFsDirectoryLayout {
     ) -> Result<VirtualPathBuf> {
         Ok(entry_path.to_owned())
     }
+
+    fn is_detached_directory_contents_path(&self, _path: &VirtualPath) -> bool {
+        false
+    }
 }
 
 impl DirectoryLayout for GoCryptFsDirectoryLayout {
@@ -48,9 +52,6 @@ where
     fn entry_storage(&self) -> &Self::EntryStorage {
         self.backend.entry_storage()
     }
-    fn directory_layout(&self) -> &dyn DirectoryLayout {
-        self.directory_layout.as_ref()
-    }
     fn remove_cached_plain_path(&self, plain_path: &VirtualPath) {
         default_remove_cached_plain_path(&self.backend, plain_path);
     }
@@ -81,9 +82,8 @@ where
                             let cipher_part = self.plain_name_to_cipher(dir_iv, plain_part)?;
                             absolute_path = cipher_parent.join(cipher_part);
                         } else {
-                            let directory = self
-                                .entry_storage()
-                                .resolve_directory(&absolute_path, self.directory_layout())?;
+                            let directory =
+                                self.entry_storage().resolve_directory(&absolute_path)?;
 
                             absolute_path = directory.contents_path;
                             cache.insert(

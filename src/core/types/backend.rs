@@ -87,6 +87,14 @@ mod tests {
             let name = URL_SAFE_NO_PAD.encode(Sha256::digest(token));
             Ok(VirtualPath::new("objects").join(name))
         }
+
+        fn is_detached_directory_contents_path(&self, path: &VirtualPath) -> bool {
+            self.detached
+                && path
+                    .as_str()
+                    .strip_prefix("objects/")
+                    .is_some_and(|name| !name.is_empty() && !name.contains('/'))
+        }
     }
 
     impl DirectoryLayout for MatrixDirectoryLayout {
@@ -138,7 +146,7 @@ mod tests {
     ) {
         let root = backend
             .entry_storage()
-            .resolve_directory(VirtualPath::root(), backend.directory_layout())
+            .resolve_directory(VirtualPath::root())
             .unwrap();
         assert_eq!(root.token.len(), expected_root_token_len);
 
@@ -148,7 +156,7 @@ mod tests {
             .unwrap();
         let directory = backend
             .entry_storage()
-            .resolve_directory(&entry_path, backend.directory_layout())
+            .resolve_directory(&entry_path)
             .unwrap();
         assert_eq!(directory.entry_path != directory.contents_path, detached);
 
@@ -187,31 +195,20 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let root = Utf8Path::from_path(temp_dir.path()).unwrap().to_owned();
         let directory_layout = matrix_layout(MatrixTokenKind::GoCryptFs, false);
-        let backend = FsBackend::new(GoCryptFsEntryStorage::new(NativeFileSystem::new(
-            root.clone(),
-        )));
-        GoCryptFs::init_with_backend_and_directory_layout(
-            &backend,
-            "password",
-            directory_layout.as_ref(),
-        )
-        .unwrap();
-        let cryptfs = GoCryptFs::try_new_with_backend_and_directory_layout(
-            backend,
-            "password",
+        let backend = FsBackend::new(GoCryptFsEntryStorage::with_directory_layout(
+            NativeFileSystem::new(root.clone()),
             directory_layout.clone(),
-        )
-        .unwrap();
+        ));
+        GoCryptFs::init_with_backend(&backend, "password").unwrap();
+        let cryptfs = GoCryptFs::try_new_with_backend(backend, "password").unwrap();
         create_matrix_tree(&cryptfs, false, 16);
         drop(cryptfs);
 
-        let backend = FsBackend::new(GoCryptFsEntryStorage::new(NativeFileSystem::new(root)));
-        let reopened = GoCryptFs::try_new_with_backend_and_directory_layout(
-            backend,
-            "password",
+        let backend = FsBackend::new(GoCryptFsEntryStorage::with_directory_layout(
+            NativeFileSystem::new(root),
             directory_layout,
-        )
-        .unwrap();
+        ));
+        let reopened = GoCryptFs::try_new_with_backend(backend, "password").unwrap();
         assert_matrix_tree(reopened);
     }
 
@@ -220,31 +217,20 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let root = Utf8Path::from_path(temp_dir.path()).unwrap().to_owned();
         let directory_layout = matrix_layout(MatrixTokenKind::GoCryptFs, true);
-        let backend = FsBackend::new(CryptomatorEntryStorage::new(NativeFileSystem::new(
-            root.clone(),
-        )));
-        GoCryptFs::init_with_backend_and_directory_layout(
-            &backend,
-            "password",
-            directory_layout.as_ref(),
-        )
-        .unwrap();
-        let cryptfs = GoCryptFs::try_new_with_backend_and_directory_layout(
-            backend,
-            "password",
+        let backend = FsBackend::new(CryptomatorEntryStorage::new(
+            NativeFileSystem::new(root.clone()),
             directory_layout.clone(),
-        )
-        .unwrap();
+        ));
+        GoCryptFs::init_with_backend(&backend, "password").unwrap();
+        let cryptfs = GoCryptFs::try_new_with_backend(backend, "password").unwrap();
         create_matrix_tree(&cryptfs, true, 16);
         drop(cryptfs);
 
-        let backend = FsBackend::new(CryptomatorEntryStorage::new(NativeFileSystem::new(root)));
-        let reopened = GoCryptFs::try_new_with_backend_and_directory_layout(
-            backend,
-            "password",
+        let backend = FsBackend::new(CryptomatorEntryStorage::new(
+            NativeFileSystem::new(root),
             directory_layout,
-        )
-        .unwrap();
+        ));
+        let reopened = GoCryptFs::try_new_with_backend(backend, "password").unwrap();
         assert_matrix_tree(reopened);
     }
 
@@ -253,31 +239,20 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let root = Utf8Path::from_path(temp_dir.path()).unwrap().to_owned();
         let directory_layout = matrix_layout(MatrixTokenKind::Cryptomator, false);
-        let backend = FsBackend::new(GoCryptFsEntryStorage::new(NativeFileSystem::new(
-            root.clone(),
-        )));
-        CryptoMator::init_with_backend_and_directory_layout(
-            &backend,
-            "password",
-            directory_layout.as_ref(),
-        )
-        .unwrap();
-        let cryptfs = CryptoMator::try_new_with_backend_and_directory_layout(
-            backend,
-            "password",
+        let backend = FsBackend::new(GoCryptFsEntryStorage::with_directory_layout(
+            NativeFileSystem::new(root.clone()),
             directory_layout.clone(),
-        )
-        .unwrap();
+        ));
+        CryptoMator::init_with_backend(&backend, "password").unwrap();
+        let cryptfs = CryptoMator::try_new_with_backend(backend, "password").unwrap();
         create_matrix_tree(&cryptfs, false, 0);
         drop(cryptfs);
 
-        let backend = FsBackend::new(GoCryptFsEntryStorage::new(NativeFileSystem::new(root)));
-        let reopened = CryptoMator::try_new_with_backend_and_directory_layout(
-            backend,
-            "password",
+        let backend = FsBackend::new(GoCryptFsEntryStorage::with_directory_layout(
+            NativeFileSystem::new(root),
             directory_layout,
-        )
-        .unwrap();
+        ));
+        let reopened = CryptoMator::try_new_with_backend(backend, "password").unwrap();
         assert_matrix_tree(reopened);
     }
 
@@ -286,31 +261,20 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let root = Utf8Path::from_path(temp_dir.path()).unwrap().to_owned();
         let directory_layout = matrix_layout(MatrixTokenKind::Cryptomator, true);
-        let backend = FsBackend::new(CryptomatorEntryStorage::new(NativeFileSystem::new(
-            root.clone(),
-        )));
-        CryptoMator::init_with_backend_and_directory_layout(
-            &backend,
-            "password",
-            directory_layout.as_ref(),
-        )
-        .unwrap();
-        let cryptfs = CryptoMator::try_new_with_backend_and_directory_layout(
-            backend,
-            "password",
+        let backend = FsBackend::new(CryptomatorEntryStorage::new(
+            NativeFileSystem::new(root.clone()),
             directory_layout.clone(),
-        )
-        .unwrap();
+        ));
+        CryptoMator::init_with_backend(&backend, "password").unwrap();
+        let cryptfs = CryptoMator::try_new_with_backend(backend, "password").unwrap();
         create_matrix_tree(&cryptfs, true, 0);
         drop(cryptfs);
 
-        let backend = FsBackend::new(CryptomatorEntryStorage::new(NativeFileSystem::new(root)));
-        let reopened = CryptoMator::try_new_with_backend_and_directory_layout(
-            backend,
-            "password",
+        let backend = FsBackend::new(CryptomatorEntryStorage::new(
+            NativeFileSystem::new(root),
             directory_layout,
-        )
-        .unwrap();
+        ));
+        let reopened = CryptoMator::try_new_with_backend(backend, "password").unwrap();
         assert_matrix_tree(reopened);
     }
 }

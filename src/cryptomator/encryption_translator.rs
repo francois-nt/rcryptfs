@@ -39,7 +39,7 @@ impl<T: Backend> EncryptionTranslator for CryptoMator<T> {
         let s = str::from_utf8(&plain_bytes)?;
         Ok(s.to_string())
     }
-    /// Encrypts a plain entry name with AES-SIV and encodes it as a .c9r filename.
+    /// Encrypts and encodes a plain entry name without storage-specific suffixes.
     fn plain_name_to_cipher(&self, parent_dir_id: &[u8], plain_name: &str) -> Result<String> {
         if plain_name == "." || plain_name == ".." {
             return Ok(plain_name.to_string());
@@ -55,8 +55,7 @@ impl<T: Backend> EncryptionTranslator for CryptoMator<T> {
             .encrypt(std::iter::once(parent_dir_id), pt)
             .map_err(|_| anyhow!("AES-SIV encryption failed"))?;
 
-        let b64 = base64::engine::general_purpose::URL_SAFE.encode(ct);
-        Ok(format!("{b64}.c9r"))
+        Ok(base64::engine::general_purpose::URL_SAFE.encode(ct))
     }
     fn cipher_block_to_plain(
         &self,
@@ -255,9 +254,6 @@ mod tests {
 
         CryptoMator {
             backend: MemoryBackend,
-            directory_layout: std::sync::Arc::new(
-                super::super::layout::CryptomatorDirectoryLayout::new(siv_key),
-            ),
             siv_key,
         }
     }

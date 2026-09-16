@@ -680,7 +680,9 @@ mod tests {
             .unwrap();
         let _file = CryptFsFile::try_from_file(cipher_file, backend, false).unwrap();
 
-        let raw_len = std::fs::metadata(root.join("cipher.bin")).unwrap().len();
+        let raw_len = std::fs::metadata(root.join("cipher.bin.c9r"))
+            .unwrap()
+            .len();
         assert_eq!(
             raw_len,
             CryptoMator::<CryptomatorBackend>::HEADER_LEN as u64

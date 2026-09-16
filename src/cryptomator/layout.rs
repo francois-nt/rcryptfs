@@ -17,6 +17,27 @@ impl CryptomatorDirectoryLayout {
     }
 }
 
+/// Returns whether a path has the canonical Cryptomator contents shape.
+fn is_canonical_contents_path(path: &VirtualPath) -> bool {
+    let mut components = path.components();
+    let Some("d") = components.next() else {
+        return false;
+    };
+    let Some(prefix) = components.next() else {
+        return false;
+    };
+    let Some(suffix) = components.next() else {
+        return false;
+    };
+    components.next().is_none()
+        && prefix.len() == 2
+        && suffix.len() == 30
+        && prefix
+            .bytes()
+            .chain(suffix.bytes())
+            .all(|byte| byte.is_ascii_uppercase() || (b'2'..=b'7').contains(&byte))
+}
+
 impl DirectoryContentLayout for CryptomatorDirectoryLayout {
     fn detached_directory_contents_path(
         &self,
@@ -24,6 +45,10 @@ impl DirectoryContentLayout for CryptomatorDirectoryLayout {
         token: &[u8],
     ) -> Result<VirtualPathBuf> {
         super::inner::dir_id_to_storage_path(&self.siv_key, str::from_utf8(token)?)
+    }
+
+    fn is_detached_directory_contents_path(&self, path: &VirtualPath) -> bool {
+        is_canonical_contents_path(path)
     }
 }
 
@@ -60,7 +85,7 @@ where
             if plain_path.as_str().is_empty() {
                 let directory = this
                     .entry_storage()
-                    .resolve_directory(VirtualPath::root(), this.directory_layout())?;
+                    .resolve_directory(VirtualPath::root())?;
                 cache.insert(
                     String::default(),
                     (directory.token.clone(), directory.contents_path.clone()),
@@ -75,9 +100,7 @@ where
                     let cipher_part = this.plain_name_to_cipher(dir_id, plain_part)?;
                     absolute_path = cipher_parent.join(cipher_part);
                 } else {
-                    let directory = this
-                        .entry_storage()
-                        .resolve_directory(&absolute_path, this.directory_layout())?;
+                    let directory = this.entry_storage().resolve_directory(&absolute_path)?;
                     absolute_path = directory.contents_path;
                     cache.insert(
                         partial_plain_path.as_str().into(),
@@ -89,9 +112,7 @@ where
                 partial_plain_path.push(plain_part);
             }
 
-            let directory = this
-                .entry_storage()
-                .resolve_directory(&absolute_path, this.directory_layout())?;
+            let directory = this.entry_storage().resolve_directory(&absolute_path)?;
             absolute_path = directory.contents_path;
 
             cache.insert(
@@ -112,9 +133,6 @@ where
 
     fn entry_storage(&self) -> &Self::EntryStorage {
         self.backend.entry_storage()
-    }
-    fn directory_layout(&self) -> &dyn DirectoryLayout {
-        self.directory_layout.as_ref()
     }
     /// Resolves one logical path to its visible storage entry inside the parent storage directory.
     fn plain_path_to_cipher(&self, plain_path: &VirtualPath) -> Result<VirtualPathBuf> {
@@ -139,10 +157,10 @@ impl<S: EntryStorage> EncryptionLayout for CryptoMator<FsBackend<S>> {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::CryptomatorBackend;
     use crate::core::{
         EncryptionLayout, FileType, NativeFileSystem, PathLayout, StorageFileSystem, Utf8Path,
     };
+    use crate::{CryptomatorBackend, CryptomatorEntryStorage};
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -156,6 +174,12 @@ mod tests {
         backend.entry_storage().storage_fs()
     }
 
+    /// Maps a short opaque name to its physical Cryptomator entry path.
+    fn physical_entry_path(path: &VirtualPath) -> VirtualPathBuf {
+        let parent = path.parent().unwrap_or_else(VirtualPath::root);
+        parent.join(format!("{}.c9r", path.file_name().unwrap()))
+    }
+
     /// Creates a deterministic Cryptomator backend with a materialized root storage directory.
     fn test_backend() -> (tempfile::TempDir, CryptoMator<CryptomatorBackend>) {
         let temp_dir = tempdir().unwrap();
@@ -166,16 +190,16 @@ mod tests {
             *byte = i as u8;
         }
 
+        let directory_layout = Arc::new(CryptomatorDirectoryLayout::new(siv_key));
         let backend: CryptoMator<CryptomatorBackend> = CryptoMator {
-            backend: root.into(),
-            directory_layout: Arc::new(CryptomatorDirectoryLayout::new(siv_key)),
+            backend: FsBackend::new(CryptomatorEntryStorage::new(
+                NativeFileSystem::new(root.to_owned()),
+                directory_layout,
+            )),
             siv_key,
         };
 
-        backend
-            .entry_storage()
-            .initialize_root_directory(backend.directory_layout())
-            .unwrap();
+        backend.entry_storage().initialize_root_directory().unwrap();
 
         (temp_dir, backend)
     }
@@ -228,6 +252,48 @@ mod tests {
     }
 
     #[test]
+    fn long_plain_name_roundtrips_through_shortened_storage() {
+        let (_temp_dir, backend) = test_backend();
+        let plain_name = "long-name-".repeat(20);
+        let plain_path = VirtualPath::new(&plain_name);
+
+        backend.mknode(plain_path, None).unwrap();
+        let entries = Arc::from(backend)
+            .list_dir_plain_names(VirtualPath::root())
+            .unwrap()
+            .collect::<std::io::Result<Vec<_>>>()
+            .unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0.file_name, plain_name);
+        assert!(entries[0].0.metadata.file_type == FileType::File);
+    }
+
+    #[test]
+    fn canonical_layout_recognizes_only_canonical_contents_paths() {
+        let layout = CryptomatorDirectoryLayout::new([0; 64]);
+
+        assert!(layout.is_detached_directory_contents_path(VirtualPath::new(
+            "d/AB/ABCDEFGHIJKLMNOPQRSTUVWXYZ2345"
+        )));
+        assert!(
+            !layout.is_detached_directory_contents_path(VirtualPath::new(
+                "objects/ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+            ))
+        );
+        assert!(
+            !layout.is_detached_directory_contents_path(VirtualPath::new(
+                "d/AB/ABCDEFGHIJKLMNOPQRSTUVWXYZ2345/entry.c9r"
+            ))
+        );
+        assert!(
+            !layout.is_detached_directory_contents_path(VirtualPath::new(
+                "d/aB/ABCDEFGHIJKLMNOPQRSTUVWXYZ2345"
+            ))
+        );
+    }
+
+    #[test]
     fn metadata_reports_empty_plain_file_for_header_only_node() {
         let (_temp_dir, backend) = test_backend();
 
@@ -236,7 +302,8 @@ mod tests {
             .unwrap();
 
         let cipher_path = backend.plain_path_to_cipher(p("empty.txt")).unwrap();
-        let raw_metadata = raw_storage(&backend).metadata(&cipher_path).unwrap();
+        let physical_path = physical_entry_path(&cipher_path);
+        let raw_metadata = raw_storage(&backend).metadata(&physical_path).unwrap();
         let plain_metadata = backend.metadata(p("empty.txt")).unwrap();
         let duplicate_error = backend.mknode(p("empty.txt"), None).err().unwrap();
 
@@ -258,15 +325,16 @@ mod tests {
         backend.mkdir(p("docs"), Some(0o755_u16.into())).unwrap();
 
         let cipher_path = backend.plain_path_to_cipher(p("docs")).unwrap();
+        let physical_path = physical_entry_path(&cipher_path);
         let directory = backend
             .entry_storage()
-            .resolve_directory(&cipher_path, backend.directory_layout())
+            .resolve_directory(&cipher_path)
             .unwrap();
 
-        assert!(raw_storage(&backend).exists(&cipher_path).unwrap());
+        assert!(raw_storage(&backend).exists(&physical_path).unwrap());
         assert!(
             raw_storage(&backend)
-                .exists(&cipher_path.join("dir.c9r"))
+                .exists(&physical_path.join("dir.c9r"))
                 .unwrap()
         );
         assert!(
@@ -283,14 +351,15 @@ mod tests {
 
         backend.mkdir(p("docs"), Some(0o755_u16.into())).unwrap();
         let cipher_path = backend.plain_path_to_cipher(p("docs")).unwrap();
+        let physical_path = physical_entry_path(&cipher_path);
         let directory = backend
             .entry_storage()
-            .resolve_directory(&cipher_path, backend.directory_layout())
+            .resolve_directory(&cipher_path)
             .unwrap();
 
         backend.remove_dir(p("docs")).unwrap();
 
-        assert!(!raw_storage(&backend).exists(&cipher_path).unwrap());
+        assert!(!raw_storage(&backend).exists(&physical_path).unwrap());
         assert!(
             !raw_storage(&backend)
                 .exists(&directory.contents_path)
@@ -306,13 +375,19 @@ mod tests {
             .mknode(p("file.txt"), Some(0o644_u16.into()))
             .unwrap();
         let file_path = backend.plain_path_to_cipher(p("file.txt")).unwrap();
+        let physical_file_path = physical_entry_path(&file_path);
         backend.remove(p("file.txt")).unwrap();
-        assert!(!raw_storage(&backend).exists(&file_path).unwrap());
+        assert!(!raw_storage(&backend).exists(&physical_file_path).unwrap());
 
         backend.create_symlink(p("link"), "../target.txt").unwrap();
         let symlink_path = backend.plain_path_to_cipher(p("link")).unwrap();
+        let physical_symlink_path = physical_entry_path(&symlink_path);
         backend.remove(p("link")).unwrap();
-        assert!(!raw_storage(&backend).exists(&symlink_path).unwrap());
+        assert!(
+            !raw_storage(&backend)
+                .exists(&physical_symlink_path)
+                .unwrap()
+        );
     }
 
     #[test]
@@ -320,7 +395,7 @@ mod tests {
         let (_temp_dir, backend) = test_backend();
         let root_storage = backend
             .entry_storage()
-            .resolve_directory(VirtualPath::root(), backend.directory_layout())
+            .resolve_directory(VirtualPath::root())
             .unwrap()
             .contents_path;
 

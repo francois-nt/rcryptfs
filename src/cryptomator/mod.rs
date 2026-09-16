@@ -3,8 +3,7 @@ mod encryption_translator;
 mod entry_storage;
 mod inner;
 mod layout;
-use crate::core::{Backend, DirectoryLayout, FsBackend, NativeFileSystem};
-use std::sync::Arc;
+use crate::core::{Backend, FsBackend, NativeFileSystem};
 
 const HEADER_NONCE_LEN: usize = 12;
 const NONCE_LEN: usize = 12;
@@ -12,7 +11,6 @@ const NONCE_LEN: usize = 12;
 /// Cryptomator backend state with the derived SIV key material.
 pub struct CryptoMator<T: Backend = CryptomatorBackend> {
     backend: T,
-    directory_layout: Arc<dyn DirectoryLayout>,
     siv_key: [u8; 64],
 }
 

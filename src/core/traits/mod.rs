@@ -13,10 +13,7 @@ mod storage_fs;
 pub use config_fs::{ConfigFileSystem, ConfigFileSystemAccess};
 pub use crypto_backend::*;
 pub(crate) use entry_storage::forward_storage_fs_operations;
-pub use entry_storage::{
-    AsyncEntryStorage, EntryStorage, StorageDirEntry, StorageDirectory, StorageEntryKind,
-    StorageMetadata,
-};
+pub use entry_storage::{AsyncEntryStorage, EntryStorage, StorageDirEntry, StorageDirectory};
 pub use filesystem::*;
 pub(crate) use helpers::temp_file_path;
 use helpers::{

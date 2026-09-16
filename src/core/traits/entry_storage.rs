@@ -1,29 +1,5 @@
-use super::{
-    DirectoryLayout, FileHandle, FileOpenOptions, Metadata, Permissions, VirtualPath,
-    VirtualPathBuf,
-};
+use super::{FileHandle, FileOpenOptions, Metadata, Permissions, VirtualPath, VirtualPathBuf};
 use std::{future::Future, time::SystemTime};
-
-/// Logical kind exposed by an on-disk entry representation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum StorageEntryKind {
-    /// A regular file representation.
-    File,
-    /// A directory representation.
-    Directory,
-    /// A symbolic-link representation.
-    Symlink,
-    /// An unsupported or unrecognized representation.
-    Other,
-}
-
-/// Physical metadata together with the logical kind represented by the entry.
-pub struct StorageMetadata {
-    /// Metadata reported by the underlying filesystem.
-    pub raw: Metadata,
-    /// Logical kind inferred from the on-disk representation.
-    pub kind: StorageEntryKind,
-}
 
 /// One visible entry returned from a represented storage directory.
 pub struct StorageDirEntry {
@@ -31,8 +7,8 @@ pub struct StorageDirEntry {
     pub file_name: String,
     /// Physical path of the represented entry.
     pub path: VirtualPathBuf,
-    /// Physical metadata and inferred logical kind.
-    pub metadata: StorageMetadata,
+    /// Metadata normalized to the represented logical entry.
+    pub metadata: Metadata,
 }
 
 /// Paths and opaque token required to materialize a logical directory.
@@ -254,6 +230,9 @@ pub trait EntryStorage: Send + Sync + 'static {
     /// Iterator returned when listing represented directory entries.
     type DirEntries: Iterator<Item = std::io::Result<StorageDirEntry>> + 'static;
 
+    /// Generates the opaque token for a new represented directory.
+    fn generate_directory_token(&self) -> Vec<u8>;
+
     /// Opens a represented regular file using opaque physical options.
     fn open_file_with(
         &self,
@@ -261,24 +240,17 @@ pub trait EntryStorage: Send + Sync + 'static {
         options: FileOpenOptions,
     ) -> std::io::Result<Self::OpenHandle>;
 
-    /// Returns physical metadata and the logical kind represented by an entry.
-    fn metadata(&self, path: &VirtualPath) -> std::io::Result<StorageMetadata>;
+    /// Returns metadata normalized to the represented logical entry.
+    fn metadata(&self, path: &VirtualPath) -> std::io::Result<Metadata>;
 
     /// Lists visible encoded entries from a directory contents location.
     fn read_dir(&self, contents_path: &VirtualPath) -> std::io::Result<Self::DirEntries>;
 
     /// Resolves a stored directory to its complete physical description.
-    fn resolve_directory<L: DirectoryLayout + ?Sized>(
-        &self,
-        entry_path: &VirtualPath,
-        directory_layout: &L,
-    ) -> std::io::Result<StorageDirectory>;
+    fn resolve_directory(&self, entry_path: &VirtualPath) -> std::io::Result<StorageDirectory>;
 
     /// Initializes the physical representation of the logical root directory.
-    fn initialize_root_directory<L: DirectoryLayout + ?Sized>(
-        &self,
-        directory_layout: &L,
-    ) -> std::io::Result<StorageDirectory>;
+    fn initialize_root_directory(&self) -> std::io::Result<StorageDirectory>;
 
     /// Materializes a regular file with opaque initial contents.
     fn create_file(
@@ -286,38 +258,37 @@ pub trait EntryStorage: Send + Sync + 'static {
         path: &VirtualPath,
         initial_contents: &[u8],
         permissions: Option<Permissions>,
-    ) -> std::io::Result<StorageMetadata>;
+    ) -> std::io::Result<Metadata>;
 
     /// Materializes a logical directory according to the storage representation.
-    fn create_directory<L: DirectoryLayout + ?Sized>(
+    fn create_directory(
         &self,
         entry_path: VirtualPathBuf,
         token: Vec<u8>,
-        directory_layout: &L,
         permissions: Option<Permissions>,
-    ) -> std::io::Result<StorageMetadata>;
+    ) -> std::io::Result<Metadata>;
 
     /// Removes a logical directory and its representation-specific contents.
     fn remove_directory(&self, directory: &StorageDirectory) -> std::io::Result<()>;
 
-    /// Removes a regular file representation.
-    fn remove_file(&self, path: &VirtualPath) -> std::io::Result<()>;
+    /// Removes a represented non-directory entry.
+    fn remove_entry(&self, path: &VirtualPath) -> std::io::Result<()>;
 
     /// Materializes a logical symlink containing an opaque target payload.
-    fn create_symlink(&self, path: &VirtualPath, target: &[u8])
-    -> std::io::Result<StorageMetadata>;
+    fn create_symlink(&self, path: &VirtualPath, target: &[u8]) -> std::io::Result<Metadata>;
 
     /// Reads the opaque target payload represented by a logical symlink.
     fn read_symlink(&self, path: &VirtualPath) -> std::io::Result<Vec<u8>>;
 
-    /// Removes a logical symlink representation.
-    fn remove_symlink(&self, path: &VirtualPath) -> std::io::Result<()>;
-
     /// Renames one represented entry without interpreting its encoded name.
     fn rename(&self, old_path: &VirtualPath, new_path: &VirtualPath) -> std::io::Result<()>;
 
-    /// Sets permissions on a represented entry.
-    fn set_permissions(&self, path: &VirtualPath, permissions: Permissions) -> std::io::Result<()>;
+    /// Sets permissions and returns normalized metadata for a represented entry.
+    fn set_permissions(
+        &self,
+        path: &VirtualPath,
+        permissions: Permissions,
+    ) -> std::io::Result<Metadata>;
 
     /// Sets access and modification times on a represented entry.
     fn set_time(
@@ -354,11 +325,14 @@ pub trait AsyncEntryStorage: Send + Sync + 'static {
     /// Iterating over the returned entries must not perform blocking I/O.
     type DirEntries: Iterator<Item = std::io::Result<StorageDirEntry>> + Send + 'static;
 
-    /// Returns physical metadata and the logical kind represented by an entry.
+    /// Generates the opaque token for a new represented directory.
+    fn generate_directory_token(&self) -> Vec<u8>;
+
+    /// Returns metadata normalized to the represented logical entry.
     fn metadata(
         &self,
         path: &VirtualPath,
-    ) -> impl Future<Output = std::io::Result<StorageMetadata>> + Send;
+    ) -> impl Future<Output = std::io::Result<Metadata>> + Send;
 
     /// Lists visible encoded entries from a directory contents location.
     fn read_dir(
@@ -367,16 +341,14 @@ pub trait AsyncEntryStorage: Send + Sync + 'static {
     ) -> impl Future<Output = std::io::Result<Self::DirEntries>> + Send;
 
     /// Resolves a stored directory to its complete physical description.
-    fn resolve_directory<L: DirectoryLayout + ?Sized>(
+    fn resolve_directory(
         &self,
         entry_path: &VirtualPath,
-        directory_layout: &L,
     ) -> impl Future<Output = std::io::Result<StorageDirectory>> + Send;
 
     /// Initializes the physical representation of the logical root directory.
-    fn initialize_root_directory<L: DirectoryLayout + ?Sized>(
+    fn initialize_root_directory(
         &self,
-        directory_layout: &L,
     ) -> impl Future<Output = std::io::Result<StorageDirectory>> + Send;
 
     /// Materializes a regular file with opaque initial contents.
@@ -385,16 +357,15 @@ pub trait AsyncEntryStorage: Send + Sync + 'static {
         path: &VirtualPath,
         initial_contents: &[u8],
         permissions: Option<Permissions>,
-    ) -> impl Future<Output = std::io::Result<StorageMetadata>> + Send;
+    ) -> impl Future<Output = std::io::Result<Metadata>> + Send;
 
     /// Materializes a logical directory according to the storage representation.
-    fn create_directory<L: DirectoryLayout + ?Sized>(
+    fn create_directory(
         &self,
         entry_path: VirtualPathBuf,
         token: Vec<u8>,
-        directory_layout: &L,
         permissions: Option<Permissions>,
-    ) -> impl Future<Output = std::io::Result<StorageMetadata>> + Send;
+    ) -> impl Future<Output = std::io::Result<Metadata>> + Send;
 
     /// Removes a logical directory and its representation-specific contents.
     fn remove_directory(
@@ -402,27 +373,21 @@ pub trait AsyncEntryStorage: Send + Sync + 'static {
         directory: &StorageDirectory,
     ) -> impl Future<Output = std::io::Result<()>> + Send;
 
-    /// Removes a regular file representation.
-    fn remove_file(&self, path: &VirtualPath) -> impl Future<Output = std::io::Result<()>> + Send;
+    /// Removes a represented non-directory entry.
+    fn remove_entry(&self, path: &VirtualPath) -> impl Future<Output = std::io::Result<()>> + Send;
 
     /// Materializes a logical symlink containing an opaque target payload.
     fn create_symlink(
         &self,
         path: &VirtualPath,
         target: &[u8],
-    ) -> impl Future<Output = std::io::Result<StorageMetadata>> + Send;
+    ) -> impl Future<Output = std::io::Result<Metadata>> + Send;
 
     /// Reads the opaque target payload represented by a logical symlink.
     fn read_symlink(
         &self,
         path: &VirtualPath,
     ) -> impl Future<Output = std::io::Result<Vec<u8>>> + Send;
-
-    /// Removes a logical symlink representation.
-    fn remove_symlink(
-        &self,
-        path: &VirtualPath,
-    ) -> impl Future<Output = std::io::Result<()>> + Send;
 
     /// Renames one represented entry without interpreting its encoded name.
     fn rename(
@@ -436,7 +401,7 @@ pub trait AsyncEntryStorage: Send + Sync + 'static {
         &self,
         path: &VirtualPath,
         permissions: Permissions,
-    ) -> impl Future<Output = std::io::Result<()>> + Send;
+    ) -> impl Future<Output = std::io::Result<Metadata>> + Send;
 
     /// Sets access and modification times on a represented entry.
     fn set_time(
