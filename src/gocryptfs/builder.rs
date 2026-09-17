@@ -1,7 +1,7 @@
-use super::{GoCryptFs, GoCryptFsBackend};
+use super::GoCryptFs;
 use crate::core::{
-    BackendProvider, ConfigFileSystemAccess, EncryptedFileSystem, EntryStorage, FileCachePolicy,
-    FileSystem, FsBackend, MasterKey, Result,
+    BackendProvider, ConfigFileSystem, EncryptedFileSystem, EntryStorage, FileCachePolicy,
+    FileSystem, FsBackend, MasterKey, NativeFileSystem, Result, StorageConfigFileSystem,
 };
 use crate::{Utf8Path, register_provider};
 
@@ -18,27 +18,23 @@ register_provider!(GoCryptFsBuilder);
 
 impl GoCryptFsBuilder {
     /// Checks whether an entry representation contains a GoCryptFS crypto configuration.
-    pub fn probe_backend<S>(backend: &FsBackend<S>) -> bool
-    where
-        S: EntryStorage + ConfigFileSystemAccess,
-    {
-        backend
-            .config_fs()
-            .exists("gocryptfs.conf".into())
-            .unwrap_or(false)
+    pub fn probe_config<C: ConfigFileSystem + ?Sized>(config_fs: &C) -> bool {
+        config_fs.exists("gocryptfs.conf".into()).unwrap_or(false)
     }
 
     /// Builds a GoCryptFS crypto layer over an arbitrary entry representation.
-    pub fn try_build_with_backend<S>(
+    pub fn try_build_with_backend<S, C>(
         backend: FsBackend<S>,
+        config_fs: &C,
         password: &str,
         cache_policy: Box<dyn FileCachePolicy>,
     ) -> Result<Box<dyn FileSystem>>
     where
-        S: EntryStorage + ConfigFileSystemAccess,
+        S: EntryStorage,
+        C: ConfigFileSystem + ?Sized,
     {
         let cryptfs: EncryptedFileSystem<GoCryptFs<FsBackend<S>>> = (
-            GoCryptFs::try_new_with_backend(backend, password)?,
+            GoCryptFs::try_new_with_backend(backend, config_fs, password)?,
             cache_policy,
         )
             .into();
@@ -46,14 +42,16 @@ impl GoCryptFsBuilder {
     }
 
     /// Initializes a GoCryptFS crypto configuration over an entry representation.
-    pub fn init_with_backend<S>(
+    pub fn init_with_backend<S, C>(
         backend: &FsBackend<S>,
+        config_fs: &C,
         password: &str,
     ) -> Result<Box<dyn MasterKey>>
     where
-        S: EntryStorage + ConfigFileSystemAccess,
+        S: EntryStorage,
+        C: ConfigFileSystem + ?Sized,
     {
-        GoCryptFs::init_with_backend(backend, password)
+        GoCryptFs::init_with_backend(backend, config_fs, password)
             .map(|key| -> Box<dyn MasterKey> { Box::new(GoCryptFSMasterKey(key)) })
     }
 }
@@ -63,8 +61,8 @@ impl BackendProvider for GoCryptFsBuilder {
         "gocryptfs"
     }
     fn probe(&self, root: &Utf8Path) -> bool {
-        let backend: GoCryptFsBackend = root.into();
-        Self::probe_backend(&backend)
+        let storage_fs = NativeFileSystem::new(root.to_owned());
+        Self::probe_config(&StorageConfigFileSystem::new(&storage_fs))
     }
     fn try_build(
         &self,
@@ -72,15 +70,16 @@ impl BackendProvider for GoCryptFsBuilder {
         password: &str,
         cache_policy: Box<dyn FileCachePolicy>,
     ) -> Result<Box<dyn FileSystem>> {
-        let backend: GoCryptFsBackend = root.into();
-        Self::try_build_with_backend(backend, password, cache_policy)
+        let cryptfs: EncryptedFileSystem<GoCryptFs> =
+            (GoCryptFs::try_new(root, password)?, cache_policy).into();
+        Ok(Box::new(cryptfs))
     }
     fn init_with_default_params(
         &self,
         root: &Utf8Path,
         password: &str,
     ) -> Result<Box<dyn MasterKey>> {
-        let backend: GoCryptFsBackend = root.into();
-        Self::init_with_backend(&backend, password)
+        GoCryptFs::init_with_default_params(root, password)
+            .map(|key| -> Box<dyn MasterKey> { Box::new(GoCryptFSMasterKey(key)) })
     }
 }

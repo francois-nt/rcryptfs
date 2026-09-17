@@ -1,8 +1,7 @@
 use crate::core::{
-    ConfigFileSystem, ConfigFileSystemAccess, DirectoryLayout, EntryStorage, FileOpenOptions,
-    FileType, Metadata, OrIoError, Permissions, RootDirectoryToken, StorageDirEntry,
-    StorageDirectory, StorageFileSystem, VirtualPath, VirtualPathBuf,
-    forward_storage_fs_operations,
+    DirectoryLayout, EntryStorage, FileOpenOptions, FileType, Metadata, OrIoError, Permissions,
+    RootDirectoryToken, StorageDirEntry, StorageDirectory, StorageFileSystem, VirtualPath,
+    VirtualPathBuf, forward_storage_fs_operations,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE};
 use sha1::{Digest, Sha1};
@@ -62,26 +61,6 @@ pub struct CryptomatorEntryStorage<F: StorageFileSystem> {
     directory_layout: Arc<dyn DirectoryLayout>,
 }
 
-/// Cryptomator storage available before the key-dependent directory policy is known.
-pub(crate) struct UnboundCryptomatorEntryStorage<F: StorageFileSystem> {
-    storage_fs: F,
-}
-
-impl<F: StorageFileSystem> UnboundCryptomatorEntryStorage<F> {
-    /// Creates the configuration-only bootstrap view of a raw filesystem.
-    pub(crate) fn new(storage_fs: F) -> Self {
-        Self { storage_fs }
-    }
-
-    /// Consumes the bootstrap view and binds its immutable directory policy.
-    pub(crate) fn bind(
-        self,
-        directory_layout: Arc<dyn DirectoryLayout>,
-    ) -> CryptomatorEntryStorage<F> {
-        CryptomatorEntryStorage::new(self.storage_fs, directory_layout)
-    }
-}
-
 impl<F: StorageFileSystem> CryptomatorEntryStorage<F> {
     /// Creates a Cryptomator container representation with its directory policy.
     pub fn new(storage_fs: F, directory_layout: Arc<dyn DirectoryLayout>) -> Self {
@@ -89,6 +68,44 @@ impl<F: StorageFileSystem> CryptomatorEntryStorage<F> {
             storage_fs,
             directory_layout,
         }
+    }
+
+    /// Initializes the represented root while the raw filesystem is still borrowed.
+    pub(super) fn initialize_root_storage(
+        storage_fs: &F,
+        directory_layout: &dyn DirectoryLayout,
+    ) -> std::io::Result<StorageDirectory> {
+        let (token, persist_token) = match directory_layout.root_directory_token() {
+            RootDirectoryToken::Persisted => (directory_layout.generate_directory_token(), true),
+            RootDirectoryToken::Implicit(token) => (token, false),
+        };
+        directory_layout
+            .validate_directory_token(&token, true)
+            .or_invalid()?;
+        let contents_path = directory_layout
+            .detached_directory_contents_path(VirtualPath::root(), &token)
+            .or_invalid()?;
+        if !directory_layout.is_detached_directory_contents_path(&contents_path) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "directory layout returned an invalid detached contents path",
+            ));
+        }
+        let token_path = VirtualPath::root().join(CRYPTOMATOR_DIR_FILE);
+        if persist_token {
+            storage_fs.put_new(&token_path, &token)?;
+        }
+        if let Err(error) = storage_fs.mkdir_all(&contents_path) {
+            if persist_token {
+                let _ = storage_fs.remove(&token_path);
+            }
+            return Err(error);
+        }
+        Ok(StorageDirectory {
+            entry_path: VirtualPathBuf::default(),
+            contents_path,
+            token,
+        })
     }
 
     /// Returns the raw filesystem for representation-level tests.
@@ -340,8 +357,10 @@ impl<F: StorageFileSystem> CryptomatorEntryStorage<F> {
         &self,
         path: &VirtualPath,
     ) -> std::io::Result<(Metadata, VirtualPathBuf, ClassifiedEntry)> {
-        let directory_layout = self.directory_layout.as_ref();
-        if directory_layout.is_detached_directory_contents_path(path) {
+        if self
+            .directory_layout
+            .is_detached_directory_contents_path(path)
+        {
             let outer = self.storage_fs.metadata(path)?;
             let classification = self.classify_physical(path, outer.file_type)?;
             return Ok((outer, path.to_owned(), classification));
@@ -369,62 +388,6 @@ impl<F: StorageFileSystem> CryptomatorEntryStorage<F> {
     fn container_is_file(&self, path: &VirtualPath) -> std::io::Result<bool> {
         self.storage_fs
             .exists(&path.join(CRYPTOMATOR_CONTENTS_FILE))
-    }
-}
-
-impl<F: StorageFileSystem> ConfigFileSystem for CryptomatorEntryStorage<F> {
-    fn is_empty(&self) -> std::io::Result<bool> {
-        self.storage_fs.is_dir_empty(VirtualPath::root())
-    }
-
-    fn exists(&self, path: &VirtualPath) -> std::io::Result<bool> {
-        self.storage_fs.exists(path)
-    }
-
-    fn read_all(&self, path: &VirtualPath) -> std::io::Result<Vec<u8>> {
-        self.storage_fs.read_all(path)
-    }
-
-    fn put_new(&self, path: &VirtualPath, data: &[u8]) -> std::io::Result<()> {
-        self.storage_fs.put_new(path, data)
-    }
-
-    fn remove(&self, path: &VirtualPath) -> std::io::Result<()> {
-        self.storage_fs.remove(path)
-    }
-}
-
-impl<F: StorageFileSystem> ConfigFileSystem for UnboundCryptomatorEntryStorage<F> {
-    fn is_empty(&self) -> std::io::Result<bool> {
-        self.storage_fs.is_dir_empty(VirtualPath::root())
-    }
-
-    fn exists(&self, path: &VirtualPath) -> std::io::Result<bool> {
-        self.storage_fs.exists(path)
-    }
-
-    fn read_all(&self, path: &VirtualPath) -> std::io::Result<Vec<u8>> {
-        self.storage_fs.read_all(path)
-    }
-
-    fn put_new(&self, path: &VirtualPath, data: &[u8]) -> std::io::Result<()> {
-        self.storage_fs.put_new(path, data)
-    }
-
-    fn remove(&self, path: &VirtualPath) -> std::io::Result<()> {
-        self.storage_fs.remove(path)
-    }
-}
-
-impl<F: StorageFileSystem> ConfigFileSystemAccess for CryptomatorEntryStorage<F> {
-    fn config_fs(&self) -> &dyn ConfigFileSystem {
-        self
-    }
-}
-
-impl<F: StorageFileSystem> ConfigFileSystemAccess for UnboundCryptomatorEntryStorage<F> {
-    fn config_fs(&self) -> &dyn ConfigFileSystem {
-        self
     }
 }
 
@@ -522,38 +485,7 @@ impl<F: StorageFileSystem> EntryStorage for CryptomatorEntryStorage<F> {
     }
 
     fn initialize_root_directory(&self) -> std::io::Result<StorageDirectory> {
-        let directory_layout = self.directory_layout.as_ref();
-        let (token, persist_token) = match directory_layout.root_directory_token() {
-            RootDirectoryToken::Persisted => (directory_layout.generate_directory_token(), true),
-            RootDirectoryToken::Implicit(token) => (token, false),
-        };
-        directory_layout
-            .validate_directory_token(&token, true)
-            .or_invalid()?;
-        let contents_path = directory_layout
-            .detached_directory_contents_path(VirtualPath::root(), &token)
-            .or_invalid()?;
-        if !directory_layout.is_detached_directory_contents_path(&contents_path) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "directory layout returned an invalid detached contents path",
-            ));
-        }
-        let token_path = VirtualPath::root().join(CRYPTOMATOR_DIR_FILE);
-        if persist_token {
-            self.storage_fs.put_new(&token_path, &token)?;
-        }
-        if let Err(error) = self.storage_fs.mkdir_all(&contents_path) {
-            if persist_token {
-                let _ = self.storage_fs.remove(&token_path);
-            }
-            return Err(error);
-        }
-        Ok(StorageDirectory {
-            entry_path: VirtualPathBuf::default(),
-            contents_path,
-            token,
-        })
+        Self::initialize_root_storage(&self.storage_fs, self.directory_layout.as_ref())
     }
 
     fn create_file(

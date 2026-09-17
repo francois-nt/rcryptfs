@@ -1,8 +1,7 @@
 use crate::core::{
-    ConfigFileSystem, ConfigFileSystemAccess, DirectoryLayout, EntryStorage, FsBackend, Metadata,
-    NativeFileSystem, OrIoError, Permissions, RootDirectoryToken, StorageDirEntry,
-    StorageDirectory, StorageFileSystem, Utf8Path, Utf8PathBuf, VirtualPath, VirtualPathBuf,
-    forward_storage_fs_operations, temp_file_path,
+    DirectoryLayout, EntryStorage, FsBackend, Metadata, NativeFileSystem, OrIoError, Permissions,
+    RootDirectoryToken, StorageDirEntry, StorageDirectory, StorageFileSystem, Utf8Path,
+    Utf8PathBuf, VirtualPath, VirtualPathBuf, forward_storage_fs_operations, temp_file_path,
 };
 use base64::{
     Engine,
@@ -115,6 +114,34 @@ impl<F: StorageFileSystem> GoCryptFsEntryStorage<F> {
             storage_fs,
             options,
             directory_layout,
+        })
+    }
+
+    /// Initializes the represented root while the raw filesystem is still borrowed.
+    pub(super) fn initialize_root_storage(
+        storage_fs: &F,
+        directory_layout: &dyn DirectoryLayout,
+    ) -> std::io::Result<StorageDirectory> {
+        let token = match directory_layout.root_directory_token() {
+            RootDirectoryToken::Persisted => {
+                let token = directory_layout.generate_directory_token();
+                directory_layout
+                    .validate_directory_token(&token, true)
+                    .or_invalid()?;
+                storage_fs.put_new(&VirtualPath::root().join(GOCRYPTFS_DIRIV), &token)?;
+                token
+            }
+            RootDirectoryToken::Implicit(token) => {
+                directory_layout
+                    .validate_directory_token(&token, true)
+                    .or_invalid()?;
+                token
+            }
+        };
+        Ok(StorageDirectory {
+            entry_path: VirtualPathBuf::default(),
+            contents_path: VirtualPathBuf::default(),
+            token,
         })
     }
 
@@ -282,34 +309,6 @@ impl From<&Utf8Path> for FsBackend<GoCryptFsEntryStorage<NativeFileSystem>> {
     }
 }
 
-impl<F: StorageFileSystem> ConfigFileSystem for GoCryptFsEntryStorage<F> {
-    fn is_empty(&self) -> std::io::Result<bool> {
-        self.storage_fs.is_dir_empty(VirtualPath::root())
-    }
-
-    fn exists(&self, path: &VirtualPath) -> std::io::Result<bool> {
-        self.storage_fs.exists(path)
-    }
-
-    fn read_all(&self, path: &VirtualPath) -> std::io::Result<Vec<u8>> {
-        self.storage_fs.read_all(path)
-    }
-
-    fn put_new(&self, path: &VirtualPath, data: &[u8]) -> std::io::Result<()> {
-        self.storage_fs.put_new(path, data)
-    }
-
-    fn remove(&self, path: &VirtualPath) -> std::io::Result<()> {
-        self.storage_fs.remove(path)
-    }
-}
-
-impl<F: StorageFileSystem> ConfigFileSystemAccess for GoCryptFsEntryStorage<F> {
-    fn config_fs(&self) -> &dyn ConfigFileSystem {
-        self
-    }
-}
-
 impl<F: StorageFileSystem> EntryStorage for GoCryptFsEntryStorage<F> {
     type DirEntries = std::vec::IntoIter<std::io::Result<StorageDirEntry>>;
 
@@ -368,29 +367,7 @@ impl<F: StorageFileSystem> EntryStorage for GoCryptFsEntryStorage<F> {
     }
 
     fn initialize_root_directory(&self) -> std::io::Result<StorageDirectory> {
-        let directory_layout = self.directory_layout.as_ref();
-        let token = match directory_layout.root_directory_token() {
-            RootDirectoryToken::Persisted => {
-                let token = directory_layout.generate_directory_token();
-                directory_layout
-                    .validate_directory_token(&token, true)
-                    .or_invalid()?;
-                self.storage_fs
-                    .put_new(&VirtualPath::root().join(GOCRYPTFS_DIRIV), &token)?;
-                token
-            }
-            RootDirectoryToken::Implicit(token) => {
-                directory_layout
-                    .validate_directory_token(&token, true)
-                    .or_invalid()?;
-                token
-            }
-        };
-        Ok(StorageDirectory {
-            entry_path: VirtualPathBuf::default(),
-            contents_path: VirtualPathBuf::default(),
-            token,
-        })
+        Self::initialize_root_storage(&self.storage_fs, self.directory_layout.as_ref())
     }
 
     fn create_file(

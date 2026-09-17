@@ -1,10 +1,10 @@
 use super::{
-    CryptoMator, CryptomatorBackend, entry_storage::UnboundCryptomatorEntryStorage,
-    layout::CryptomatorDirectoryLayout,
+    CryptoMator, CryptomatorBackend, CryptomatorEntryStorage, layout::CryptomatorDirectoryLayout,
 };
 use crate::core::{
-    Backend, ConfigFileSystemAccess, EncryptionTranslator, EntryStorage, FsBackend, MasterKey,
-    NativeFileSystem, Result, Utf8Path, VirtualPath, VirtualPathBuf, XattrLayout,
+    Backend, ConfigFileSystem, EncryptionTranslator, EntryStorage, FsBackend, MasterKey,
+    NativeFileSystem, Result, StorageConfigFileSystem, Utf8Path, VirtualPath, VirtualPathBuf,
+    XattrLayout,
 };
 use aes_gcm::{
     Aes256Gcm,
@@ -252,51 +252,57 @@ impl CryptoMator<CryptomatorBackend> {
         root_path: &Utf8Path,
         password: &str,
     ) -> Result<CryptomatorMasterKeys> {
-        let storage =
-            UnboundCryptomatorEntryStorage::new(NativeFileSystem::new(root_path.to_owned()));
+        let storage_fs = NativeFileSystem::new(root_path.to_owned());
+        let config_fs = StorageConfigFileSystem::new(&storage_fs);
         let (config, master_keys) = CryptoMatorConfig::try_new(password)?;
         let directory_layout = Arc::new(CryptomatorDirectoryLayout::new(master_keys.siv_key()));
-        let backend = FsBackend::new(storage.bind(directory_layout));
-        Self::write_config_and_initialize_root(&backend, &config, master_keys)
+        Self::write_config_and_initialize_root(&config_fs, &config, master_keys, || {
+            CryptomatorEntryStorage::initialize_root_storage(&storage_fs, directory_layout.as_ref())
+        })
     }
 
     /// Opens a Cryptomator repository from a local cipher root path.
     pub fn try_new(root_path: &Utf8Path, password: &str) -> Result<Self> {
-        let storage =
-            UnboundCryptomatorEntryStorage::new(NativeFileSystem::new(root_path.to_owned()));
-        let config_data = storage
-            .config_fs()
-            .read_all("masterkey.cryptomator".into())?;
+        let storage_fs = NativeFileSystem::new(root_path.to_owned());
+        let config_data =
+            StorageConfigFileSystem::new(&storage_fs).read_all("masterkey.cryptomator".into())?;
         let config: CryptoMatorConfig = serde_json::from_slice(&config_data)?;
         let keys = derive_keys(password, &config)?;
         let siv_key = keys.siv_key();
         let directory_layout = Arc::new(CryptomatorDirectoryLayout::new(siv_key));
-        let backend = FsBackend::new(storage.bind(directory_layout));
+        let backend = FsBackend::new(CryptomatorEntryStorage::new(storage_fs, directory_layout));
         Ok(Self { backend, siv_key })
     }
 }
 
 impl<S> CryptoMator<FsBackend<S>>
 where
-    S: EntryStorage + ConfigFileSystemAccess,
+    S: EntryStorage,
 {
     /// Initializes the Cryptomator crypto configuration over an entry representation.
-    pub fn init_with_backend(
+    pub fn init_with_backend<C: ConfigFileSystem + ?Sized>(
         backend: &FsBackend<S>,
+        config_fs: &C,
         password: &str,
     ) -> Result<CryptomatorMasterKeys> {
         let (config, master_keys) = CryptoMatorConfig::try_new(password)?;
-        Self::write_config_and_initialize_root(backend, &config, master_keys)
+        Self::write_config_and_initialize_root(config_fs, &config, master_keys, || {
+            backend.entry_storage().initialize_root_directory()
+        })
     }
 
     /// Writes the crypto configuration and initializes its root representation.
-    fn write_config_and_initialize_root(
-        backend: &FsBackend<S>,
+    fn write_config_and_initialize_root<C, InitializeRoot>(
+        config_fs: &C,
         config: &CryptoMatorConfig,
         master_keys: CryptomatorMasterKeys,
-    ) -> Result<CryptomatorMasterKeys> {
+        initialize_root: InitializeRoot,
+    ) -> Result<CryptomatorMasterKeys>
+    where
+        C: ConfigFileSystem + ?Sized,
+        InitializeRoot: FnOnce() -> std::io::Result<crate::core::StorageDirectory>,
+    {
         let root_path = VirtualPath::root();
-        let config_fs = backend.config_fs();
         if !config_fs.is_empty()? {
             bail!("Directory {root_path} must be empty!");
         }
@@ -316,19 +322,18 @@ where
             .put_new("vault.cryptomator".into(), vault.as_bytes())
             .inspect_err(rollback)?;
 
-        backend
-            .entry_storage()
-            .initialize_root_directory()
-            .inspect_err(rollback)?;
+        initialize_root().inspect_err(rollback)?;
 
         Ok(master_keys)
     }
 
     /// Opens a Cryptomator crypto configuration over an entry representation.
-    pub fn try_new_with_backend(backend: FsBackend<S>, password: &str) -> Result<Self> {
-        let config_data = backend
-            .config_fs()
-            .read_all("masterkey.cryptomator".into())?;
+    pub fn try_new_with_backend<C: ConfigFileSystem + ?Sized>(
+        backend: FsBackend<S>,
+        config_fs: &C,
+        password: &str,
+    ) -> Result<Self> {
+        let config_data = config_fs.read_all("masterkey.cryptomator".into())?;
         let config: CryptoMatorConfig = serde_json::from_slice(&config_data)?;
 
         let keys = derive_keys(password, &config)?;

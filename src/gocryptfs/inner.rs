@@ -1,5 +1,8 @@
-use super::{GoCryptFs, GoCryptFsBackend};
-use crate::core::{Backend, ConfigFileSystemAccess, EntryStorage, FsBackend, Result};
+use super::{GoCryptFs, GoCryptFsBackend, GoCryptFsEntryStorage, layout::GoCryptFsDirectoryLayout};
+use crate::core::{
+    Backend, ConfigFileSystem, EntryStorage, FsBackend, NativeFileSystem, Result,
+    StorageConfigFileSystem,
+};
 use crate::{Utf8Path, VirtualPath};
 use aes::{Aes256, cipher::generic_array::GenericArray};
 use aes_gcm::{
@@ -248,23 +251,54 @@ impl<T: Backend> GoCryptFs<T> {
 impl GoCryptFs<GoCryptFsBackend> {
     /// Initializes a new GoCryptFS-compatible backend with default parameters.
     pub fn init_with_default_params(root_path: &Utf8Path, password: &str) -> Result<Vec<u8>> {
-        let backend = root_path.into();
-        Self::init_with_backend(&backend, password)
+        let storage_fs = NativeFileSystem::new(root_path.to_owned());
+        let config_fs = StorageConfigFileSystem::new(&storage_fs);
+        Self::write_config_and_initialize_root(&config_fs, password, || {
+            GoCryptFsEntryStorage::initialize_root_storage(&storage_fs, &GoCryptFsDirectoryLayout)
+        })
     }
     /// Creates a new GoCryptFs instance from a local cipher root path and password.
     pub fn try_new(root_path: &Utf8Path, password: &str) -> Result<Self> {
-        Self::try_new_with_backend(root_path.into(), password)
+        let storage_fs = NativeFileSystem::new(root_path.to_owned());
+        let config_data =
+            StorageConfigFileSystem::new(&storage_fs).read_all("gocryptfs.conf".into())?;
+        let config: GoCryptfsConfig = serde_json::from_slice(&config_data)?;
+        let master_key = get_master_key(password, &config)?;
+        let backend = FsBackend::new(GoCryptFsEntryStorage::new(storage_fs));
+        derive_keys(
+            backend,
+            master_key.as_slice().try_into()?,
+            &config.feature_flags,
+        )
     }
 }
 
 impl<S> GoCryptFs<FsBackend<S>>
 where
-    S: EntryStorage + ConfigFileSystemAccess,
+    S: EntryStorage,
 {
     /// Initializes the GoCryptFS crypto configuration over an entry representation.
-    pub fn init_with_backend(backend: &FsBackend<S>, password: &str) -> Result<Vec<u8>> {
+    pub fn init_with_backend<C: ConfigFileSystem + ?Sized>(
+        backend: &FsBackend<S>,
+        config_fs: &C,
+        password: &str,
+    ) -> Result<Vec<u8>> {
+        Self::write_config_and_initialize_root(config_fs, password, || {
+            backend.entry_storage().initialize_root_directory()
+        })
+    }
+
+    /// Writes the crypto configuration and initializes its root representation.
+    fn write_config_and_initialize_root<C, InitializeRoot>(
+        config_fs: &C,
+        password: &str,
+        initialize_root: InitializeRoot,
+    ) -> Result<Vec<u8>>
+    where
+        C: ConfigFileSystem + ?Sized,
+        InitializeRoot: FnOnce() -> std::io::Result<crate::core::StorageDirectory>,
+    {
         let root_path = VirtualPath::root();
-        let config_fs = backend.config_fs();
         if !config_fs.is_empty()? {
             bail!("Directory {root_path} must be empty!");
         }
@@ -278,16 +312,17 @@ where
             .put_new("gocryptfs.conf".into(), &json_config)
             .inspect_err(rollback)?;
 
-        backend
-            .entry_storage()
-            .initialize_root_directory()
-            .inspect_err(rollback)?;
+        initialize_root().inspect_err(rollback)?;
 
         Ok(master_key)
     }
     /// Opens a GoCryptFS crypto configuration over an entry representation.
-    pub fn try_new_with_backend(backend: FsBackend<S>, password: &str) -> Result<Self> {
-        let config_data = backend.config_fs().read_all("gocryptfs.conf".into())?;
+    pub fn try_new_with_backend<C: ConfigFileSystem + ?Sized>(
+        backend: FsBackend<S>,
+        config_fs: &C,
+        password: &str,
+    ) -> Result<Self> {
+        let config_data = config_fs.read_all("gocryptfs.conf".into())?;
         let config: GoCryptfsConfig = serde_json::from_slice(&config_data)?;
 
         let master_key = get_master_key(password, &config)?;
