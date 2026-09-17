@@ -20,6 +20,10 @@ What currently works:
   encrypted names
 - creation and access of `Cryptomator` format 8 repositories using `SIV_GCM`,
   including `.c9r` and shortened `.c9s` entries
+- authenticated loading of `Cryptomator` vault metadata, including JWT and
+  masterkey version MAC validation
+- propagation of the authenticated `shorteningThreshold` setting to `.c9s`
+  entries, with a default of `220` when the setting is absent
 - files, directories, and symbolic links for both entry representations
 - automatic repository detection when mounting or opening the CLI
 - FUSE-based mounting on Unix
@@ -29,8 +33,8 @@ What currently works:
 Current limitations:
 
 - compatibility is not complete for every `gocryptfs` or `Cryptomator` variant
-- `Cryptomator` vault metadata validation, `SIV_CTRMAC`, directory ID backups,
-  and conflict recovery remain incomplete
+- `Cryptomator` support for `SIV_CTRMAC`, directory ID backups, and conflict
+  recovery remains incomplete
 - Windows support is incomplete
 - multi-process access to the same encrypted backend is unsupported
 - the project still needs more testing and hardening
@@ -96,11 +100,14 @@ semantics and a production-ready Windows access layer are not complete.
 - common `gocryptfs` repositories, including the long-name sidecar format
 - the implemented `SIV_GCM` subset of `Cryptomator` format 8, with `.c9r`,
   `.c9s`, and detached content directories
+- authenticated `vault.cryptomator` loading for format 8, including `HS256`,
+  `HS384`, and `HS512` signatures and explicit cipher selection
+- authenticated `shorteningThreshold` settings for the canonical Cryptomator
+  entry representation
 
 ### Planned
 
 - broader `gocryptfs` compatibility
-- validation of `vault.cryptomator` and its declared settings
 - `Cryptomator` directory ID backups, conflict handling, and broader
   interoperability
 - `SIV_CTRMAC` support when that compatibility work is resumed

@@ -1,5 +1,6 @@
 use super::{
-    CryptoMator, CryptomatorBackend, CryptomatorEntryStorage, layout::CryptomatorDirectoryLayout,
+    CryptoMator, CryptomatorBackend, CryptomatorEntryStorage, CryptomatorEntryStorageOptions,
+    DEFAULT_SHORTENING_THRESHOLD, layout::CryptomatorDirectoryLayout,
 };
 use crate::core::{
     Backend, ConfigFileSystem, EncryptionTranslator, EntryStorage, FsBackend, MasterKey,
@@ -20,52 +21,181 @@ use rand::RngCore;
 use scrypt::{Params as ScryptParams, scrypt};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
-use sha2::Sha256;
+use sha2::{Sha256, Sha384, Sha512};
 use std::sync::Arc;
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 type HmacSha256 = Hmac<Sha256>;
+type HmacSha384 = Hmac<Sha384>;
+type HmacSha512 = Hmac<Sha512>;
+
+const MASTERKEY_FILE: &str = "masterkey.cryptomator";
+const MASTERKEY_KID: &str = "masterkeyfile:masterkey.cryptomator";
+const VAULT_FILE: &str = "vault.cryptomator";
 
 /// JWT header stored in vault.cryptomator.
-#[derive(Serialize)]
-struct JwtHeader<'a> {
-    kid: &'a str,
-    typ: &'a str,
-    alg: &'a str,
+#[derive(Deserialize, Serialize)]
+struct JwtHeader {
+    kid: String,
+    typ: String,
+    alg: String,
 }
 
 /// JWT payload stored in vault.cryptomator.
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct JwtPayload<'a> {
+struct JwtPayload {
     format: u32,
-    shortening_threshold: u32,
+    #[serde(default = "default_shortening_threshold")]
+    shortening_threshold: usize,
     jti: String,
-    cipher_combo: &'a str,
+    cipher_combo: String,
+}
+
+/// Returns the interoperable filename shortening threshold.
+fn default_shortening_threshold() -> usize {
+    DEFAULT_SHORTENING_THRESHOLD
+}
+
+/// Parsed compact JWT with its original authenticated input.
+struct ParsedVault {
+    header: JwtHeader,
+    payload: JwtPayload,
+    signing_input: String,
+    signature: Vec<u8>,
+}
+
+impl ParsedVault {
+    /// Parses the three segments of vault.cryptomator without trusting their contents.
+    fn parse(data: &[u8]) -> Result<Self> {
+        let token = std::str::from_utf8(data)
+            .context("vault.cryptomator is not valid UTF-8")?
+            .trim();
+        let mut segments = token.split('.');
+        let header_segment = segments
+            .next()
+            .context("vault.cryptomator is missing its header")?;
+        let payload_segment = segments
+            .next()
+            .context("vault.cryptomator is missing its payload")?;
+        let signature_segment = segments
+            .next()
+            .context("vault.cryptomator is missing its signature")?;
+        if segments.next().is_some() {
+            bail!("vault.cryptomator must contain exactly three segments");
+        }
+
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let header = serde_json::from_slice(
+            &b64.decode(header_segment)
+                .context("decode vault.cryptomator header")?,
+        )
+        .context("parse vault.cryptomator header")?;
+        let payload = serde_json::from_slice(
+            &b64.decode(payload_segment)
+                .context("decode vault.cryptomator payload")?,
+        )
+        .context("parse vault.cryptomator payload")?;
+        let signature = b64
+            .decode(signature_segment)
+            .context("decode vault.cryptomator signature")?;
+
+        Ok(Self {
+            header,
+            payload,
+            signing_input: format!("{header_segment}.{payload_segment}"),
+            signature,
+        })
+    }
+
+    /// Validates the JWT header and returns the supported masterkey path.
+    fn masterkey_path(&self) -> Result<&'static VirtualPath> {
+        if self.header.typ != "JWT" {
+            bail!("unsupported vault.cryptomator type: {}", self.header.typ);
+        }
+        if !matches!(self.header.alg.as_str(), "HS256" | "HS384" | "HS512") {
+            bail!(
+                "unsupported vault.cryptomator algorithm: {}",
+                self.header.alg
+            );
+        }
+        if self.header.kid != MASTERKEY_KID {
+            bail!("unsupported vault.cryptomator key: {}", self.header.kid);
+        }
+        Ok(VirtualPath::new(MASTERKEY_FILE))
+    }
+
+    /// Authenticates the JWT and returns its supported payload.
+    fn verify(self, master_keys: &CryptomatorMasterKeys) -> Result<JwtPayload> {
+        let key = master_keys.jwt_key();
+        let signing_input = self.signing_input.as_bytes();
+        match self.header.alg.as_str() {
+            "HS256" => {
+                let mut mac = HmacSha256::new_from_slice(&key)?;
+                mac.update(signing_input);
+                mac.verify_slice(&self.signature)
+            }
+            "HS384" => {
+                let mut mac = HmacSha384::new_from_slice(&key)?;
+                mac.update(signing_input);
+                mac.verify_slice(&self.signature)
+            }
+            "HS512" => {
+                let mut mac = HmacSha512::new_from_slice(&key)?;
+                mac.update(signing_input);
+                mac.verify_slice(&self.signature)
+            }
+            _ => unreachable!("the JWT algorithm was validated before loading the key"),
+        }
+        .context("invalid vault.cryptomator signature")?;
+
+        if self.payload.format != 8 {
+            bail!(
+                "unsupported Cryptomator vault format: {}",
+                self.payload.format
+            );
+        }
+        match self.payload.cipher_combo.as_str() {
+            "SIV_GCM" => {}
+            "SIV_CTRMAC" => bail!("Cryptomator cipherCombo SIV_CTRMAC is not supported"),
+            cipher_combo => bail!("unsupported Cryptomator cipherCombo: {cipher_combo}"),
+        }
+
+        Ok(self.payload)
+    }
 }
 
 /// Builds the signed vault.cryptomator token for the current master keys.
 fn generate_vault_cryptomator(
     master_keys: &CryptomatorMasterKeys,
-    cipher_combo: &str,        // "SIV_GCM" ou "SIV_CTRMAC"
-    shortening_threshold: u32, // typiquement 220
+    cipher_combo: &str,          // "SIV_GCM" ou "SIV_CTRMAC"
+    shortening_threshold: usize, // typiquement 220
 ) -> Result<String> {
     if cipher_combo != "SIV_GCM" && cipher_combo != "SIV_CTRMAC" {
         bail!("unsupported cipherCombo: {cipher_combo}");
     }
 
     let header = JwtHeader {
-        kid: "masterkeyfile:masterkey.cryptomator",
-        typ: "JWT",
-        alg: "HS256",
+        kid: MASTERKEY_KID.to_owned(),
+        typ: "JWT".to_owned(),
+        alg: "HS256".to_owned(),
     };
     let payload = JwtPayload {
         format: 8,
         shortening_threshold,
         jti: Uuid::new_v4().to_string(),
-        cipher_combo,
+        cipher_combo: cipher_combo.to_owned(),
     };
 
+    sign_vault(&header, &payload, master_keys)
+}
+
+/// Serializes and signs a Cryptomator vault JWT.
+fn sign_vault(
+    header: &JwtHeader,
+    payload: &JwtPayload,
+    master_keys: &CryptomatorMasterKeys,
+) -> Result<String> {
     let header_json = serde_json::to_vec(&header)?;
     let payload_json = serde_json::to_vec(&payload)?;
 
@@ -76,14 +206,43 @@ fn generate_vault_cryptomator(
     let signing_input = format!("{header_b64}.{payload_b64}");
 
     let jwt_key = master_keys.jwt_key();
-
-    let mut mac = HmacSha256::new_from_slice(&jwt_key)?;
-    mac.update(signing_input.as_bytes());
-    let sig = mac.finalize().into_bytes(); // 32 bytes
+    let sig = match header.alg.as_str() {
+        "HS256" => {
+            let mut mac = HmacSha256::new_from_slice(&jwt_key)?;
+            mac.update(signing_input.as_bytes());
+            mac.finalize().into_bytes().to_vec()
+        }
+        "HS384" => {
+            let mut mac = HmacSha384::new_from_slice(&jwt_key)?;
+            mac.update(signing_input.as_bytes());
+            mac.finalize().into_bytes().to_vec()
+        }
+        "HS512" => {
+            let mut mac = HmacSha512::new_from_slice(&jwt_key)?;
+            mac.update(signing_input.as_bytes());
+            mac.finalize().into_bytes().to_vec()
+        }
+        algorithm => bail!("unsupported vault.cryptomator algorithm: {algorithm}"),
+    };
 
     let sig_b64 = b64.encode(sig);
 
     Ok(format!("{signing_input}.{sig_b64}"))
+}
+
+/// Opens and authenticates the Cryptomator configuration files.
+fn unlock_vault<C: ConfigFileSystem + ?Sized>(
+    config_fs: &C,
+    password: &str,
+) -> Result<(CryptomatorMasterKeys, JwtPayload)> {
+    let vault_data = config_fs.read_all(VAULT_FILE.into())?;
+    let vault = ParsedVault::parse(&vault_data)?;
+    let masterkey_path = vault.masterkey_path()?;
+    let config_data = config_fs.read_all(masterkey_path)?;
+    let config: CryptoMatorConfig = serde_json::from_slice(&config_data)?;
+    let master_keys = derive_keys(password, &config)?;
+    let payload = vault.verify(&master_keys)?;
+    Ok((master_keys, payload))
 }
 
 /// Serialized masterkey.cryptomator contents.
@@ -234,6 +393,14 @@ fn derive_keys(password: &str, config: &CryptoMatorConfig) -> Result<Cryptomator
         );
     }
 
+    let version_mac = base64::engine::general_purpose::STANDARD
+        .decode(config.version_mac.as_bytes())
+        .context("base64 decode versionMac")?;
+    let mut mac = HmacSha256::new_from_slice(&hmac)?;
+    mac.update(&config.version.to_be_bytes());
+    mac.verify_slice(&version_mac)
+        .context("invalid masterkey.cryptomator versionMac")?;
+
     Ok(CryptomatorMasterKeys {
         primary_master_key: primary,
         hmac_master_key: hmac,
@@ -264,13 +431,17 @@ impl CryptoMator<CryptomatorBackend> {
     /// Opens a Cryptomator repository from a local cipher root path.
     pub fn try_new(root_path: &Utf8Path, password: &str) -> Result<Self> {
         let storage_fs = NativeFileSystem::new(root_path.to_owned());
-        let config_data =
-            StorageConfigFileSystem::new(&storage_fs).read_all("masterkey.cryptomator".into())?;
-        let config: CryptoMatorConfig = serde_json::from_slice(&config_data)?;
-        let keys = derive_keys(password, &config)?;
+        let config_fs = StorageConfigFileSystem::new(&storage_fs);
+        let (keys, vault) = unlock_vault(&config_fs, password)?;
         let siv_key = keys.siv_key();
         let directory_layout = Arc::new(CryptomatorDirectoryLayout::new(siv_key));
-        let backend = FsBackend::new(CryptomatorEntryStorage::new(storage_fs, directory_layout));
+        let backend = FsBackend::new(CryptomatorEntryStorage::with_options(
+            storage_fs,
+            directory_layout,
+            CryptomatorEntryStorageOptions {
+                shortening_threshold: vault.shortening_threshold,
+            },
+        ));
         Ok(Self { backend, siv_key })
     }
 }
@@ -308,18 +479,18 @@ where
         }
 
         let rollback = |_: &std::io::Error| {
-            let _ = config_fs.remove("masterkey.cryptomator".into());
-            let _ = config_fs.remove("vault.cryptomator".into());
+            let _ = config_fs.remove(MASTERKEY_FILE.into());
+            let _ = config_fs.remove(VAULT_FILE.into());
         };
 
         let json_config = serde_json::to_vec_pretty(&config)?;
         config_fs
-            .put_new("masterkey.cryptomator".into(), &json_config)
+            .put_new(MASTERKEY_FILE.into(), &json_config)
             .inspect_err(rollback)?;
 
         let vault = generate_vault_cryptomator(&master_keys, "SIV_GCM", 220)?;
         config_fs
-            .put_new("vault.cryptomator".into(), vault.as_bytes())
+            .put_new(VAULT_FILE.into(), vault.as_bytes())
             .inspect_err(rollback)?;
 
         initialize_root().inspect_err(rollback)?;
@@ -333,10 +504,7 @@ where
         config_fs: &C,
         password: &str,
     ) -> Result<Self> {
-        let config_data = config_fs.read_all("masterkey.cryptomator".into())?;
-        let config: CryptoMatorConfig = serde_json::from_slice(&config_data)?;
-
-        let keys = derive_keys(password, &config)?;
+        let (keys, _vault) = unlock_vault(config_fs, password)?;
         let siv_key = keys.siv_key();
         Ok(CryptoMator { backend, siv_key })
     }
@@ -411,3 +579,177 @@ impl<T: Backend> CryptoMator<T> {
 }
 
 impl<T: Backend> XattrLayout for CryptoMator<T> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{PathLayout, StorageFileSystem};
+    use tempfile::tempdir;
+
+    /// Returns deterministic master keys for vault tests.
+    fn test_master_keys() -> CryptomatorMasterKeys {
+        CryptomatorMasterKeys {
+            primary_master_key: vec![0x11; 32],
+            hmac_master_key: vec![0x22; 32],
+        }
+    }
+
+    /// Returns a supported vault header.
+    fn test_header() -> JwtHeader {
+        JwtHeader {
+            kid: MASTERKEY_KID.to_owned(),
+            typ: "JWT".to_owned(),
+            alg: "HS256".to_owned(),
+        }
+    }
+
+    /// Returns a supported vault payload.
+    fn test_payload() -> JwtPayload {
+        JwtPayload {
+            format: 8,
+            shortening_threshold: 220,
+            jti: Uuid::nil().to_string(),
+            cipher_combo: "SIV_GCM".to_owned(),
+        }
+    }
+
+    #[test]
+    fn generated_vault_is_parsed_and_verified() {
+        let master_keys = test_master_keys();
+        let token = generate_vault_cryptomator(&master_keys, "SIV_GCM", 220).unwrap();
+        let vault = ParsedVault::parse(token.as_bytes()).unwrap();
+
+        assert_eq!(
+            vault.masterkey_path().unwrap(),
+            VirtualPath::new(MASTERKEY_FILE)
+        );
+        let payload = vault.verify(&master_keys).unwrap();
+        assert_eq!(payload.format, 8);
+        assert_eq!(payload.shortening_threshold, 220);
+        assert_eq!(payload.cipher_combo, "SIV_GCM");
+    }
+
+    #[test]
+    fn vault_without_shortening_threshold_uses_default() {
+        let payload: JwtPayload = serde_json::from_str(
+            r#"{"format":8,"jti":"00000000-0000-0000-0000-000000000000","cipherCombo":"SIV_GCM"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(payload.shortening_threshold, DEFAULT_SHORTENING_THRESHOLD);
+    }
+
+    #[test]
+    fn canonical_backend_uses_authenticated_shortening_threshold() {
+        const THRESHOLD: usize = 80;
+        let temp_dir = tempdir().unwrap();
+        let root = Utf8Path::from_path(temp_dir.path()).unwrap();
+        let master_keys = CryptoMator::init_with_default_params(root, "password").unwrap();
+        let vault = generate_vault_cryptomator(&master_keys, "SIV_GCM", THRESHOLD).unwrap();
+        NativeFileSystem::new(root.to_owned())
+            .put(VirtualPath::new(VAULT_FILE), vault.as_bytes())
+            .unwrap();
+
+        let cryptfs = CryptoMator::try_new(root, "password").unwrap();
+
+        assert_eq!(
+            cryptfs.entry_storage().options().shortening_threshold,
+            THRESHOLD
+        );
+    }
+
+    #[test]
+    fn vault_rejects_a_tampered_signature() {
+        let master_keys = test_master_keys();
+        let token = generate_vault_cryptomator(&master_keys, "SIV_GCM", 220).unwrap();
+        let (signing_input, signature) = token.rsplit_once('.').unwrap();
+        let replacement = if signature.starts_with('A') { 'B' } else { 'A' };
+        let token = format!("{signing_input}.{replacement}{}", &signature[1..]);
+        let vault = ParsedVault::parse(token.as_bytes()).unwrap();
+
+        assert!(vault.verify(&master_keys).is_err());
+    }
+
+    #[test]
+    fn vault_rejects_unsupported_header_fields() {
+        let headers = [
+            JwtHeader {
+                typ: "JWS".to_owned(),
+                ..test_header()
+            },
+            JwtHeader {
+                alg: "none".to_owned(),
+                ..test_header()
+            },
+            JwtHeader {
+                kid: "masterkeyfile:other.key".to_owned(),
+                ..test_header()
+            },
+        ];
+
+        for header in headers {
+            let vault = ParsedVault {
+                header,
+                payload: test_payload(),
+                signing_input: String::new(),
+                signature: Vec::new(),
+            };
+            assert!(vault.masterkey_path().is_err());
+        }
+    }
+
+    #[test]
+    fn vault_accepts_supported_hmac_algorithms() {
+        let master_keys = test_master_keys();
+        for algorithm in ["HS256", "HS384", "HS512"] {
+            let header = JwtHeader {
+                alg: algorithm.to_owned(),
+                ..test_header()
+            };
+            let token = sign_vault(&header, &test_payload(), &master_keys).unwrap();
+            let vault = ParsedVault::parse(token.as_bytes()).unwrap();
+
+            vault.masterkey_path().unwrap();
+            vault.verify(&master_keys).unwrap();
+        }
+    }
+
+    #[test]
+    fn vault_rejects_unsupported_payload_fields() {
+        let master_keys = test_master_keys();
+        let payloads = [
+            JwtPayload {
+                format: 9,
+                ..test_payload()
+            },
+            JwtPayload {
+                cipher_combo: "SIV_CTRMAC".to_owned(),
+                ..test_payload()
+            },
+            JwtPayload {
+                cipher_combo: "unknown".to_owned(),
+                ..test_payload()
+            },
+        ];
+
+        for payload in payloads {
+            let token = sign_vault(&test_header(), &payload, &master_keys).unwrap();
+            let vault = ParsedVault::parse(token.as_bytes()).unwrap();
+            assert!(vault.verify(&master_keys).is_err());
+        }
+    }
+
+    #[test]
+    fn vault_rejects_an_invalid_segment_count() {
+        assert!(ParsedVault::parse(b"header.payload").is_err());
+        assert!(ParsedVault::parse(b"header.payload.signature.extra").is_err());
+    }
+
+    #[test]
+    fn masterkey_rejects_an_invalid_version_mac() {
+        let (mut config, _) = CryptoMatorConfig::try_new("password").unwrap();
+        config.version_mac = base64::engine::general_purpose::STANDARD.encode([0u8; 32]);
+
+        assert!(derive_keys("password", &config).is_err());
+    }
+}

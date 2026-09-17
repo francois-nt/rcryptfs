@@ -7,6 +7,7 @@ use crate::core::{Backend, FsBackend, NativeFileSystem};
 
 const HEADER_NONCE_LEN: usize = 12;
 const NONCE_LEN: usize = 12;
+const DEFAULT_SHORTENING_THRESHOLD: usize = 220;
 
 /// Cryptomator backend state with the derived SIV key material.
 pub struct CryptoMator<T: Backend = CryptomatorBackend> {
@@ -15,7 +16,7 @@ pub struct CryptoMator<T: Backend = CryptomatorBackend> {
 }
 
 pub use builder::CryptoMatorBuilder;
-pub use entry_storage::CryptomatorEntryStorage;
+pub use entry_storage::{CryptomatorEntryStorage, CryptomatorEntryStorageOptions};
 
 /// Backend using the Cryptomator entry representation.
 pub type CryptomatorBackend<F = NativeFileSystem> = FsBackend<CryptomatorEntryStorage<F>>;

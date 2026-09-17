@@ -7,6 +7,8 @@ use base64::{Engine, engine::general_purpose::URL_SAFE};
 use sha1::{Digest, Sha1};
 use std::sync::Arc;
 
+use super::DEFAULT_SHORTENING_THRESHOLD;
+
 const CRYPTOMATOR_CONTENTS_FILE: &str = "contents.c9r";
 const CRYPTOMATOR_DIR_ID_BACKUP_FILE: &str = "dirid.c9r";
 const CRYPTOMATOR_DIR_FILE: &str = "dir.c9r";
@@ -14,7 +16,21 @@ const CRYPTOMATOR_NAME_FILE: &str = "name.c9s";
 const CRYPTOMATOR_REGULAR_SUFFIX: &str = ".c9r";
 const CRYPTOMATOR_SHORT_SUFFIX: &str = ".c9s";
 const CRYPTOMATOR_SYMLINK_FILE: &str = "symlink.c9r";
-const CRYPTOMATOR_NAME_MAX: usize = 220;
+
+/// Configures how long encoded names are represented by Cryptomator storage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CryptomatorEntryStorageOptions {
+    /// Maximum encoded name length stored directly in a directory.
+    pub shortening_threshold: usize,
+}
+
+impl Default for CryptomatorEntryStorageOptions {
+    fn default() -> Self {
+        Self {
+            shortening_threshold: DEFAULT_SHORTENING_THRESHOLD,
+        }
+    }
+}
 
 /// Physical paths and reverse mapping for one opaque encoded entry name.
 struct EntryPaths {
@@ -59,14 +75,29 @@ fn invalid_representation(message: impl Into<String>) -> std::io::Error {
 /// Cryptomator entry representation used by Cryptomator-compatible layouts.
 pub struct CryptomatorEntryStorage<F: StorageFileSystem> {
     storage_fs: F,
+    options: CryptomatorEntryStorageOptions,
     directory_layout: Arc<dyn DirectoryLayout>,
 }
 
 impl<F: StorageFileSystem> CryptomatorEntryStorage<F> {
     /// Creates a Cryptomator container representation with its directory policy.
     pub fn new(storage_fs: F, directory_layout: Arc<dyn DirectoryLayout>) -> Self {
+        Self::with_options(
+            storage_fs,
+            directory_layout,
+            CryptomatorEntryStorageOptions::default(),
+        )
+    }
+
+    /// Creates a Cryptomator representation with explicit name settings.
+    pub fn with_options(
+        storage_fs: F,
+        directory_layout: Arc<dyn DirectoryLayout>,
+        options: CryptomatorEntryStorageOptions,
+    ) -> Self {
         Self {
             storage_fs,
+            options,
             directory_layout,
         }
     }
@@ -115,6 +146,12 @@ impl<F: StorageFileSystem> CryptomatorEntryStorage<F> {
         &self.storage_fs
     }
 
+    /// Returns the configured representation options for tests.
+    #[cfg(test)]
+    pub(crate) fn options(&self) -> CryptomatorEntryStorageOptions {
+        self.options
+    }
+
     /// Maps an opaque encoded final component to its Cryptomator representation.
     fn entry_paths(&self, path: &VirtualPath) -> EntryPaths {
         let Some(logical_name) = path.file_name() else {
@@ -129,7 +166,7 @@ impl<F: StorageFileSystem> CryptomatorEntryStorage<F> {
             format!("{logical_name}{CRYPTOMATOR_REGULAR_SUFFIX}")
         };
         let parent = path.parent().unwrap_or_else(VirtualPath::root);
-        if inflated_name.len() <= CRYPTOMATOR_NAME_MAX {
+        if inflated_name.len() <= self.options.shortening_threshold {
             return EntryPaths {
                 entry: parent.join(inflated_name),
                 inflated_name: None,
@@ -177,7 +214,7 @@ impl<F: StorageFileSystem> CryptomatorEntryStorage<F> {
             .read_all(&entry_path.join(CRYPTOMATOR_NAME_FILE))?;
         let inflated = String::from_utf8(inflated)
             .map_err(|error| invalid_representation(format!("invalid name.c9s: {error}")))?;
-        if inflated.len() <= CRYPTOMATOR_NAME_MAX
+        if inflated.len() <= self.options.shortening_threshold
             || !inflated.ends_with(CRYPTOMATOR_REGULAR_SUFFIX)
             || inflated.contains('/')
         {
@@ -773,15 +810,25 @@ mod tests {
 
     /// Creates a native Cryptomator storage rooted in a temporary directory.
     fn cryptomator_storage() -> (tempfile::TempDir, CryptomatorEntryStorage<NativeFileSystem>) {
+        cryptomator_storage_with_threshold(DEFAULT_SHORTENING_THRESHOLD)
+    }
+
+    /// Creates a native Cryptomator storage with a custom shortening threshold.
+    fn cryptomator_storage_with_threshold(
+        shortening_threshold: usize,
+    ) -> (tempfile::TempDir, CryptomatorEntryStorage<NativeFileSystem>) {
         let temp_dir = tempdir().unwrap();
         let root = Utf8Path::from_path(temp_dir.path()).unwrap().to_owned();
         (
             temp_dir,
-            CryptomatorEntryStorage::new(
+            CryptomatorEntryStorage::with_options(
                 NativeFileSystem::new(root),
                 Arc::new(FixedDirectoryContentLayout {
                     contents_path: child_contents_path(),
                 }),
+                CryptomatorEntryStorageOptions {
+                    shortening_threshold,
+                },
             ),
         )
     }
@@ -834,7 +881,7 @@ mod tests {
         let (_temp_dir, storage) = cryptomator_storage();
         let parent_contents = contents_path();
         storage.storage_fs.mkdir_all(&parent_contents).unwrap();
-        let long_name = "a".repeat(CRYPTOMATOR_NAME_MAX);
+        let long_name = "a".repeat(DEFAULT_SHORTENING_THRESHOLD);
         let logical_path = parent_contents.join(&long_name);
         storage
             .create_file(&logical_path, b"ciphertext", None)
@@ -910,8 +957,8 @@ mod tests {
         let (_temp_dir, storage) = cryptomator_storage();
         let parent_contents = contents_path();
         storage.storage_fs.mkdir_all(&parent_contents).unwrap();
-        let directory_path = parent_contents.join("d".repeat(CRYPTOMATOR_NAME_MAX));
-        let symlink_path = parent_contents.join("s".repeat(CRYPTOMATOR_NAME_MAX));
+        let directory_path = parent_contents.join("d".repeat(DEFAULT_SHORTENING_THRESHOLD));
+        let symlink_path = parent_contents.join("s".repeat(DEFAULT_SHORTENING_THRESHOLD));
 
         storage
             .create_directory(
@@ -985,8 +1032,8 @@ mod tests {
         let parent_contents = contents_path();
         storage.storage_fs.mkdir_all(&parent_contents).unwrap();
         let short_path = parent_contents.join("short");
-        let first_long_path = parent_contents.join("a".repeat(CRYPTOMATOR_NAME_MAX));
-        let second_long_path = parent_contents.join("b".repeat(CRYPTOMATOR_NAME_MAX));
+        let first_long_path = parent_contents.join("a".repeat(DEFAULT_SHORTENING_THRESHOLD));
+        let second_long_path = parent_contents.join("b".repeat(DEFAULT_SHORTENING_THRESHOLD));
 
         storage
             .create_file(&short_path, b"ciphertext", None)
@@ -1009,5 +1056,40 @@ mod tests {
             b"ciphertext"
         );
         assert!(storage.metadata(&short_path).is_ok());
+    }
+
+    #[test]
+    fn custom_threshold_controls_shortening_and_name_validation() {
+        const THRESHOLD: usize = 16;
+        let (_temp_dir, storage) = cryptomator_storage_with_threshold(THRESHOLD);
+        let parent_contents = contents_path();
+        storage.storage_fs.mkdir_all(&parent_contents).unwrap();
+        let direct_name_len = THRESHOLD - CRYPTOMATOR_REGULAR_SUFFIX.len();
+        let direct_path = parent_contents.join("a".repeat(direct_name_len));
+        let shortened_path = parent_contents.join("b".repeat(direct_name_len + 1));
+
+        storage.create_file(&direct_path, b"direct", None).unwrap();
+        storage
+            .create_file(&shortened_path, b"shortened", None)
+            .unwrap();
+
+        assert!(!storage.entry_paths(&direct_path).is_shortened());
+        assert!(storage.entry_paths(&shortened_path).is_shortened());
+        let entries = storage
+            .read_dir(parent_contents)
+            .unwrap()
+            .collect::<std::io::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.file_name == direct_path.file_name().unwrap())
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.file_name == shortened_path.file_name().unwrap())
+        );
     }
 }
