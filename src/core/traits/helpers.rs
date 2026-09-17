@@ -4,7 +4,6 @@ use super::{
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::Digest;
-use std::sync::Arc;
 use std::time::SystemTime;
 
 pub(super) fn default_metadata<T: EncryptionLayout + ?Sized>(
@@ -50,22 +49,22 @@ fn storage_dir_entry_to_plain<T: EncryptionTranslator + ?Sized>(
 }
 
 /// Lists and decrypts the children of one logical directory.
-pub(super) fn default_list_dir_plain_names<T: EncryptionLayout + ?Sized + 'static>(
-    this: Arc<T>,
+pub(super) fn default_list_dir_plain_names<'a, T: EncryptionLayout + ?Sized>(
+    this: &'a T,
     plain_path: &VirtualPath,
-) -> std::io::Result<impl Iterator<Item = std::io::Result<(FsDirEntry, VirtualPathBuf)>> + 'static>
-{
+) -> std::io::Result<impl Iterator<Item = std::io::Result<(FsDirEntry, VirtualPathBuf)>> + 'a> {
     let entry_path = if plain_path.is_empty() {
         VirtualPathBuf::default()
     } else {
         this.plain_path_to_cipher(plain_path).or_invalid()?
     };
     let directory = this.entry_storage().resolve_directory(&entry_path)?;
+    let token = directory.token;
 
     Ok(this
         .entry_storage()
-        .read_dir(&directory.contents_path)?
-        .map(move |entry| storage_dir_entry_to_plain(this.as_ref(), &directory.token, entry?)))
+        .read_dir(directory.contents_path)?
+        .map(move |entry| storage_dir_entry_to_plain(this, &token, entry?)))
 }
 
 pub(super) fn default_mknode<T: EncryptionLayout + ?Sized>(

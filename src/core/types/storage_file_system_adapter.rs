@@ -135,6 +135,8 @@ impl StorageFileSystem for StorageFileSystemAdapter {
     }
 
     fn read_dir(&self, path: &VirtualPath) -> std::io::Result<Self::DirEntries> {
-        self.filesystem.read_dir(path)
+        // This non-GAT adapter must own entries returned by the borrowed filesystem iterator.
+        let entries = self.filesystem.read_dir(path)?.collect::<Vec<_>>();
+        Ok(Box::new(entries.into_iter()))
     }
 }

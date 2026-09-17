@@ -309,8 +309,45 @@ impl From<&Utf8Path> for FsBackend<GoCryptFsEntryStorage<NativeFileSystem>> {
     }
 }
 
+/// Lazily maps physical GoCryptFS directory entries to represented entries.
+pub struct GoCryptFsDirEntries<'a, F: StorageFileSystem> {
+    storage: &'a GoCryptFsEntryStorage<F>,
+    contents_path: VirtualPathBuf,
+    entries: F::DirEntries,
+}
+
+impl<F: StorageFileSystem> Iterator for GoCryptFsDirEntries<'_, F> {
+    type Item = std::io::Result<StorageDirEntry>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.entries.next()? {
+                Ok(entry) if is_direct_internal_entry(&entry.file_name) => continue,
+                Ok(entry) => {
+                    let path = self.contents_path.join(&entry.file_name);
+                    let file_name = if is_long_name_content(&entry.file_name) {
+                        self.storage
+                            .read_long_name(&self.contents_path, &entry.file_name)
+                    } else {
+                        Ok(entry.file_name)
+                    };
+                    return Some(file_name.map(|file_name| StorageDirEntry {
+                        file_name,
+                        path,
+                        metadata: entry.metadata,
+                    }));
+                }
+                Err(error) => return Some(Err(error)),
+            }
+        }
+    }
+}
+
 impl<F: StorageFileSystem> EntryStorage for GoCryptFsEntryStorage<F> {
-    type DirEntries = std::vec::IntoIter<std::io::Result<StorageDirEntry>>;
+    type DirEntries<'a>
+        = GoCryptFsDirEntries<'a, F>
+    where
+        Self: 'a;
 
     fn generate_directory_token(&self) -> Vec<u8> {
         self.directory_layout.generate_directory_token()
@@ -331,28 +368,16 @@ impl<F: StorageFileSystem> EntryStorage for GoCryptFsEntryStorage<F> {
         self.storage_fs.metadata(&self.entry_paths(path).content)
     }
 
-    fn read_dir(&self, contents_path: &VirtualPath) -> std::io::Result<Self::DirEntries> {
-        let mut entries = Vec::new();
-        for entry in self.storage_fs.read_dir(contents_path)? {
-            match entry {
-                Ok(entry) if is_direct_internal_entry(&entry.file_name) => {}
-                Ok(entry) => {
-                    let path = contents_path.join(&entry.file_name);
-                    let file_name = if is_long_name_content(&entry.file_name) {
-                        self.read_long_name(contents_path, &entry.file_name)
-                    } else {
-                        Ok(entry.file_name)
-                    };
-                    entries.push(file_name.map(|file_name| StorageDirEntry {
-                        file_name,
-                        path,
-                        metadata: entry.metadata,
-                    }));
-                }
-                Err(error) => entries.push(Err(error)),
-            }
-        }
-        Ok(entries.into_iter())
+    fn read_dir<'a>(
+        &'a self,
+        contents_path: VirtualPathBuf,
+    ) -> std::io::Result<Self::DirEntries<'a>> {
+        let entries = self.storage_fs.read_dir(&contents_path)?;
+        Ok(GoCryptFsDirEntries {
+            storage: self,
+            contents_path,
+            entries,
+        })
     }
 
     fn resolve_directory(&self, entry_path: &VirtualPath) -> std::io::Result<StorageDirectory> {
@@ -656,7 +681,7 @@ mod tests {
             .put(VirtualPath::new("gocryptfs.conf"), b"internal")
             .unwrap();
         let entries = storage
-            .read_dir(VirtualPath::root())
+            .read_dir(VirtualPathBuf::default())
             .unwrap()
             .collect::<std::io::Result<Vec<_>>>()
             .unwrap();
@@ -703,7 +728,7 @@ mod tests {
             logical_name.as_bytes()
         );
         let entries = storage
-            .read_dir(VirtualPath::root())
+            .read_dir(VirtualPathBuf::default())
             .unwrap()
             .collect::<std::io::Result<Vec<_>>>()
             .unwrap();

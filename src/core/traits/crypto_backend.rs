@@ -5,7 +5,6 @@ use super::{
     default_mknode, default_read_symlink, default_remove, default_remove_dir, default_rename,
     default_set_permissions, default_set_time,
 };
-use std::sync::Arc;
 use std::{collections::BTreeMap, time::SystemTime};
 /// Marker trait for backend implementations.
 pub trait Backend {}
@@ -153,13 +152,9 @@ pub trait PathLayout {
 pub trait EncryptionLayout: PathLayout + EncryptionTranslator {
     /// Lists directory entries with plain names.
     fn list_dir_plain_names(
-        self: Arc<Self>,
+        &self,
         plain_path: &VirtualPath,
-    ) -> std::io::Result<
-        impl Iterator<Item = std::io::Result<(FsDirEntry, VirtualPathBuf)>> + 'static,
-    >
-    where
-        Self: 'static,
+    ) -> std::io::Result<impl Iterator<Item = std::io::Result<(FsDirEntry, VirtualPathBuf)>> + '_>
     {
         default_list_dir_plain_names(self, plain_path)
     }

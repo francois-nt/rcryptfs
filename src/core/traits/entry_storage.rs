@@ -227,8 +227,10 @@ pub trait EntryStorage: Send + Sync + 'static {
     /// Handle returned when opening a represented regular file.
     type OpenHandle: FileHandle;
 
-    /// Iterator returned when listing represented directory entries.
-    type DirEntries: Iterator<Item = std::io::Result<StorageDirEntry>> + 'static;
+    /// Iterator borrowing the entry storage while a directory is being listed.
+    type DirEntries<'a>: Iterator<Item = std::io::Result<StorageDirEntry>> + 'a
+    where
+        Self: 'a;
 
     /// Generates the opaque token for a new represented directory.
     fn generate_directory_token(&self) -> Vec<u8>;
@@ -244,7 +246,10 @@ pub trait EntryStorage: Send + Sync + 'static {
     fn metadata(&self, path: &VirtualPath) -> std::io::Result<Metadata>;
 
     /// Lists visible encoded entries from a directory contents location.
-    fn read_dir(&self, contents_path: &VirtualPath) -> std::io::Result<Self::DirEntries>;
+    fn read_dir<'a>(
+        &'a self,
+        contents_path: VirtualPathBuf,
+    ) -> std::io::Result<Self::DirEntries<'a>>;
 
     /// Resolves a stored directory to its complete physical description.
     fn resolve_directory(&self, entry_path: &VirtualPath) -> std::io::Result<StorageDirectory>;
@@ -337,7 +342,7 @@ pub trait AsyncEntryStorage: Send + Sync + 'static {
     /// Lists visible encoded entries from a directory contents location.
     fn read_dir(
         &self,
-        contents_path: &VirtualPath,
+        contents_path: VirtualPathBuf,
     ) -> impl Future<Output = std::io::Result<Self::DirEntries>> + Send;
 
     /// Resolves a stored directory to its complete physical description.

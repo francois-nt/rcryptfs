@@ -124,10 +124,9 @@ where
     fn read_dir(
         &self,
         path: &VirtualPath,
-    ) -> std::io::Result<Box<dyn Iterator<Item = std::io::Result<FsDirEntry>> + 'static>> {
+    ) -> std::io::Result<Box<dyn Iterator<Item = std::io::Result<FsDirEntry>> + '_>> {
         let it = self
             .fs
-            .clone()
             .list_dir_plain_names(path)?
             .map(|it| it.map(|r| r.0));
         Ok(Box::new(it))

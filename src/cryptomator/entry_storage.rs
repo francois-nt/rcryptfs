@@ -8,6 +8,7 @@ use sha1::{Digest, Sha1};
 use std::sync::Arc;
 
 const CRYPTOMATOR_CONTENTS_FILE: &str = "contents.c9r";
+const CRYPTOMATOR_DIR_ID_BACKUP_FILE: &str = "dirid.c9r";
 const CRYPTOMATOR_DIR_FILE: &str = "dir.c9r";
 const CRYPTOMATOR_NAME_FILE: &str = "name.c9s";
 const CRYPTOMATOR_REGULAR_SUFFIX: &str = ".c9r";
@@ -391,8 +392,60 @@ impl<F: StorageFileSystem> CryptomatorEntryStorage<F> {
     }
 }
 
+/// Lazily maps physical Cryptomator directory entries to represented entries.
+pub struct CryptomatorDirEntries<'a, F: StorageFileSystem> {
+    storage: &'a CryptomatorEntryStorage<F>,
+    contents_path: VirtualPathBuf,
+    entries: F::DirEntries,
+}
+
+impl<F: StorageFileSystem> Iterator for CryptomatorDirEntries<'_, F> {
+    type Item = std::io::Result<StorageDirEntry>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.entries.next()? {
+                Ok(entry) if entry.file_name == CRYPTOMATOR_DIR_ID_BACKUP_FILE => continue,
+                Ok(entry)
+                    if !entry.file_name.ends_with(CRYPTOMATOR_REGULAR_SUFFIX)
+                        && !entry.file_name.ends_with(CRYPTOMATOR_SHORT_SUFFIX) =>
+                {
+                    continue;
+                }
+                Ok(entry) => {
+                    let path = self.contents_path.join(&entry.file_name);
+                    return Some((|| {
+                        let file_name = self.storage.logical_name(&path)?;
+                        let classification = self
+                            .storage
+                            .classify_physical(&path, entry.metadata.file_type)?;
+                        let metadata = match &classification.metadata_path {
+                            Some(metadata_path) => {
+                                self.storage.storage_fs.metadata(metadata_path)?
+                            }
+                            None => entry.metadata,
+                        };
+                        Ok(StorageDirEntry {
+                            file_name,
+                            path,
+                            metadata: CryptomatorEntryStorage::<F>::normalize_metadata(
+                                metadata,
+                                &classification,
+                            ),
+                        })
+                    })());
+                }
+                Err(error) => return Some(Err(error)),
+            }
+        }
+    }
+}
+
 impl<F: StorageFileSystem> EntryStorage for CryptomatorEntryStorage<F> {
-    type DirEntries = std::vec::IntoIter<std::io::Result<StorageDirEntry>>;
+    type DirEntries<'a>
+        = CryptomatorDirEntries<'a, F>
+    where
+        Self: 'a;
     type OpenHandle = F::OpenHandle;
 
     fn generate_directory_token(&self) -> Vec<u8> {
@@ -429,40 +482,23 @@ impl<F: StorageFileSystem> EntryStorage for CryptomatorEntryStorage<F> {
         Ok(Self::normalize_metadata(metadata, &classification))
     }
 
-    fn read_dir(&self, contents_path: &VirtualPath) -> std::io::Result<Self::DirEntries> {
+    fn read_dir<'a>(
+        &'a self,
+        contents_path: VirtualPathBuf,
+    ) -> std::io::Result<Self::DirEntries<'a>> {
         let directory_layout = self.directory_layout.as_ref();
-        if !directory_layout.is_detached_directory_contents_path(contents_path) {
+        if !directory_layout.is_detached_directory_contents_path(&contents_path) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "path is not a detached directory contents location",
             ));
         }
-        let mut entries = Vec::new();
-        for entry in self.storage_fs.read_dir(contents_path)? {
-            match entry {
-                Ok(entry) if entry.file_name == "dirid.c9r" => {}
-                Ok(entry) => {
-                    let path = contents_path.join(&entry.file_name);
-                    let represented = (|| {
-                        let file_name = self.logical_name(&path)?;
-                        let classification =
-                            self.classify_physical(&path, entry.metadata.file_type)?;
-                        let metadata = match &classification.metadata_path {
-                            Some(metadata_path) => self.storage_fs.metadata(metadata_path)?,
-                            None => entry.metadata,
-                        };
-                        Ok(StorageDirEntry {
-                            file_name,
-                            path,
-                            metadata: Self::normalize_metadata(metadata, &classification),
-                        })
-                    })();
-                    entries.push(represented);
-                }
-                Err(error) => entries.push(Err(error)),
-            }
-        }
-        Ok(entries.into_iter())
+        let entries = self.storage_fs.read_dir(&contents_path)?;
+        Ok(CryptomatorDirEntries {
+            storage: self,
+            contents_path,
+            entries,
+        })
     }
 
     fn resolve_directory(&self, entry_path: &VirtualPath) -> std::io::Result<StorageDirectory> {
@@ -780,7 +816,7 @@ mod tests {
         assert!(symlink.file_type == FileType::SymLink);
 
         let entries = storage
-            .read_dir(&parent_contents)
+            .read_dir(parent_contents)
             .unwrap()
             .collect::<std::io::Result<Vec<_>>>()
             .unwrap();
@@ -816,7 +852,7 @@ mod tests {
         );
 
         let entries = storage
-            .read_dir(&parent_contents)
+            .read_dir(parent_contents)
             .unwrap()
             .collect::<std::io::Result<Vec<_>>>()
             .unwrap();
@@ -839,6 +875,34 @@ mod tests {
             storage.metadata(&logical_path),
             Err(error) if error.kind() == std::io::ErrorKind::InvalidData
         ));
+    }
+
+    #[test]
+    fn read_dir_ignores_foreign_names_but_reports_malformed_entries() {
+        let (_temp_dir, storage) = cryptomator_storage();
+        let parent_contents = contents_path();
+        storage.storage_fs.mkdir_all(&parent_contents).unwrap();
+        storage
+            .storage_fs
+            .put(&parent_contents.join("sync-conflict"), b"foreign")
+            .unwrap();
+
+        let entries = storage
+            .read_dir(parent_contents.clone())
+            .unwrap()
+            .collect::<Vec<_>>();
+        assert!(entries.is_empty());
+
+        storage
+            .storage_fs
+            .mkdir(&parent_contents.join("broken.c9s"), None)
+            .unwrap();
+        let entries = storage
+            .read_dir(parent_contents)
+            .unwrap()
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].is_err());
     }
 
     #[test]

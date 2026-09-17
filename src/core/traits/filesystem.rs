@@ -228,7 +228,7 @@ pub trait ReadOnlyFileSystem: Send + Sync + 'static {
     fn read_dir(
         &self,
         path: &VirtualPath,
-    ) -> std::io::Result<Box<dyn Iterator<Item = std::io::Result<FsDirEntry>> + 'static>>;
+    ) -> std::io::Result<Box<dyn Iterator<Item = std::io::Result<FsDirEntry>> + '_>>;
     /// Retrieves metadata for a path.
     fn metadata(&self, path: &VirtualPath) -> std::io::Result<Metadata>;
     /// Checks if a path exists.
