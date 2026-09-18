@@ -191,7 +191,7 @@ The core separates encrypted filesystem behavior into replaceable layers:
 | `DirectoryLayout` | Directory tokens and detached content locations used by an entry representation |
 | `StorageFileSystem` | Raw filesystem I/O without knowledge of encryption or entry formats |
 | `ConfigFileSystem` | Restricted access to repository configuration files |
-| `EncryptedFileSystem` | Public filesystem operations and encrypted file-handle construction |
+| `CleartextFileSystem` | Public filesystem operations and encrypted file-handle construction |
 
 The gocryptfs and Cryptomator crypto layers can be paired in code with either
 entry representation. **Such permutations deliberately define new formats:**

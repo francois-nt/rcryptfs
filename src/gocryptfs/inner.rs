@@ -1,6 +1,6 @@
 use super::{GoCryptFs, GoCryptFsBackend, GoCryptFsEntryStorage, layout::GoCryptFsDirectoryLayout};
 use crate::core::{
-    Backend, ConfigFileSystem, EntryStorage, FsBackend, NativeFileSystem, Result,
+    Backend, ConfigFileSystem, EntryStorage, EntryStorageBackend, NativeFileSystem, Result,
     StorageConfigFileSystem,
 };
 use crate::{Utf8Path, VirtualPath};
@@ -264,7 +264,7 @@ impl GoCryptFs<GoCryptFsBackend> {
             StorageConfigFileSystem::new(&storage_fs).read_all("gocryptfs.conf".into())?;
         let config: GoCryptfsConfig = serde_json::from_slice(&config_data)?;
         let master_key = get_master_key(password, &config)?;
-        let backend = FsBackend::new(GoCryptFsEntryStorage::new(storage_fs));
+        let backend = EntryStorageBackend::new(GoCryptFsEntryStorage::new(storage_fs));
         derive_keys(
             backend,
             master_key.as_slice().try_into()?,
@@ -273,13 +273,13 @@ impl GoCryptFs<GoCryptFsBackend> {
     }
 }
 
-impl<S> GoCryptFs<FsBackend<S>>
+impl<S> GoCryptFs<EntryStorageBackend<S>>
 where
     S: EntryStorage,
 {
     /// Initializes the GoCryptFS crypto configuration over an entry representation.
     pub fn init_with_backend<C: ConfigFileSystem + ?Sized>(
-        backend: &FsBackend<S>,
+        backend: &EntryStorageBackend<S>,
         config_fs: &C,
         password: &str,
     ) -> Result<Vec<u8>> {
@@ -318,7 +318,7 @@ where
     }
     /// Opens a GoCryptFS crypto configuration over an entry representation.
     pub fn try_new_with_backend<C: ConfigFileSystem + ?Sized>(
-        backend: FsBackend<S>,
+        backend: EntryStorageBackend<S>,
         config_fs: &C,
         password: &str,
     ) -> Result<Self> {

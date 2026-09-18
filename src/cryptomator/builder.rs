@@ -1,7 +1,7 @@
 use super::CryptoMator;
 use crate::core::{
-    BackendProvider, ConfigFileSystem, EncryptedFileSystem, EntryStorage, FileCachePolicy,
-    FileSystem, FsBackend, MasterKey, NativeFileSystem, Result, StorageConfigFileSystem,
+    BackendProvider, CleartextFileSystem, ConfigFileSystem, EntryStorage, EntryStorageBackend,
+    FileBufferingPolicy, FileSystem, MasterKey, NativeFileSystem, Result, StorageConfigFileSystem,
 };
 use crate::{Utf8Path, register_provider};
 
@@ -20,16 +20,16 @@ impl CryptoMatorBuilder {
 
     /// Builds a Cryptomator crypto layer over an arbitrary entry representation.
     pub fn try_build_with_backend<S, C>(
-        backend: FsBackend<S>,
+        backend: EntryStorageBackend<S>,
         config_fs: &C,
         password: &str,
-        cache_policy: Box<dyn FileCachePolicy>,
+        cache_policy: Box<dyn FileBufferingPolicy>,
     ) -> Result<Box<dyn FileSystem>>
     where
         S: EntryStorage,
         C: ConfigFileSystem + ?Sized,
     {
-        let cryptfs: EncryptedFileSystem<CryptoMator<FsBackend<S>>> = (
+        let cryptfs: CleartextFileSystem<CryptoMator<EntryStorageBackend<S>>> = (
             CryptoMator::try_new_with_backend(backend, config_fs, password)?,
             cache_policy,
         )
@@ -39,7 +39,7 @@ impl CryptoMatorBuilder {
 
     /// Initializes a Cryptomator crypto configuration over an entry representation.
     pub fn init_with_backend<S, C>(
-        backend: &FsBackend<S>,
+        backend: &EntryStorageBackend<S>,
         config_fs: &C,
         password: &str,
     ) -> Result<Box<dyn MasterKey>>
@@ -64,9 +64,9 @@ impl BackendProvider for CryptoMatorBuilder {
         &self,
         root: &Utf8Path,
         password: &str,
-        cache_policy: Box<dyn FileCachePolicy>,
+        cache_policy: Box<dyn FileBufferingPolicy>,
     ) -> Result<Box<dyn FileSystem>> {
-        let cryptfs: EncryptedFileSystem<CryptoMator> =
+        let cryptfs: CleartextFileSystem<CryptoMator> =
             (CryptoMator::try_new(root, password)?, cache_policy).into();
         Ok(Box::new(cryptfs))
     }

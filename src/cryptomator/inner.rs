@@ -3,7 +3,7 @@ use super::{
     DEFAULT_SHORTENING_THRESHOLD, layout::CryptomatorDirectoryLayout,
 };
 use crate::core::{
-    Backend, ConfigFileSystem, EncryptionTranslator, EntryStorage, FsBackend, MasterKey,
+    Backend, ConfigFileSystem, EncryptionTranslator, EntryStorage, EntryStorageBackend, MasterKey,
     NativeFileSystem, Result, StorageConfigFileSystem, Utf8Path, VirtualPath, VirtualPathBuf,
     XattrLayout,
 };
@@ -435,7 +435,7 @@ impl CryptoMator<CryptomatorBackend> {
         let (keys, vault) = unlock_vault(&config_fs, password)?;
         let siv_key = keys.siv_key();
         let directory_layout = Arc::new(CryptomatorDirectoryLayout::new(siv_key));
-        let backend = FsBackend::new(CryptomatorEntryStorage::with_options(
+        let backend = EntryStorageBackend::new(CryptomatorEntryStorage::with_options(
             storage_fs,
             directory_layout,
             CryptomatorEntryStorageOptions {
@@ -446,13 +446,13 @@ impl CryptoMator<CryptomatorBackend> {
     }
 }
 
-impl<S> CryptoMator<FsBackend<S>>
+impl<S> CryptoMator<EntryStorageBackend<S>>
 where
     S: EntryStorage,
 {
     /// Initializes the Cryptomator crypto configuration over an entry representation.
     pub fn init_with_backend<C: ConfigFileSystem + ?Sized>(
-        backend: &FsBackend<S>,
+        backend: &EntryStorageBackend<S>,
         config_fs: &C,
         password: &str,
     ) -> Result<CryptomatorMasterKeys> {
@@ -500,7 +500,7 @@ where
 
     /// Opens a Cryptomator crypto configuration over an entry representation.
     pub fn try_new_with_backend<C: ConfigFileSystem + ?Sized>(
-        backend: FsBackend<S>,
+        backend: EntryStorageBackend<S>,
         config_fs: &C,
         password: &str,
     ) -> Result<Self> {

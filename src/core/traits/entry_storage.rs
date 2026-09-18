@@ -328,7 +328,7 @@ pub trait AsyncEntryStorage: Send + Sync + 'static {
     /// Iterator returned after an asynchronous directory lookup.
     ///
     /// Iterating over the returned entries must not perform blocking I/O.
-    type DirEntries: Iterator<Item = std::io::Result<StorageDirEntry>> + Send + 'static;
+    type DirEntries: Iterator<Item = std::io::Result<Vec<StorageDirEntry>>> + Send + 'static;
 
     /// Generates the opaque token for a new represented directory.
     fn generate_directory_token(&self) -> Vec<u8>;

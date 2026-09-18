@@ -326,13 +326,13 @@ pub trait FileSystem: ReadOnlyFileSystem {
 }
 
 /// Hosts a filesystem together with its open file table.
-pub struct FileSystemHandler<C: OpenFileTable = UnsafeOpenFileTable> {
+pub struct FileSystemSession<C: OpenFileTable = UnsafeOpenFileTable> {
     fs: Box<dyn FileSystem>,
     open_files: C,
     is_background_child: bool,
 }
 
-impl<C: OpenFileTable> FileSystemHandler<C> {
+impl<C: OpenFileTable> FileSystemSession<C> {
     pub fn open_files(&self) -> &C {
         &self.open_files
     }
@@ -344,7 +344,7 @@ impl<C: OpenFileTable> FileSystemHandler<C> {
     }
 }
 
-impl<T: FileSystem, C: OpenFileTable> From<T> for FileSystemHandler<C> {
+impl<T: FileSystem, C: OpenFileTable> From<T> for FileSystemSession<C> {
     fn from(value: T) -> Self {
         Self {
             fs: Box::new(value),
@@ -354,7 +354,7 @@ impl<T: FileSystem, C: OpenFileTable> From<T> for FileSystemHandler<C> {
     }
 }
 
-impl<C: OpenFileTable> From<Box<dyn FileSystem>> for FileSystemHandler<C> {
+impl<C: OpenFileTable> From<Box<dyn FileSystem>> for FileSystemSession<C> {
     fn from(value: Box<dyn FileSystem>) -> Self {
         Self {
             fs: value,
@@ -364,7 +364,7 @@ impl<C: OpenFileTable> From<Box<dyn FileSystem>> for FileSystemHandler<C> {
     }
 }
 
-impl<C: OpenFileTable> AsRef<dyn FileSystem> for FileSystemHandler<C> {
+impl<C: OpenFileTable> AsRef<dyn FileSystem> for FileSystemSession<C> {
     fn as_ref(&self) -> &dyn FileSystem {
         self.fs.as_ref()
     }

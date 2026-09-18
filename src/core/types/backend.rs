@@ -6,12 +6,12 @@ use std::collections::BTreeMap;
 pub type CipherPathCacheEntry = (Vec<u8>, VirtualPathBuf);
 
 /// Backend state shared by one encrypted layout.
-pub struct FsBackend<S: EntryStorage> {
+pub struct EntryStorageBackend<S: EntryStorage> {
     entry_storage: S,
     path_cache: Mutex<BTreeMap<String, CipherPathCacheEntry>>,
 }
 
-impl<S: EntryStorage> FsBackend<S> {
+impl<S: EntryStorage> EntryStorageBackend<S> {
     /// Creates a backend backed by the provided entry storage.
     pub fn new(entry_storage: S) -> Self {
         Self {
@@ -26,7 +26,7 @@ impl<S: EntryStorage> FsBackend<S> {
     }
 }
 
-impl<S: EntryStorage> PathCacheAccess for FsBackend<S> {
+impl<S: EntryStorage> PathCacheAccess for EntryStorageBackend<S> {
     /// Gives temporary mutable access to the plain-to-cipher path cache.
     fn with_path_cache<Res, Op: FnOnce(&mut BTreeMap<String, CipherPathCacheEntry>) -> Res>(
         &self,
@@ -36,7 +36,7 @@ impl<S: EntryStorage> PathCacheAccess for FsBackend<S> {
     }
 }
 
-impl<S: EntryStorage> Backend for FsBackend<S> {}
+impl<S: EntryStorage> Backend for EntryStorageBackend<S> {}
 
 /// In-memory backend for testing.
 #[derive(Default)]
@@ -176,9 +176,9 @@ mod tests {
     #[test]
     fn crypto_layers_accept_the_opposite_entry_storage_type() {
         type GoCryptoWithC9rStorage =
-            GoCryptFs<FsBackend<CryptomatorEntryStorage<NativeFileSystem>>>;
+            GoCryptFs<EntryStorageBackend<CryptomatorEntryStorage<NativeFileSystem>>>;
         type CryptomatorCryptoWithDirectStorage =
-            CryptoMator<FsBackend<GoCryptFsEntryStorage<NativeFileSystem>>>;
+            CryptoMator<EntryStorageBackend<GoCryptFsEntryStorage<NativeFileSystem>>>;
 
         assert_encryption_layout::<GoCryptoWithC9rStorage>();
         assert_encryption_layout::<CryptomatorCryptoWithDirectStorage>();
@@ -191,7 +191,7 @@ mod tests {
         let config_storage = NativeFileSystem::new(root.clone());
         let config_fs = StorageConfigFileSystem::new(&config_storage);
         let directory_layout = matrix_layout(MatrixTokenKind::GoCryptFs, false);
-        let backend = FsBackend::new(GoCryptFsEntryStorage::with_directory_layout(
+        let backend = EntryStorageBackend::new(GoCryptFsEntryStorage::with_directory_layout(
             NativeFileSystem::new(root.clone()),
             directory_layout.clone(),
         ));
@@ -200,7 +200,7 @@ mod tests {
         create_matrix_tree(&cryptfs, false, 16);
         drop(cryptfs);
 
-        let backend = FsBackend::new(GoCryptFsEntryStorage::with_directory_layout(
+        let backend = EntryStorageBackend::new(GoCryptFsEntryStorage::with_directory_layout(
             NativeFileSystem::new(root),
             directory_layout,
         ));
@@ -215,7 +215,7 @@ mod tests {
         let config_storage = NativeFileSystem::new(root.clone());
         let config_fs = StorageConfigFileSystem::new(&config_storage);
         let directory_layout = matrix_layout(MatrixTokenKind::GoCryptFs, true);
-        let backend = FsBackend::new(CryptomatorEntryStorage::new(
+        let backend = EntryStorageBackend::new(CryptomatorEntryStorage::new(
             NativeFileSystem::new(root.clone()),
             directory_layout.clone(),
         ));
@@ -224,7 +224,7 @@ mod tests {
         create_matrix_tree(&cryptfs, true, 16);
         drop(cryptfs);
 
-        let backend = FsBackend::new(CryptomatorEntryStorage::new(
+        let backend = EntryStorageBackend::new(CryptomatorEntryStorage::new(
             NativeFileSystem::new(root),
             directory_layout,
         ));
@@ -239,7 +239,7 @@ mod tests {
         let config_storage = NativeFileSystem::new(root.clone());
         let config_fs = StorageConfigFileSystem::new(&config_storage);
         let directory_layout = matrix_layout(MatrixTokenKind::Cryptomator, false);
-        let backend = FsBackend::new(GoCryptFsEntryStorage::with_directory_layout(
+        let backend = EntryStorageBackend::new(GoCryptFsEntryStorage::with_directory_layout(
             NativeFileSystem::new(root.clone()),
             directory_layout.clone(),
         ));
@@ -248,7 +248,7 @@ mod tests {
         create_matrix_tree(&cryptfs, false, 0);
         drop(cryptfs);
 
-        let backend = FsBackend::new(GoCryptFsEntryStorage::with_directory_layout(
+        let backend = EntryStorageBackend::new(GoCryptFsEntryStorage::with_directory_layout(
             NativeFileSystem::new(root),
             directory_layout,
         ));
@@ -263,7 +263,7 @@ mod tests {
         let config_storage = NativeFileSystem::new(root.clone());
         let config_fs = StorageConfigFileSystem::new(&config_storage);
         let directory_layout = matrix_layout(MatrixTokenKind::Cryptomator, true);
-        let backend = FsBackend::new(CryptomatorEntryStorage::new(
+        let backend = EntryStorageBackend::new(CryptomatorEntryStorage::new(
             NativeFileSystem::new(root.clone()),
             directory_layout.clone(),
         ));
@@ -272,7 +272,7 @@ mod tests {
         create_matrix_tree(&cryptfs, true, 0);
         drop(cryptfs);
 
-        let backend = FsBackend::new(CryptomatorEntryStorage::new(
+        let backend = EntryStorageBackend::new(CryptomatorEntryStorage::new(
             NativeFileSystem::new(root),
             directory_layout,
         ));

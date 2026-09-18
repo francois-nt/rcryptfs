@@ -1,7 +1,7 @@
 use super::GoCryptFs;
 use crate::core::{
-    BackendProvider, ConfigFileSystem, EncryptedFileSystem, EntryStorage, FileCachePolicy,
-    FileSystem, FsBackend, MasterKey, NativeFileSystem, Result, StorageConfigFileSystem,
+    BackendProvider, CleartextFileSystem, ConfigFileSystem, EntryStorage, EntryStorageBackend,
+    FileBufferingPolicy, FileSystem, MasterKey, NativeFileSystem, Result, StorageConfigFileSystem,
 };
 use crate::{Utf8Path, register_provider};
 
@@ -24,16 +24,16 @@ impl GoCryptFsBuilder {
 
     /// Builds a GoCryptFS crypto layer over an arbitrary entry representation.
     pub fn try_build_with_backend<S, C>(
-        backend: FsBackend<S>,
+        backend: EntryStorageBackend<S>,
         config_fs: &C,
         password: &str,
-        cache_policy: Box<dyn FileCachePolicy>,
+        cache_policy: Box<dyn FileBufferingPolicy>,
     ) -> Result<Box<dyn FileSystem>>
     where
         S: EntryStorage,
         C: ConfigFileSystem + ?Sized,
     {
-        let cryptfs: EncryptedFileSystem<GoCryptFs<FsBackend<S>>> = (
+        let cryptfs: CleartextFileSystem<GoCryptFs<EntryStorageBackend<S>>> = (
             GoCryptFs::try_new_with_backend(backend, config_fs, password)?,
             cache_policy,
         )
@@ -43,7 +43,7 @@ impl GoCryptFsBuilder {
 
     /// Initializes a GoCryptFS crypto configuration over an entry representation.
     pub fn init_with_backend<S, C>(
-        backend: &FsBackend<S>,
+        backend: &EntryStorageBackend<S>,
         config_fs: &C,
         password: &str,
     ) -> Result<Box<dyn MasterKey>>
@@ -68,9 +68,9 @@ impl BackendProvider for GoCryptFsBuilder {
         &self,
         root: &Utf8Path,
         password: &str,
-        cache_policy: Box<dyn FileCachePolicy>,
+        cache_policy: Box<dyn FileBufferingPolicy>,
     ) -> Result<Box<dyn FileSystem>> {
-        let cryptfs: EncryptedFileSystem<GoCryptFs> =
+        let cryptfs: CleartextFileSystem<GoCryptFs> =
             (GoCryptFs::try_new(root, password)?, cache_policy).into();
         Ok(Box::new(cryptfs))
     }

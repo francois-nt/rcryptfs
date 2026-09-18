@@ -1,6 +1,6 @@
 mod backend_provider;
 mod buffered_file;
-mod file;
+mod cryptfs_file;
 mod filesystem;
 mod open_file_table;
 mod traits;
@@ -11,8 +11,8 @@ pub use backend_provider::{
     BackendProvider, MasterKey, PROVIDERS, build_filesystem, get_providers_name, init_filesystem,
 };
 pub use buffered_file::BufferedFile;
-pub use file::CryptFsFile;
-pub use filesystem::{EncryptedFileSystem, FileCache, FileCachePolicy, NoCache};
+pub use cryptfs_file::CryptFsFile;
+pub use filesystem::{CleartextFileSystem, FileBuffering, FileBufferingPolicy, NoBuffering};
 pub use open_file_table::{LockedOpenFileTable, UnsafeOpenFileTable};
 pub(crate) use traits::temp_file_path;
 pub use traits::*;

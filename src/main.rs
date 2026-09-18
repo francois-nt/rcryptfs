@@ -5,7 +5,7 @@
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, FromArgMatches, Parser, builder::PossibleValuesParser};
 use rcryptfs::core::{
-    FileCache, FileSystemHandler, LockedOpenFileTable, build_filesystem, get_providers_name,
+    FileBuffering, FileSystemSession, LockedOpenFileTable, build_filesystem, get_providers_name,
     init_filesystem, is_native_dir_empty,
 };
 use rcryptfs::{is_background_child, platform, respawn_in_background};
@@ -192,9 +192,9 @@ fn main() -> Result<()> {
             let cryptfs = build_filesystem(
                 cli_args.folder_path.as_str().into(),
                 &password,
-                FileCache::default().with_cache_write(),
+                FileBuffering::default().with_cache_write(),
             )?;
-            let handler: FileSystemHandler<LockedOpenFileTable> = cryptfs.into();
+            let handler: FileSystemSession<LockedOpenFileTable> = cryptfs.into();
             // CLI mode reuses stdin after password entry, so the platform layer restores an interactive input when needed.
             platform::prepare_cli_stdin(stdin_is_piped())?;
             cli::run_cli_shell(&handler)?;
@@ -245,7 +245,7 @@ fn run_mount(mount_args: &MountArgs, is_background_child: bool) -> Result<()> {
     let cryptfs = build_filesystem(
         mount_args.folder_path.as_str().into(),
         &password,
-        FileCache::default().with_cache_write(),
+        FileBuffering::default().with_cache_write(),
     )?;
     if !is_background_child {
         println!("Decrypting master key");
@@ -256,7 +256,7 @@ fn run_mount(mount_args: &MountArgs, is_background_child: bool) -> Result<()> {
         respawn_in_background(&password)?;
     }
 
-    let mut handler: FileSystemHandler<LockedOpenFileTable> = cryptfs.into();
+    let mut handler: FileSystemSession<LockedOpenFileTable> = cryptfs.into();
     if !is_background_child || std::env::var_os("VERBOSE").is_some() {
         log::set_logger(&LOGGER).map_err(|e| anyhow::anyhow!("{e}"))?;
         log::set_max_level(log::LevelFilter::Debug);

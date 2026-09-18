@@ -3,7 +3,7 @@ mod encryption_translator;
 mod entry_storage;
 mod inner;
 mod layout;
-use crate::core::{Backend, FsBackend, NativeFileSystem};
+use crate::core::{Backend, EntryStorageBackend, NativeFileSystem};
 
 const HEADER_NONCE_LEN: usize = 12;
 const NONCE_LEN: usize = 12;
@@ -19,4 +19,4 @@ pub use builder::CryptoMatorBuilder;
 pub use entry_storage::{CryptomatorEntryStorage, CryptomatorEntryStorageOptions};
 
 /// Backend using the Cryptomator entry representation.
-pub type CryptomatorBackend<F = NativeFileSystem> = FsBackend<CryptomatorEntryStorage<F>>;
+pub type CryptomatorBackend<F = NativeFileSystem> = EntryStorageBackend<CryptomatorEntryStorage<F>>;

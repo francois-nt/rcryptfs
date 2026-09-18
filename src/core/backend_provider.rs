@@ -1,4 +1,4 @@
-use super::{FileCachePolicy, FileSystem, Result, Utf8Path};
+use super::{FileBufferingPolicy, FileSystem, Result, Utf8Path};
 use linkme::distributed_slice;
 
 pub trait MasterKey {
@@ -37,7 +37,7 @@ pub trait BackendProvider: Send + Sync {
         &self,
         root: &Utf8Path,
         password: &str,
-        cache_policy: Box<dyn FileCachePolicy>,
+        cache_policy: Box<dyn FileBufferingPolicy>,
     ) -> Result<Box<dyn FileSystem>>;
 }
 
@@ -60,7 +60,7 @@ macro_rules! register_provider {
 pub fn build_filesystem(
     root_path: &Utf8Path,
     password: &str,
-    cache_policy: impl FileCachePolicy + 'static,
+    cache_policy: impl FileBufferingPolicy + 'static,
 ) -> Result<Box<dyn FileSystem>> {
     for &provider in PROVIDERS {
         if provider.probe(root_path) {

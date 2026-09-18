@@ -1,4 +1,4 @@
-use crate::core::{Backend, FsBackend, NativeFileSystem};
+use crate::core::{Backend, EntryStorageBackend, NativeFileSystem};
 
 mod builder;
 mod encryption_translator;
@@ -21,4 +21,4 @@ pub use builder::GoCryptFsBuilder;
 pub use entry_storage::{GoCryptFsEntryStorage, GoCryptFsEntryStorageOptions};
 
 /// Backend using the GoCryptFS entry representation.
-pub type GoCryptFsBackend<F = NativeFileSystem> = FsBackend<GoCryptFsEntryStorage<F>>;
+pub type GoCryptFsBackend<F = NativeFileSystem> = EntryStorageBackend<GoCryptFsEntryStorage<F>>;

@@ -9,19 +9,19 @@ use super::{
 use std::sync::Arc;
 
 /// Describes how opened cipher files should be wrapped with read or write caching.
-pub trait FileCachePolicy: Send + Sync + 'static {
+pub trait FileBufferingPolicy: Send + Sync + 'static {
     fn cache_write(&self) -> bool;
     fn cache_read(&self) -> bool;
 }
 
 /// Enables buffering for selected file access patterns.
 #[derive(Clone, Copy, Default)]
-pub struct FileCache {
+pub struct FileBuffering {
     cache_write: bool,
     cache_read: bool,
 }
 
-impl FileCache {
+impl FileBuffering {
     /// Returns a policy that buffers writes.
     pub fn with_cache_write(self) -> Self {
         Self {
@@ -38,7 +38,7 @@ impl FileCache {
     }
 }
 
-impl FileCachePolicy for FileCache {
+impl FileBufferingPolicy for FileBuffering {
     fn cache_write(&self) -> bool {
         self.cache_write
     }
@@ -49,8 +49,8 @@ impl FileCachePolicy for FileCache {
 
 /// Disables all extra buffering around opened encrypted files.
 #[derive(Clone, Copy, Default)]
-pub struct NoCache;
-impl FileCachePolicy for NoCache {
+pub struct NoBuffering;
+impl FileBufferingPolicy for NoBuffering {
     fn cache_write(&self) -> bool {
         false
     }
@@ -61,13 +61,13 @@ impl FileCachePolicy for NoCache {
 
 /// Exposes an encrypted layout through the public filesystem traits.
 #[derive(Clone)]
-pub struct EncryptedFileSystem<T> {
+pub struct CleartextFileSystem<T> {
     fs: Arc<T>,
-    cache_policy: Arc<dyn FileCachePolicy>,
+    cache_policy: Arc<dyn FileBufferingPolicy>,
 }
 
-impl<T> From<(T, Box<dyn FileCachePolicy>)> for EncryptedFileSystem<T> {
-    fn from(value: (T, Box<dyn FileCachePolicy>)) -> Self {
+impl<T> From<(T, Box<dyn FileBufferingPolicy>)> for CleartextFileSystem<T> {
+    fn from(value: (T, Box<dyn FileBufferingPolicy>)) -> Self {
         Self {
             fs: Arc::from(value.0),
             cache_policy: Arc::from(value.1),
@@ -80,7 +80,7 @@ fn try_open_crypt_file<T>(
     path: &VirtualPath,
     backend: Arc<T>,
     mut options: FileOpenOptions,
-    cache_policy: &dyn FileCachePolicy,
+    cache_policy: &dyn FileBufferingPolicy,
 ) -> std::io::Result<Box<dyn FileHandle>>
 where
     T: EncryptionTranslator + EncryptionLayout + Send + Sync + 'static,
@@ -103,7 +103,7 @@ where
     }
 }
 
-impl<T> ReadOnlyFileSystem for EncryptedFileSystem<T>
+impl<T> ReadOnlyFileSystem for CleartextFileSystem<T>
 where
     T: EncryptionTranslator + EncryptionLayout + XattrLayout + Send + Sync + 'static,
 {
@@ -142,7 +142,7 @@ where
     }
 }
 
-impl<T> FileSystem for EncryptedFileSystem<T>
+impl<T> FileSystem for CleartextFileSystem<T>
 where
     T: EncryptionTranslator + EncryptionLayout + XattrLayout + Send + Sync + 'static,
 {

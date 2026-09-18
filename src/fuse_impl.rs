@@ -1,7 +1,7 @@
 use crate::{
     VirtualPathBuf,
     core::{
-        FileCapabilities, FileHandle, FileOpenOptions, FileSystem, FileSystemHandler, FileType,
+        FileCapabilities, FileHandle, FileOpenOptions, FileSystem, FileSystemSession, FileType,
         Metadata, OpenFileTable, OrIoError, ReadOnlyFileSystem, VirtualPath,
     },
 };
@@ -160,7 +160,7 @@ where
     }
 }
 
-impl<C: OpenFileTable> Filesystem for FileSystemHandler<C> {
+impl<C: OpenFileTable> Filesystem for FileSystemSession<C> {
     fn init(
         &self,
         req: RequestInfo,

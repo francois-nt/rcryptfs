@@ -1,8 +1,8 @@
 use super::CryptoMator;
 use crate::core::{
     DirectoryContentLayout, DirectoryLayout, EncryptionLayout, EncryptionTranslator, EntryStorage,
-    FsBackend, OrIoError, PathCacheAccess, PathLayout, Result, RootDirectoryToken, VirtualPath,
-    VirtualPathBuf, default_remove_cached_plain_path,
+    EntryStorageBackend, OrIoError, PathCacheAccess, PathLayout, Result, RootDirectoryToken,
+    VirtualPath, VirtualPathBuf, default_remove_cached_plain_path,
 };
 
 /// Canonical Cryptomator directory policy derived from the SIV key.
@@ -72,7 +72,7 @@ impl DirectoryLayout for CryptomatorDirectoryLayout {
 
 /// Resolves a plain folder path to its storage directory and dir id.
 fn folder_path_to_cipher_and_dirid<S>(
-    this: &CryptoMator<FsBackend<S>>,
+    this: &CryptoMator<EntryStorageBackend<S>>,
     plain_path: &VirtualPath,
 ) -> Result<(VirtualPathBuf, Vec<u8>)>
 where
@@ -125,7 +125,7 @@ where
     })
 }
 
-impl<S> PathLayout for CryptoMator<FsBackend<S>>
+impl<S> PathLayout for CryptoMator<EntryStorageBackend<S>>
 where
     S: EntryStorage,
 {
@@ -152,7 +152,7 @@ where
     }
 }
 
-impl<S: EntryStorage> EncryptionLayout for CryptoMator<FsBackend<S>> {}
+impl<S: EntryStorage> EncryptionLayout for CryptoMator<EntryStorageBackend<S>> {}
 
 #[cfg(test)]
 mod tests {
@@ -192,7 +192,7 @@ mod tests {
 
         let directory_layout = Arc::new(CryptomatorDirectoryLayout::new(siv_key));
         let backend: CryptoMator<CryptomatorBackend> = CryptoMator {
-            backend: FsBackend::new(CryptomatorEntryStorage::new(
+            backend: EntryStorageBackend::new(CryptomatorEntryStorage::new(
                 NativeFileSystem::new(root.to_owned()),
                 directory_layout,
             )),

@@ -1,7 +1,7 @@
 use super::GoCryptFs;
 use crate::core::{
     DirectoryContentLayout, DirectoryLayout, EncryptionLayout, EncryptionTranslator, EntryStorage,
-    FsBackend, PathCacheAccess, PathLayout, Result, RootDirectoryToken, VirtualPath,
+    EntryStorageBackend, PathCacheAccess, PathLayout, Result, RootDirectoryToken, VirtualPath,
     VirtualPathBuf, default_remove_cached_plain_path,
 };
 
@@ -43,7 +43,7 @@ impl DirectoryLayout for GoCryptFsDirectoryLayout {
     }
 }
 
-impl<S> PathLayout for GoCryptFs<FsBackend<S>>
+impl<S> PathLayout for GoCryptFs<EntryStorageBackend<S>>
 where
     S: EntryStorage,
 {
@@ -104,7 +104,7 @@ where
     }
 }
 
-impl<S: EntryStorage> EncryptionLayout for GoCryptFs<FsBackend<S>> {}
+impl<S: EntryStorage> EncryptionLayout for GoCryptFs<EntryStorageBackend<S>> {}
 
 #[cfg(test)]
 mod tests {

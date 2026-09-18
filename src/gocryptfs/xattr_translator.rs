@@ -1,6 +1,7 @@
 use super::GoCryptFs;
 use crate::core::{
-    EncryptionTranslator, EntryStorage, FsBackend, OrIoError, PathLayout, VirtualPath, XattrLayout,
+    EncryptionTranslator, EntryStorage, EntryStorageBackend, OrIoError, PathLayout, VirtualPath,
+    XattrLayout,
 };
 
 const XATTR_IV: &[u8] = b"xattr_name_iv_xx";
@@ -50,7 +51,7 @@ fn cipher_xattr_value_to_plain(
         .or_invalid()
 }
 
-impl<S> XattrLayout for GoCryptFs<FsBackend<S>>
+impl<S> XattrLayout for GoCryptFs<EntryStorageBackend<S>>
 where
     S: EntryStorage,
 {

@@ -1,7 +1,8 @@
 use crate::core::{
-    DirectoryLayout, EntryStorage, FsBackend, Metadata, NativeFileSystem, OrIoError, Permissions,
-    RootDirectoryToken, StorageDirEntry, StorageDirectory, StorageFileSystem, Utf8Path,
-    Utf8PathBuf, VirtualPath, VirtualPathBuf, forward_storage_fs_operations, temp_file_path,
+    DirectoryLayout, EntryStorage, EntryStorageBackend, Metadata, NativeFileSystem, OrIoError,
+    Permissions, RootDirectoryToken, StorageDirEntry, StorageDirectory, StorageFileSystem,
+    Utf8Path, Utf8PathBuf, VirtualPath, VirtualPathBuf, forward_storage_fs_operations,
+    temp_file_path,
 };
 use base64::{
     Engine,
@@ -297,13 +298,13 @@ impl<F: StorageFileSystem> GoCryptFsEntryStorage<F> {
     }
 }
 
-impl From<Utf8PathBuf> for FsBackend<GoCryptFsEntryStorage<NativeFileSystem>> {
+impl From<Utf8PathBuf> for EntryStorageBackend<GoCryptFsEntryStorage<NativeFileSystem>> {
     fn from(root: Utf8PathBuf) -> Self {
         Self::new(GoCryptFsEntryStorage::new(NativeFileSystem::new(root)))
     }
 }
 
-impl From<&Utf8Path> for FsBackend<GoCryptFsEntryStorage<NativeFileSystem>> {
+impl From<&Utf8Path> for EntryStorageBackend<GoCryptFsEntryStorage<NativeFileSystem>> {
     fn from(root: &Utf8Path) -> Self {
         root.to_owned().into()
     }
