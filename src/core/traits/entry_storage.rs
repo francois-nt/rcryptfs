@@ -1,4 +1,8 @@
-use super::{FileHandle, FileOpenOptions, Metadata, Permissions, VirtualPath, VirtualPathBuf};
+use super::{
+    AsyncFileHandle, FileHandle, FileOpenOptions, Metadata, Permissions, VirtualPath,
+    VirtualPathBuf,
+};
+use futures_core::Stream;
 use std::{future::Future, time::SystemTime};
 
 /// One visible entry returned from a represented storage directory.
@@ -325,13 +329,18 @@ pub trait EntryStorage: Send + Sync + 'static {
 /// [EntryStorage], while allowing every storage access to complete
 /// asynchronously.
 pub trait AsyncEntryStorage: Send + Sync + 'static {
-    /// Iterator returned after an asynchronous directory lookup.
-    ///
-    /// Iterating over the returned entries must not perform blocking I/O.
-    type DirEntries: Iterator<Item = std::io::Result<Vec<StorageDirEntry>>> + Send + 'static;
+    /// Handle returned when opening a represented regular file.
+    type OpenHandle: AsyncFileHandle;
 
     /// Generates the opaque token for a new represented directory.
     fn generate_directory_token(&self) -> Vec<u8>;
+
+    /// Opens a represented regular file using opaque physical options.
+    fn open_file_with(
+        &self,
+        path: &VirtualPath,
+        options: FileOpenOptions,
+    ) -> impl Future<Output = std::io::Result<Self::OpenHandle>> + Send;
 
     /// Returns metadata normalized to the represented logical entry.
     fn metadata(
@@ -343,7 +352,7 @@ pub trait AsyncEntryStorage: Send + Sync + 'static {
     fn read_dir(
         &self,
         contents_path: VirtualPathBuf,
-    ) -> impl Future<Output = std::io::Result<Self::DirEntries>> + Send;
+    ) -> impl Stream<Item = std::io::Result<Vec<StorageDirEntry>>> + Send;
 
     /// Resolves a stored directory to its complete physical description.
     fn resolve_directory(

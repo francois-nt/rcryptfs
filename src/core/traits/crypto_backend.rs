@@ -1,11 +1,15 @@
 use super::super::CipherPathCacheEntry;
-use super::{EntryStorage, FsDirEntry, Metadata, Permissions, Result, VirtualPath, VirtualPathBuf};
+use super::{
+    AsyncEntryStorage, EntryStorage, FsDirEntry, Metadata, Permissions, Result, VirtualPath,
+    VirtualPathBuf,
+};
 use super::{
     default_create_symlink, default_list_dir_plain_names, default_metadata, default_mkdir,
     default_mknode, default_read_symlink, default_remove, default_remove_dir, default_rename,
     default_set_permissions, default_set_time,
 };
-use std::{collections::BTreeMap, time::SystemTime};
+use futures_core::Stream;
+use std::{collections::BTreeMap, future::Future, time::SystemTime};
 /// Marker trait for backend implementations.
 pub trait Backend {}
 
@@ -149,6 +153,98 @@ pub trait PathLayout {
     /// Invalidates one cached plain path and its cached descendants.
     fn remove_cached_plain_path(&self, plain_path: &VirtualPath);
 }
+
+/// Resolves plain paths against an asynchronous encrypted entry layout.
+pub trait AsyncPathLayout: Send + Sync + 'static {
+    /// Storage implementing the physical entry representation.
+    type EntryStorage: AsyncEntryStorage;
+
+    /// Returns the representation-aware asynchronous entry storage.
+    fn entry_storage(&self) -> &Self::EntryStorage;
+
+    /// Converts a plain path to its cipher text equivalent asynchronously.
+    fn plain_path_to_cipher(
+        &self,
+        plain_path: &VirtualPath,
+    ) -> impl Future<Output = Result<VirtualPathBuf>> + Send;
+
+    /// Invalidates one cached plain path and its cached descendants.
+    fn remove_cached_plain_path(&self, plain_path: &VirtualPath);
+}
+
+/// Provides asynchronous operations over an encrypted entry layout.
+pub trait AsyncEncryptionLayout: AsyncPathLayout + EncryptionTranslator {
+    /// Lists plain directory entries in implementation-defined batches.
+    fn list_dir_plain_names(
+        &self,
+        plain_path: &VirtualPath,
+    ) -> impl Stream<Item = std::io::Result<Vec<(FsDirEntry, VirtualPathBuf)>>> + Send;
+
+    /// Returns plain metadata for a path.
+    fn metadata(
+        &self,
+        plain_path: &VirtualPath,
+    ) -> impl Future<Output = std::io::Result<Metadata>> + Send;
+
+    /// Creates a plain regular file.
+    fn mknode(
+        &self,
+        plain_path: &VirtualPath,
+        permissions: Option<Permissions>,
+    ) -> impl Future<Output = std::io::Result<Metadata>> + Send;
+
+    /// Creates a plain directory.
+    fn mkdir(
+        &self,
+        plain_path: &VirtualPath,
+        permissions: Option<Permissions>,
+    ) -> impl Future<Output = std::io::Result<Metadata>> + Send;
+
+    /// Removes a plain non-directory entry.
+    fn remove(&self, plain_path: &VirtualPath) -> impl Future<Output = std::io::Result<()>> + Send;
+
+    /// Removes a plain directory.
+    fn remove_dir(
+        &self,
+        plain_path: &VirtualPath,
+    ) -> impl Future<Output = std::io::Result<()>> + Send;
+
+    /// Creates a plain symbolic link.
+    fn create_symlink(
+        &self,
+        plain_path: &VirtualPath,
+        target: &str,
+    ) -> impl Future<Output = std::io::Result<Metadata>> + Send;
+
+    /// Reads a plain symbolic link target.
+    fn read_symlink(
+        &self,
+        plain_path: &VirtualPath,
+    ) -> impl Future<Output = std::io::Result<String>> + Send;
+
+    /// Renames a plain entry.
+    fn rename(
+        &self,
+        old_path: &VirtualPath,
+        new_path: &VirtualPath,
+    ) -> impl Future<Output = std::io::Result<()>> + Send;
+
+    /// Updates permissions on a plain entry.
+    fn set_permissions(
+        &self,
+        path: &VirtualPath,
+        permissions: Permissions,
+    ) -> impl Future<Output = std::io::Result<Metadata>> + Send;
+
+    /// Sets access and modification times on a plain entry.
+    fn set_time(
+        &self,
+        path: &VirtualPath,
+        atime: Option<SystemTime>,
+        mtime: Option<SystemTime>,
+    ) -> impl Future<Output = std::io::Result<()>> + Send;
+}
+
 pub trait EncryptionLayout: PathLayout + EncryptionTranslator {
     /// Lists directory entries with plain names.
     fn list_dir_plain_names(

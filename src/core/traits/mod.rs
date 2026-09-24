@@ -21,4 +21,6 @@ use helpers::{
     default_mknode, default_read_symlink, default_remove, default_remove_dir, default_rename,
     default_set_permissions, default_set_time,
 };
-pub use storage_fs::StorageFileSystem;
+pub use storage_fs::{
+    AsyncStorageFileSystem, ExistingDestinationPolicy, RenameOperation, StorageFileSystem,
+};

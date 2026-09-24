@@ -4,7 +4,10 @@ use super::super::{
 };
 pub use camino::{Utf8Path, Utf8PathBuf};
 use log::error;
-use std::{fmt::Display, time::SystemTime};
+use std::{fmt::Display, future::Future, pin::Pin, time::SystemTime};
+
+/// Boxed future returned by asynchronous I/O traits.
+pub type IoFuture<'a, T> = Pin<Box<dyn Future<Output = std::io::Result<T>> + Send + 'a>>;
 
 /// Provides positioned reads without changing a shared file cursor.
 pub trait ReadAt {
@@ -47,15 +50,75 @@ pub trait ReadAt {
     }
 }
 
+/// Provides asynchronous positioned reads without changing a shared file cursor.
+pub trait AsyncReadAt: Send + Sync {
+    /// Performs one positioned read and returns the number of bytes read.
+    ///
+    /// A successful read may return fewer bytes than the buffer can hold.
+    fn read_at<'a>(&'a self, pos: u64, buf: &'a mut [u8]) -> IoFuture<'a, usize>;
+
+    /// Repeats positioned reads until the buffer is full, EOF is reached, or an error occurs.
+    fn read_all_at<'a>(&'a self, mut pos: u64, mut buf: &'a mut [u8]) -> IoFuture<'a, usize> {
+        Box::pin(async move {
+            let requested = buf.len();
+            while !buf.is_empty() {
+                match self.read_at(pos, buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        buf = &mut buf[n..];
+                        if !buf.is_empty() {
+                            pos = pos.checked_add(n as u64).ok_or_else(|| {
+                                std::io::Error::from_raw_os_error(libc::EOVERFLOW)
+                            })?;
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(requested - buf.len())
+        })
+    }
+
+    /// Fills the entire buffer or returns an error, including unexpected EOF.
+    fn read_exact_at<'a>(&'a self, pos: u64, buf: &'a mut [u8]) -> IoFuture<'a, ()> {
+        Box::pin(async move {
+            let expected = buf.len();
+            let actual = self.read_all_at(pos, buf).await?;
+
+            if actual == expected {
+                Ok(())
+            } else {
+                Err(std::io::ErrorKind::UnexpectedEof.into())
+            }
+        })
+    }
+}
+
 /// Returns the logical size of a file-like object.
 pub trait Size {
     fn size(&self) -> std::io::Result<u64>;
+}
+
+/// Returns the logical size of a file-like object asynchronously.
+pub trait AsyncSize: Send + Sync {
+    /// Returns the logical size.
+    fn size(&self) -> IoFuture<'_, u64>;
 }
 
 /// Provides access to a file's modification time.
 pub trait ModifiedTime {
     fn get_modified(&self) -> std::io::Result<SystemTime>;
     fn set_modified_time(&self, modified_time: SystemTime) -> std::io::Result<()>;
+}
+
+/// Provides asynchronous access to a file's modification time.
+pub trait AsyncModifiedTime: Send + Sync {
+    /// Returns the modification time.
+    fn get_modified(&self) -> IoFuture<'_, SystemTime>;
+
+    /// Updates the modification time.
+    fn set_modified_time(&self, modified_time: SystemTime) -> IoFuture<'_, ()>;
 }
 
 /// Provides positioned writes without changing a shared file cursor.
@@ -88,15 +151,62 @@ pub trait WriteAt {
     }
 }
 
+/// Provides asynchronous positioned writes without changing a shared file cursor.
+pub trait AsyncWriteAt: Send + Sync {
+    /// Performs one positioned write and returns the number of bytes written.
+    fn write_at<'a>(&'a self, pos: u64, buf: &'a [u8]) -> IoFuture<'a, usize>;
+
+    /// Writes the full buffer unless an error occurs.
+    fn write_all_at<'a>(&'a self, mut pos: u64, mut buf: &'a [u8]) -> IoFuture<'a, ()> {
+        Box::pin(async move {
+            while !buf.is_empty() {
+                match self.write_at(pos, buf).await {
+                    Ok(0) => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::WriteZero,
+                            "failed to write whole buffer",
+                        ));
+                    }
+                    Ok(n) => {
+                        buf = &buf[n..];
+                        pos += n as u64;
+                    }
+                    Err(ref error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Flushes buffered state when the implementation uses staging.
+    fn flush(&self) -> IoFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
 /// Trait for synchronization operations.
 pub trait SetSync {
     /// Synchronizes data to disk.
     fn sync(&self, datasync: bool) -> std::io::Result<()>;
 }
+
+/// Provides asynchronous synchronization operations.
+pub trait AsyncSetSync: Send + Sync {
+    /// Synchronizes data to storage.
+    fn sync(&self, datasync: bool) -> IoFuture<'_, ()>;
+}
+
 /// Trait for setting file length.
 pub trait SetLen {
     /// Sets the length of the file.
     fn set_len(&self, new_size: u64) -> std::io::Result<()>;
+}
+
+/// Provides asynchronous file length updates.
+pub trait AsyncSetLen: Send + Sync {
+    /// Sets the file length.
+    fn set_len(&self, new_size: u64) -> IoFuture<'_, ()>;
 }
 
 /// Marker trait for read operations.
@@ -105,6 +215,24 @@ pub trait ReadHandle: ReadAt + Send + Sync {}
 pub trait FileHandle:
     ReadHandle + WriteAt + SetLen + SetSync + Size + ModifiedTime + 'static
 {
+}
+
+/// Provides the complete asynchronous operation set supported by an open file.
+pub trait AsyncFileHandle:
+    AsyncReadAt + AsyncWriteAt + AsyncSetLen + AsyncSetSync + AsyncSize + AsyncModifiedTime + 'static
+{
+}
+
+trait _AsyncDynFileHandle {
+    fn read_all_at<'a>(&'a self, pos: u64, buf: &'a mut [u8]) -> IoFuture<'a, usize>;
+    fn read_exact_at<'a>(&'a self, pos: u64, buf: &'a mut [u8]) -> IoFuture<'a, ()>;
+    fn size(&self) -> IoFuture<'_, u64>;
+    fn get_modified(&self) -> IoFuture<'_, SystemTime>;
+    fn set_modified_time(&self, modified_time: SystemTime) -> IoFuture<'_, ()>;
+    fn write_all_at<'a>(&'a self, pos: u64, buf: &'a [u8]) -> IoFuture<'a, ()>;
+    fn flush(&self) -> IoFuture<'_, ()>;
+    fn sync(&self, datasync: bool) -> IoFuture<'_, ()>;
+    fn set_len(&self, new_size: u64) -> IoFuture<'_, ()>;
 }
 
 /// Access capabilities required from a physical file handle.
@@ -137,6 +265,20 @@ impl<T: ReadAt + ?Sized> ReadAt for Box<T> {
     }
 }
 
+impl<T: AsyncReadAt + ?Sized> AsyncReadAt for Box<T> {
+    fn read_at<'a>(&'a self, pos: u64, buf: &'a mut [u8]) -> IoFuture<'a, usize> {
+        (**self).read_at(pos, buf)
+    }
+
+    fn read_all_at<'a>(&'a self, pos: u64, buf: &'a mut [u8]) -> IoFuture<'a, usize> {
+        (**self).read_all_at(pos, buf)
+    }
+
+    fn read_exact_at<'a>(&'a self, pos: u64, buf: &'a mut [u8]) -> IoFuture<'a, ()> {
+        (**self).read_exact_at(pos, buf)
+    }
+}
+
 impl<T: WriteAt + ?Sized> WriteAt for Box<T> {
     fn write_at(&self, pos: u64, buf: &[u8]) -> std::io::Result<usize> {
         (**self).write_at(pos, buf)
@@ -147,8 +289,24 @@ impl<T: WriteAt + ?Sized> WriteAt for Box<T> {
     }
 }
 
+impl<T: AsyncWriteAt + ?Sized> AsyncWriteAt for Box<T> {
+    fn write_at<'a>(&'a self, pos: u64, buf: &'a [u8]) -> IoFuture<'a, usize> {
+        (**self).write_at(pos, buf)
+    }
+
+    fn flush(&self) -> IoFuture<'_, ()> {
+        (**self).flush()
+    }
+}
+
 impl<T: SetLen + ?Sized> SetLen for Box<T> {
     fn set_len(&self, new_size: u64) -> std::io::Result<()> {
+        (**self).set_len(new_size)
+    }
+}
+
+impl<T: AsyncSetLen + ?Sized> AsyncSetLen for Box<T> {
+    fn set_len(&self, new_size: u64) -> IoFuture<'_, ()> {
         (**self).set_len(new_size)
     }
 }
@@ -159,8 +317,20 @@ impl<T: SetSync + ?Sized> SetSync for Box<T> {
     }
 }
 
+impl<T: AsyncSetSync + ?Sized> AsyncSetSync for Box<T> {
+    fn sync(&self, datasync: bool) -> IoFuture<'_, ()> {
+        (**self).sync(datasync)
+    }
+}
+
 impl<T: Size + ?Sized> Size for Box<T> {
     fn size(&self) -> std::io::Result<u64> {
+        (**self).size()
+    }
+}
+
+impl<T: AsyncSize + ?Sized> AsyncSize for Box<T> {
+    fn size(&self) -> IoFuture<'_, u64> {
         (**self).size()
     }
 }
@@ -175,10 +345,31 @@ impl<T: ModifiedTime + ?Sized> ModifiedTime for Box<T> {
     }
 }
 
+impl<T: AsyncModifiedTime + ?Sized> AsyncModifiedTime for Box<T> {
+    fn get_modified(&self) -> IoFuture<'_, SystemTime> {
+        (**self).get_modified()
+    }
+
+    fn set_modified_time(&self, modified_time: SystemTime) -> IoFuture<'_, ()> {
+        (**self).set_modified_time(modified_time)
+    }
+}
+
 impl<T> ReadHandle for T where T: ReadAt + Send + Sync {}
 
 impl<T> FileHandle for T where
     T: ReadHandle + WriteAt + SetLen + SetSync + Size + ModifiedTime + 'static
+{
+}
+
+impl<T> AsyncFileHandle for T where
+    T: AsyncReadAt
+        + AsyncWriteAt
+        + AsyncSetLen
+        + AsyncSetSync
+        + AsyncSize
+        + AsyncModifiedTime
+        + 'static
 {
 }
 
@@ -463,7 +654,7 @@ impl<T> ErrorMapper<T> for Option<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::ReadAt;
+    use super::{AsyncFileHandle, ReadAt};
 
     struct ShortReader(&'static [u8]);
 
@@ -479,6 +670,13 @@ mod tests {
             buf[..len].copy_from_slice(&source[..len]);
             Ok(len)
         }
+    }
+
+    #[test]
+    fn async_file_handle_is_dyn_compatible() {
+        fn accept_dyn_handle(_: Option<&dyn AsyncFileHandle>) {}
+
+        accept_dyn_handle(None);
     }
 
     #[test]

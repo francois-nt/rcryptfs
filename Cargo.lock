@@ -1013,6 +1013,8 @@ dependencies = [
  "eme-mode",
  "filetime",
  "fuser-ng",
+ "futures-core",
+ "futures-util",
  "generic-array 1.4.5",
  "hkdf",
  "hmac",
