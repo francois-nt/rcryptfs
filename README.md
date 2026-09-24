@@ -203,8 +203,10 @@ each independent open operation.
 
 The design aims to keep repository access format-aware but backend-agnostic,
 isolate raw I/O from encryption, and keep the core independent from FUSE or any
-future access layer. It also leaves room for asynchronous storage backends
-without spreading storage I/O throughout the crypto layer.
+future access layer. Parallel async contracts now cover file handles, raw
+storage, entry representations, and encrypted layouts; GoCryptFS implements the
+async entry-storage layer. The cached backend, cleartext filesystem, session,
+and a concrete async storage implementation still need to be connected.
 
 ## Roadmap
 
