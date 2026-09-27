@@ -1,6 +1,7 @@
 use super::{
-    EncryptionLayout, EncryptionTranslator, EntryStorage, FileType, FsDirEntry, Metadata,
-    OrIoError, Permissions, StorageDirEntry, VirtualPath, VirtualPathBuf,
+    DirectoryLayout, EncryptionLayout, EncryptionTranslator, EntryStorage, FileType, FsDirEntry,
+    Metadata, OrIoError, Permissions, RootDirectoryToken, StorageDirEntry, VirtualPath,
+    VirtualPathBuf,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::Digest;
@@ -84,17 +85,66 @@ pub(super) fn default_mknode<T: EncryptionLayout + ?Sized>(
     storage_metadata_to_plain(this, metadata)
 }
 
-pub(super) fn default_mkdir<T: EncryptionLayout + ?Sized>(
+pub(super) fn default_mkdir<T: EncryptionLayout + ?Sized, L: DirectoryLayout + ?Sized>(
     this: &T,
+    directory_layout: &L,
     plain_path: &VirtualPath,
     permissions: Option<Permissions>,
 ) -> std::io::Result<Metadata> {
     let entry_path = this.plain_path_to_cipher(plain_path).or_invalid()?;
-    let token = this.entry_storage().generate_directory_token();
-    let metadata = this
-        .entry_storage()
-        .create_directory(entry_path, token, permissions)?;
+    let token = directory_layout.generate_directory_token();
+    directory_layout
+        .validate_directory_token(&token, false)
+        .or_invalid()?;
+    let directory_id_backup = encrypted_directory_id_backup::<T::EntryStorage, _>(this, &token)?;
+    let metadata = this.entry_storage().create_directory(
+        entry_path,
+        token,
+        directory_id_backup,
+        permissions,
+    )?;
     storage_metadata_to_plain(this, metadata)
+}
+
+/// Encrypts a directory identifier as a complete single-block file when required.
+pub(crate) fn encrypted_directory_id_backup<S, T>(
+    translator: &T,
+    token: &[u8],
+) -> std::io::Result<Option<Vec<u8>>>
+where
+    S: EntryStorage,
+    T: EncryptionTranslator + ?Sized,
+{
+    if !S::REQUIRES_DIRECTORY_ID_BACKUP {
+        return Ok(None);
+    }
+
+    let mut contents = if T::EMPTY_FILE_HAS_HEADER || !token.is_empty() {
+        translator.generate_cipher_header().or_invalid()?
+    } else {
+        Vec::new()
+    };
+    if !token.is_empty() {
+        let block = translator
+            .plain_block_to_cipher(&contents, 0, token)
+            .or_invalid()?;
+        contents.extend(block);
+    }
+    Ok(Some(contents))
+}
+
+/// Selects and validates the token used to materialize a new root directory.
+pub(crate) fn select_root_directory_token<L: DirectoryLayout + ?Sized>(
+    directory_layout: &L,
+) -> std::io::Result<Vec<u8>> {
+    let token = match directory_layout.root_directory_token() {
+        RootDirectoryToken::Persisted => directory_layout.generate_directory_token(),
+        RootDirectoryToken::Implicit(token) => token,
+    };
+    directory_layout
+        .validate_directory_token(&token, true)
+        .or_invalid()?;
+    Ok(token)
 }
 
 pub(super) fn default_remove<T: EncryptionLayout + ?Sized>(

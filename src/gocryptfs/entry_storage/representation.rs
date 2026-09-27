@@ -27,7 +27,7 @@ pub(super) fn is_long_name_content(name: &str) -> bool {
     name.starts_with(GOCRYPTFS_LONGNAME_PREFIX) && !name.ends_with(GOCRYPTFS_LONGNAME_SUFFIX)
 }
 
-impl<F> GoCryptFsEntryStorage<F> {
+impl<F, L: DirectoryLayout> GoCryptFsEntryStorage<F, L> {
     /// Hashes an opaque encoded name using the configured GoCryptFS alphabet.
     pub(super) fn hash_long_name(&self, name: &str) -> String {
         let digest = Sha256::digest(name.as_bytes());

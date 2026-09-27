@@ -78,7 +78,7 @@ pub trait DirectoryContentLayout: Send + Sync {
 
 /// Defines how directory tokens, roots, and detached contents are represented.
 pub trait DirectoryLayout: DirectoryContentLayout {
-    /// Generates a token for a newly-created non-root directory.
+    /// Generates a token when a new directory requires a persisted identifier.
     fn generate_directory_token(&self) -> Vec<u8>;
 
     /// Validates a directory token before it is consumed or persisted.
@@ -145,8 +145,12 @@ pub(crate) fn default_remove_cached_plain_path<T: PathCacheAccess>(
 pub trait PathLayout {
     /// Storage implementing the physical entry representation.
     type EntryStorage: EntryStorage;
+    /// Directory policy used by this composed layout.
+    type DirectoryLayout: DirectoryLayout;
     /// Returns the representation-aware entry storage.
     fn entry_storage(&self) -> &Self::EntryStorage;
+    /// Returns the directory policy used by this composed layout.
+    fn directory_layout(&self) -> &Self::DirectoryLayout;
     /// Converts a plain path to its cipher text equivalent.
     fn plain_path_to_cipher(&self, plain_path: &VirtualPath) -> Result<VirtualPathBuf>;
 
@@ -158,9 +162,14 @@ pub trait PathLayout {
 pub trait AsyncPathLayout: Send + Sync + 'static {
     /// Storage implementing the physical entry representation.
     type EntryStorage: AsyncEntryStorage;
+    /// Directory policy used by this composed layout.
+    type DirectoryLayout: DirectoryLayout;
 
     /// Returns the representation-aware asynchronous entry storage.
     fn entry_storage(&self) -> &Self::EntryStorage;
+
+    /// Returns the directory policy used by this composed layout.
+    fn directory_layout(&self) -> &Self::DirectoryLayout;
 
     /// Converts a plain path to its cipher text equivalent asynchronously.
     fn plain_path_to_cipher(
@@ -270,7 +279,7 @@ pub trait EncryptionLayout: PathLayout + EncryptionTranslator {
         plain_path: &VirtualPath,
         permissions: Option<Permissions>,
     ) -> std::io::Result<Metadata> {
-        default_mkdir(self, plain_path, permissions)
+        default_mkdir(self, self.directory_layout(), plain_path, permissions)
     }
     fn remove(&self, plain_path: &VirtualPath) -> std::io::Result<()> {
         default_remove(self, plain_path)

@@ -5,7 +5,7 @@ use super::{
 use crate::core::{
     Backend, ConfigFileSystem, EncryptionTranslator, EntryStorage, EntryStorageBackend, MasterKey,
     NativeFileSystem, Result, StorageConfigFileSystem, Utf8Path, VirtualPath, VirtualPathBuf,
-    XattrLayout,
+    XattrLayout, encrypted_directory_id_backup, select_root_directory_token,
 };
 use aes_gcm::{
     Aes256Gcm,
@@ -23,6 +23,11 @@ use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use sha2::{Sha256, Sha384, Sha512};
 use std::sync::Arc;
+
+/// Backend marker used while encrypting root metadata during initialization.
+struct InitializationBackend;
+
+impl Backend for InitializationBackend {}
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 type HmacSha256 = Hmac<Sha256>;
@@ -423,8 +428,18 @@ impl CryptoMator<CryptomatorBackend> {
         let config_fs = StorageConfigFileSystem::new(&storage_fs);
         let (config, master_keys) = CryptoMatorConfig::try_new(password)?;
         let directory_layout = Arc::new(CryptomatorDirectoryLayout::new(master_keys.siv_key()));
-        Self::write_config_and_initialize_root(&config_fs, &config, master_keys, || {
-            CryptomatorEntryStorage::initialize_root_storage(&storage_fs, directory_layout.as_ref())
+        Self::write_config_and_initialize_root(&config_fs, &config, master_keys, |translator| {
+            let token = select_root_directory_token(directory_layout.as_ref())?;
+            let directory_id_backup = encrypted_directory_id_backup::<
+                CryptomatorEntryStorage<NativeFileSystem, CryptomatorDirectoryLayout>,
+                _,
+            >(translator, &token)?;
+            CryptomatorEntryStorage::initialize_root_storage(
+                &storage_fs,
+                directory_layout.as_ref(),
+                token,
+                directory_id_backup,
+            )
         })
     }
 
@@ -435,30 +450,38 @@ impl CryptoMator<CryptomatorBackend> {
         let (keys, vault) = unlock_vault(&config_fs, password)?;
         let siv_key = keys.siv_key();
         let directory_layout = Arc::new(CryptomatorDirectoryLayout::new(siv_key));
-        let backend = EntryStorageBackend::new(CryptomatorEntryStorage::with_options(
-            storage_fs,
+        let backend = EntryStorageBackend::new(
+            CryptomatorEntryStorage::with_options(
+                storage_fs,
+                directory_layout.clone(),
+                CryptomatorEntryStorageOptions {
+                    shortening_threshold: vault.shortening_threshold,
+                },
+            ),
             directory_layout,
-            CryptomatorEntryStorageOptions {
-                shortening_threshold: vault.shortening_threshold,
-            },
-        ));
+        );
         Ok(Self { backend, siv_key })
     }
 }
 
-impl<S> CryptoMator<EntryStorageBackend<S>>
+impl<S, L> CryptoMator<EntryStorageBackend<S, L>>
 where
     S: EntryStorage,
+    L: crate::core::DirectoryLayout,
 {
     /// Initializes the Cryptomator crypto configuration over an entry representation.
     pub fn init_with_backend<C: ConfigFileSystem + ?Sized>(
-        backend: &EntryStorageBackend<S>,
+        backend: &EntryStorageBackend<S, L>,
         config_fs: &C,
         password: &str,
     ) -> Result<CryptomatorMasterKeys> {
         let (config, master_keys) = CryptoMatorConfig::try_new(password)?;
-        Self::write_config_and_initialize_root(config_fs, &config, master_keys, || {
-            backend.entry_storage().initialize_root_directory()
+        Self::write_config_and_initialize_root(config_fs, &config, master_keys, |translator| {
+            let token = select_root_directory_token(backend.directory_layout())?;
+            let directory_id_backup = encrypted_directory_id_backup::<S, _>(translator, &token)?;
+            backend
+                .entry_storage()
+                .initialize_root_directory(token, directory_id_backup)
         })
     }
 
@@ -471,7 +494,9 @@ where
     ) -> Result<CryptomatorMasterKeys>
     where
         C: ConfigFileSystem + ?Sized,
-        InitializeRoot: FnOnce() -> std::io::Result<crate::core::StorageDirectory>,
+        InitializeRoot: FnOnce(
+            &CryptoMator<InitializationBackend>,
+        ) -> std::io::Result<crate::core::StorageDirectory>,
     {
         let root_path = VirtualPath::root();
         if !config_fs.is_empty()? {
@@ -481,6 +506,11 @@ where
         let rollback = |_: &std::io::Error| {
             let _ = config_fs.remove(MASTERKEY_FILE.into());
             let _ = config_fs.remove(VAULT_FILE.into());
+        };
+
+        let translator = CryptoMator {
+            backend: InitializationBackend,
+            siv_key: master_keys.siv_key(),
         };
 
         let json_config = serde_json::to_vec_pretty(&config)?;
@@ -493,14 +523,14 @@ where
             .put_new(VAULT_FILE.into(), vault.as_bytes())
             .inspect_err(rollback)?;
 
-        initialize_root().inspect_err(rollback)?;
+        initialize_root(&translator).inspect_err(rollback)?;
 
         Ok(master_keys)
     }
 
     /// Opens a Cryptomator crypto configuration over an entry representation.
     pub fn try_new_with_backend<C: ConfigFileSystem + ?Sized>(
-        backend: EntryStorageBackend<S>,
+        backend: EntryStorageBackend<S, L>,
         config_fs: &C,
         password: &str,
     ) -> Result<Self> {

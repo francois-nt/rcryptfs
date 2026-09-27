@@ -228,6 +228,9 @@ pub(crate) use forward_storage_fs_operations;
 /// Entry-operation paths have an already-resolved physical parent and an
 /// encoded logical final component. Paths returned by this trait are physical.
 pub trait EntryStorage: Send + Sync + 'static {
+    /// Whether this representation persists an encrypted directory identifier backup.
+    const REQUIRES_DIRECTORY_ID_BACKUP: bool;
+
     /// Handle returned when opening a represented regular file.
     type OpenHandle: FileHandle;
 
@@ -235,9 +238,6 @@ pub trait EntryStorage: Send + Sync + 'static {
     type DirEntries<'a>: Iterator<Item = std::io::Result<StorageDirEntry>> + 'a
     where
         Self: 'a;
-
-    /// Generates the opaque token for a new represented directory.
-    fn generate_directory_token(&self) -> Vec<u8>;
 
     /// Opens a represented regular file using opaque physical options.
     fn open_file_with(
@@ -258,8 +258,12 @@ pub trait EntryStorage: Send + Sync + 'static {
     /// Resolves a stored directory to its complete physical description.
     fn resolve_directory(&self, entry_path: &VirtualPath) -> std::io::Result<StorageDirectory>;
 
-    /// Initializes the physical representation of the logical root directory.
-    fn initialize_root_directory(&self) -> std::io::Result<StorageDirectory>;
+    /// Initializes the logical root with its token and optional encrypted identifier backup.
+    fn initialize_root_directory(
+        &self,
+        token: Vec<u8>,
+        directory_id_backup: Option<Vec<u8>>,
+    ) -> std::io::Result<StorageDirectory>;
 
     /// Materializes a regular file with opaque initial contents.
     fn create_file(
@@ -269,11 +273,12 @@ pub trait EntryStorage: Send + Sync + 'static {
         permissions: Option<Permissions>,
     ) -> std::io::Result<Metadata>;
 
-    /// Materializes a logical directory according to the storage representation.
+    /// Materializes a directory with its token and optional encrypted identifier backup.
     fn create_directory(
         &self,
         entry_path: VirtualPathBuf,
         token: Vec<u8>,
+        directory_id_backup: Option<Vec<u8>>,
         permissions: Option<Permissions>,
     ) -> std::io::Result<Metadata>;
 
@@ -329,11 +334,11 @@ pub trait EntryStorage: Send + Sync + 'static {
 /// [EntryStorage], while allowing every storage access to complete
 /// asynchronously.
 pub trait AsyncEntryStorage: Send + Sync + 'static {
+    /// Whether this representation persists an encrypted directory identifier backup.
+    const REQUIRES_DIRECTORY_ID_BACKUP: bool;
+
     /// Handle returned when opening a represented regular file.
     type OpenHandle: AsyncFileHandle;
-
-    /// Generates the opaque token for a new represented directory.
-    fn generate_directory_token(&self) -> Vec<u8>;
 
     /// Opens a represented regular file using opaque physical options.
     fn open_file_with(
@@ -360,9 +365,11 @@ pub trait AsyncEntryStorage: Send + Sync + 'static {
         entry_path: &VirtualPath,
     ) -> impl Future<Output = std::io::Result<StorageDirectory>> + Send;
 
-    /// Initializes the physical representation of the logical root directory.
+    /// Initializes the logical root with its token and optional encrypted identifier backup.
     fn initialize_root_directory(
         &self,
+        token: Vec<u8>,
+        directory_id_backup: Option<Vec<u8>>,
     ) -> impl Future<Output = std::io::Result<StorageDirectory>> + Send;
 
     /// Materializes a regular file with opaque initial contents.
@@ -373,11 +380,12 @@ pub trait AsyncEntryStorage: Send + Sync + 'static {
         permissions: Option<Permissions>,
     ) -> impl Future<Output = std::io::Result<Metadata>> + Send;
 
-    /// Materializes a logical directory according to the storage representation.
+    /// Materializes a directory with its token and optional encrypted identifier backup.
     fn create_directory(
         &self,
         entry_path: VirtualPathBuf,
         token: Vec<u8>,
+        directory_id_backup: Option<Vec<u8>>,
         permissions: Option<Permissions>,
     ) -> impl Future<Output = std::io::Result<Metadata>> + Send;
 

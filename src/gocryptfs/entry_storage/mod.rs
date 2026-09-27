@@ -39,31 +39,19 @@ impl Default for GoCryptFsEntryStorageOptions {
     }
 }
 /// GoCryptFS entry representation used by GoCryptFS-compatible layouts.
-pub struct GoCryptFsEntryStorage<F> {
+pub struct GoCryptFsEntryStorage<F, L: DirectoryLayout> {
     storage_fs: F,
     options: GoCryptFsEntryStorageOptions,
-    directory_layout: Arc<dyn DirectoryLayout>,
+    directory_layout: Arc<L>,
 }
 
-impl<F> GoCryptFsEntryStorage<F> {
+impl<F> GoCryptFsEntryStorage<F, GoCryptFsDirectoryLayout> {
     /// Creates a GoCryptFS representation over a raw storage filesystem.
     pub fn new(storage_fs: F) -> Self {
         Self {
             storage_fs,
             options: GoCryptFsEntryStorageOptions::default(),
             directory_layout: Arc::new(GoCryptFsDirectoryLayout),
-        }
-    }
-
-    /// Creates a GoCryptFS representation with an explicit directory policy.
-    pub fn with_directory_layout(
-        storage_fs: F,
-        directory_layout: Arc<dyn DirectoryLayout>,
-    ) -> Self {
-        Self {
-            storage_fs,
-            options: GoCryptFsEntryStorageOptions::default(),
-            directory_layout,
         }
     }
 
@@ -78,12 +66,23 @@ impl<F> GoCryptFsEntryStorage<F> {
             Arc::new(GoCryptFsDirectoryLayout),
         )
     }
+}
+
+impl<F, L: DirectoryLayout> GoCryptFsEntryStorage<F, L> {
+    /// Creates a GoCryptFS representation with an explicit directory policy.
+    pub fn with_directory_layout(storage_fs: F, directory_layout: Arc<L>) -> Self {
+        Self {
+            storage_fs,
+            options: GoCryptFsEntryStorageOptions::default(),
+            directory_layout,
+        }
+    }
 
     /// Creates a GoCryptFS representation with explicit name and directory policies.
     pub fn with_options_and_directory_layout(
         storage_fs: F,
         options: GoCryptFsEntryStorageOptions,
-        directory_layout: Arc<dyn DirectoryLayout>,
+        directory_layout: Arc<L>,
     ) -> std::io::Result<Self> {
         if options.long_name_max < GOCRYPTFS_MIN_LONG_NAME_MAX {
             return Err(std::io::Error::new(

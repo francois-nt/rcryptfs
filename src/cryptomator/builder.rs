@@ -1,7 +1,8 @@
 use super::CryptoMator;
 use crate::core::{
-    BackendProvider, CleartextFileSystem, ConfigFileSystem, EntryStorage, EntryStorageBackend,
-    FileBufferingPolicy, FileSystem, MasterKey, NativeFileSystem, Result, StorageConfigFileSystem,
+    BackendProvider, CleartextFileSystem, ConfigFileSystem, DirectoryLayout, EntryStorage,
+    EntryStorageBackend, FileBufferingPolicy, FileSystem, MasterKey, NativeFileSystem, Result,
+    StorageConfigFileSystem,
 };
 use crate::{Utf8Path, register_provider};
 
@@ -19,17 +20,18 @@ impl CryptoMatorBuilder {
     }
 
     /// Builds a Cryptomator crypto layer over an arbitrary entry representation.
-    pub fn try_build_with_backend<S, C>(
-        backend: EntryStorageBackend<S>,
+    pub fn try_build_with_backend<S, L, C>(
+        backend: EntryStorageBackend<S, L>,
         config_fs: &C,
         password: &str,
         cache_policy: Box<dyn FileBufferingPolicy>,
     ) -> Result<Box<dyn FileSystem>>
     where
         S: EntryStorage,
+        L: DirectoryLayout + 'static,
         C: ConfigFileSystem + ?Sized,
     {
-        let cryptfs: CleartextFileSystem<CryptoMator<EntryStorageBackend<S>>> = (
+        let cryptfs: CleartextFileSystem<CryptoMator<EntryStorageBackend<S, L>>> = (
             CryptoMator::try_new_with_backend(backend, config_fs, password)?,
             cache_policy,
         )
@@ -38,13 +40,14 @@ impl CryptoMatorBuilder {
     }
 
     /// Initializes a Cryptomator crypto configuration over an entry representation.
-    pub fn init_with_backend<S, C>(
-        backend: &EntryStorageBackend<S>,
+    pub fn init_with_backend<S, L, C>(
+        backend: &EntryStorageBackend<S, L>,
         config_fs: &C,
         password: &str,
     ) -> Result<Box<dyn MasterKey>>
     where
         S: EntryStorage,
+        L: DirectoryLayout,
         C: ConfigFileSystem + ?Sized,
     {
         CryptoMator::init_with_backend(backend, config_fs, password)

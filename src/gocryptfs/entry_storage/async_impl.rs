@@ -1,30 +1,34 @@
 use super::representation::*;
 use super::*;
 
-impl<F: AsyncStorageFileSystem> GoCryptFsEntryStorage<F> {
+impl<F: AsyncStorageFileSystem, L: DirectoryLayout> GoCryptFsEntryStorage<F, L> {
     /// Initializes the represented root while the raw filesystem is still borrowed.
     pub(super) async fn initialize_root_storage_async(
         storage_fs: &F,
-        directory_layout: &dyn DirectoryLayout,
+        directory_layout: &L,
+        token: Vec<u8>,
+        _directory_id_backup: Option<Vec<u8>>,
     ) -> std::io::Result<StorageDirectory> {
-        let token = match directory_layout.root_directory_token() {
-            RootDirectoryToken::Persisted => {
-                let token = directory_layout.generate_directory_token();
-                directory_layout
-                    .validate_directory_token(&token, true)
-                    .or_invalid()?;
-                storage_fs
-                    .put_new(&VirtualPath::root().join(GOCRYPTFS_DIRIV), &token)
-                    .await?;
-                token
-            }
-            RootDirectoryToken::Implicit(token) => {
-                directory_layout
-                    .validate_directory_token(&token, true)
-                    .or_invalid()?;
-                token
+        let persist_token = match directory_layout.root_directory_token() {
+            RootDirectoryToken::Persisted => true,
+            RootDirectoryToken::Implicit(expected) => {
+                if token != expected {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "root directory token does not match the implicit token",
+                    ));
+                }
+                false
             }
         };
+        directory_layout
+            .validate_directory_token(&token, true)
+            .or_invalid()?;
+        if persist_token {
+            storage_fs
+                .put_new(&VirtualPath::root().join(GOCRYPTFS_DIRIV), &token)
+                .await?;
+        }
         Ok(StorageDirectory {
             entry_path: VirtualPathBuf::default(),
             contents_path: VirtualPathBuf::default(),
@@ -138,12 +142,12 @@ impl<F: AsyncStorageFileSystem> GoCryptFsEntryStorage<F> {
     }
 }
 
-impl<F: AsyncStorageFileSystem> AsyncEntryStorage for GoCryptFsEntryStorage<F> {
-    type OpenHandle = F::OpenHandle;
+impl<F: AsyncStorageFileSystem, L: DirectoryLayout + 'static> AsyncEntryStorage
+    for GoCryptFsEntryStorage<F, L>
+{
+    const REQUIRES_DIRECTORY_ID_BACKUP: bool = false;
 
-    fn generate_directory_token(&self) -> Vec<u8> {
-        self.directory_layout.generate_directory_token()
-    }
+    type OpenHandle = F::OpenHandle;
 
     async fn open_file_with(
         &self,
@@ -190,8 +194,18 @@ impl<F: AsyncStorageFileSystem> AsyncEntryStorage for GoCryptFsEntryStorage<F> {
         Ok(directory)
     }
 
-    async fn initialize_root_directory(&self) -> std::io::Result<StorageDirectory> {
-        Self::initialize_root_storage_async(&self.storage_fs, self.directory_layout.as_ref()).await
+    async fn initialize_root_directory(
+        &self,
+        token: Vec<u8>,
+        directory_id_backup: Option<Vec<u8>>,
+    ) -> std::io::Result<StorageDirectory> {
+        Self::initialize_root_storage_async(
+            &self.storage_fs,
+            self.directory_layout.as_ref(),
+            token,
+            directory_id_backup,
+        )
+        .await
     }
 
     async fn create_file(
@@ -247,6 +261,7 @@ impl<F: AsyncStorageFileSystem> AsyncEntryStorage for GoCryptFsEntryStorage<F> {
         &self,
         entry_path: VirtualPathBuf,
         token: Vec<u8>,
+        _directory_id_backup: Option<Vec<u8>>,
         permissions: Option<Permissions>,
     ) -> std::io::Result<Metadata> {
         let directory_layout = self.directory_layout.as_ref();

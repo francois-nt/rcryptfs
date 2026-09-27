@@ -1,7 +1,7 @@
 use super::{GoCryptFs, GoCryptFsBackend, GoCryptFsEntryStorage, layout::GoCryptFsDirectoryLayout};
 use crate::core::{
     Backend, ConfigFileSystem, EntryStorage, EntryStorageBackend, NativeFileSystem, Result,
-    StorageConfigFileSystem,
+    StorageConfigFileSystem, encrypted_directory_id_backup, select_root_directory_token,
 };
 use crate::{Utf8Path, VirtualPath};
 use aes::{Aes256, cipher::generic_array::GenericArray};
@@ -15,6 +15,12 @@ use hkdf::Hkdf;
 use scrypt::{Params as ScryptParams, scrypt};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::sync::Arc;
+
+/// Backend marker used while encrypting root metadata during initialization.
+struct InitializationBackend;
+
+impl Backend for InitializationBackend {}
 
 /// Derives encryption keys from master key and feature flags.
 fn derive_keys<T: Backend>(
@@ -253,8 +259,19 @@ impl GoCryptFs<GoCryptFsBackend> {
     pub fn init_with_default_params(root_path: &Utf8Path, password: &str) -> Result<Vec<u8>> {
         let storage_fs = NativeFileSystem::new(root_path.to_owned());
         let config_fs = StorageConfigFileSystem::new(&storage_fs);
-        Self::write_config_and_initialize_root(&config_fs, password, || {
-            GoCryptFsEntryStorage::initialize_root_storage(&storage_fs, &GoCryptFsDirectoryLayout)
+        let directory_layout = Arc::new(GoCryptFsDirectoryLayout);
+        Self::write_config_and_initialize_root(&config_fs, password, |translator| {
+            let token = select_root_directory_token(directory_layout.as_ref())?;
+            let directory_id_backup = encrypted_directory_id_backup::<
+                GoCryptFsEntryStorage<NativeFileSystem, GoCryptFsDirectoryLayout>,
+                _,
+            >(translator, &token)?;
+            GoCryptFsEntryStorage::initialize_root_storage(
+                &storage_fs,
+                directory_layout.as_ref(),
+                token,
+                directory_id_backup,
+            )
         })
     }
     /// Creates a new GoCryptFs instance from a local cipher root path and password.
@@ -264,7 +281,11 @@ impl GoCryptFs<GoCryptFsBackend> {
             StorageConfigFileSystem::new(&storage_fs).read_all("gocryptfs.conf".into())?;
         let config: GoCryptfsConfig = serde_json::from_slice(&config_data)?;
         let master_key = get_master_key(password, &config)?;
-        let backend = EntryStorageBackend::new(GoCryptFsEntryStorage::new(storage_fs));
+        let directory_layout = Arc::new(GoCryptFsDirectoryLayout);
+        let backend = EntryStorageBackend::new(
+            GoCryptFsEntryStorage::with_directory_layout(storage_fs, directory_layout.clone()),
+            directory_layout,
+        );
         derive_keys(
             backend,
             master_key.as_slice().try_into()?,
@@ -273,18 +294,23 @@ impl GoCryptFs<GoCryptFsBackend> {
     }
 }
 
-impl<S> GoCryptFs<EntryStorageBackend<S>>
+impl<S, L> GoCryptFs<EntryStorageBackend<S, L>>
 where
     S: EntryStorage,
+    L: crate::core::DirectoryLayout,
 {
     /// Initializes the GoCryptFS crypto configuration over an entry representation.
     pub fn init_with_backend<C: ConfigFileSystem + ?Sized>(
-        backend: &EntryStorageBackend<S>,
+        backend: &EntryStorageBackend<S, L>,
         config_fs: &C,
         password: &str,
     ) -> Result<Vec<u8>> {
-        Self::write_config_and_initialize_root(config_fs, password, || {
-            backend.entry_storage().initialize_root_directory()
+        Self::write_config_and_initialize_root(config_fs, password, |translator| {
+            let token = select_root_directory_token(backend.directory_layout())?;
+            let directory_id_backup = encrypted_directory_id_backup::<S, _>(translator, &token)?;
+            backend
+                .entry_storage()
+                .initialize_root_directory(token, directory_id_backup)
         })
     }
 
@@ -296,7 +322,9 @@ where
     ) -> Result<Vec<u8>>
     where
         C: ConfigFileSystem + ?Sized,
-        InitializeRoot: FnOnce() -> std::io::Result<crate::core::StorageDirectory>,
+        InitializeRoot: FnOnce(
+            &GoCryptFs<InitializationBackend>,
+        ) -> std::io::Result<crate::core::StorageDirectory>,
     {
         let root_path = VirtualPath::root();
         if !config_fs.is_empty()? {
@@ -307,18 +335,23 @@ where
             let _ = config_fs.remove("gocryptfs.conf".into());
         };
         let (config, master_key) = GoCryptfsConfig::try_new(password)?;
+        let translator = derive_keys(
+            InitializationBackend,
+            master_key.as_slice().try_into()?,
+            &config.feature_flags,
+        )?;
         let json_config = serde_json::to_vec_pretty(&config)?;
         config_fs
             .put_new("gocryptfs.conf".into(), &json_config)
             .inspect_err(rollback)?;
 
-        initialize_root().inspect_err(rollback)?;
+        initialize_root(&translator).inspect_err(rollback)?;
 
         Ok(master_key)
     }
     /// Opens a GoCryptFS crypto configuration over an entry representation.
     pub fn try_new_with_backend<C: ConfigFileSystem + ?Sized>(
-        backend: EntryStorageBackend<S>,
+        backend: EntryStorageBackend<S, L>,
         config_fs: &C,
         password: &str,
     ) -> Result<Self> {

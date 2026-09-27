@@ -40,7 +40,19 @@ fn invalid_representation(message: impl Into<String>) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, message.into())
 }
 
-impl<F> CryptomatorEntryStorage<F> {
+impl<F, L: DirectoryLayout> CryptomatorEntryStorage<F, L> {
+    /// Extracts the encrypted directory identifier required by this representation.
+    pub(super) fn require_directory_id_backup(
+        directory_id_backup: Option<Vec<u8>>,
+    ) -> std::io::Result<Vec<u8>> {
+        directory_id_backup.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Cryptomator directories require an encrypted identifier backup",
+            )
+        })
+    }
+
     /// Maps an opaque encoded final component to its Cryptomator representation.
     pub(super) fn entry_paths(&self, path: &VirtualPath) -> EntryPaths {
         let Some(logical_name) = path.file_name() else {
@@ -78,15 +90,26 @@ impl<F> CryptomatorEntryStorage<F> {
         metadata
     }
 }
-impl<F: StorageFileSystem> CryptomatorEntryStorage<F> {
+impl<F: StorageFileSystem, L: DirectoryLayout> CryptomatorEntryStorage<F, L> {
     /// Initializes the represented root while the raw filesystem is still borrowed.
     pub(in crate::cryptomator) fn initialize_root_storage(
         storage_fs: &F,
-        directory_layout: &dyn DirectoryLayout,
+        directory_layout: &L,
+        token: Vec<u8>,
+        directory_id_backup: Option<Vec<u8>>,
     ) -> std::io::Result<StorageDirectory> {
-        let (token, persist_token) = match directory_layout.root_directory_token() {
-            RootDirectoryToken::Persisted => (directory_layout.generate_directory_token(), true),
-            RootDirectoryToken::Implicit(token) => (token, false),
+        let directory_id_backup = Self::require_directory_id_backup(directory_id_backup)?;
+        let persist_token = match directory_layout.root_directory_token() {
+            RootDirectoryToken::Persisted => true,
+            RootDirectoryToken::Implicit(expected) => {
+                if token != expected {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "root directory token does not match the implicit token",
+                    ));
+                }
+                false
+            }
         };
         directory_layout
             .validate_directory_token(&token, true)
@@ -105,6 +128,16 @@ impl<F: StorageFileSystem> CryptomatorEntryStorage<F> {
             storage_fs.put_new(&token_path, &token)?;
         }
         if let Err(error) = storage_fs.mkdir_all(&contents_path) {
+            if persist_token {
+                let _ = storage_fs.remove(&token_path);
+            }
+            return Err(error);
+        }
+        if let Err(error) = storage_fs.put_new(
+            &contents_path.join(CRYPTOMATOR_DIR_ID_BACKUP_FILE),
+            &directory_id_backup,
+        ) {
+            let _ = storage_fs.remove_dir_all(&contents_path);
             if persist_token {
                 let _ = storage_fs.remove(&token_path);
             }

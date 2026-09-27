@@ -6,7 +6,7 @@ use crate::core::{
 };
 
 /// Canonical GoCryptFS directory policy.
-pub(super) struct GoCryptFsDirectoryLayout;
+pub struct GoCryptFsDirectoryLayout;
 
 impl DirectoryContentLayout for GoCryptFsDirectoryLayout {
     fn detached_directory_contents_path(
@@ -43,14 +43,19 @@ impl DirectoryLayout for GoCryptFsDirectoryLayout {
     }
 }
 
-impl<S> PathLayout for GoCryptFs<EntryStorageBackend<S>>
+impl<S, L> PathLayout for GoCryptFs<EntryStorageBackend<S, L>>
 where
     S: EntryStorage,
+    L: DirectoryLayout,
 {
     type EntryStorage = S;
+    type DirectoryLayout = L;
 
     fn entry_storage(&self) -> &Self::EntryStorage {
         self.backend.entry_storage()
+    }
+    fn directory_layout(&self) -> &Self::DirectoryLayout {
+        self.backend.directory_layout()
     }
     fn remove_cached_plain_path(&self, plain_path: &VirtualPath) {
         default_remove_cached_plain_path(&self.backend, plain_path);
@@ -104,7 +109,10 @@ where
     }
 }
 
-impl<S: EntryStorage> EncryptionLayout for GoCryptFs<EntryStorageBackend<S>> {}
+impl<S: EntryStorage, L: DirectoryLayout> EncryptionLayout
+    for GoCryptFs<EntryStorageBackend<S, L>>
+{
+}
 
 #[cfg(test)]
 mod tests {

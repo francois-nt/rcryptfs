@@ -33,15 +33,15 @@ impl Default for CryptomatorEntryStorageOptions {
 }
 
 /// Cryptomator entry representation used by Cryptomator-compatible layouts.
-pub struct CryptomatorEntryStorage<F> {
+pub struct CryptomatorEntryStorage<F, L: DirectoryLayout> {
     storage_fs: F,
     options: CryptomatorEntryStorageOptions,
-    directory_layout: Arc<dyn DirectoryLayout>,
+    directory_layout: Arc<L>,
 }
 
-impl<F> CryptomatorEntryStorage<F> {
+impl<F, L: DirectoryLayout> CryptomatorEntryStorage<F, L> {
     /// Creates a Cryptomator container representation with its directory policy.
-    pub fn new(storage_fs: F, directory_layout: Arc<dyn DirectoryLayout>) -> Self {
+    pub fn new(storage_fs: F, directory_layout: Arc<L>) -> Self {
         Self::with_options(
             storage_fs,
             directory_layout,
@@ -52,7 +52,7 @@ impl<F> CryptomatorEntryStorage<F> {
     /// Creates a Cryptomator representation with explicit name settings.
     pub fn with_options(
         storage_fs: F,
-        directory_layout: Arc<dyn DirectoryLayout>,
+        directory_layout: Arc<L>,
         options: CryptomatorEntryStorageOptions,
     ) -> Self {
         Self {

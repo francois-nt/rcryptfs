@@ -6,7 +6,7 @@ use crate::core::{
 };
 
 /// Canonical Cryptomator directory policy derived from the SIV key.
-pub(super) struct CryptomatorDirectoryLayout {
+pub struct CryptomatorDirectoryLayout {
     siv_key: [u8; 64],
 }
 
@@ -71,12 +71,13 @@ impl DirectoryLayout for CryptomatorDirectoryLayout {
 }
 
 /// Resolves a plain folder path to its storage directory and dir id.
-fn folder_path_to_cipher_and_dirid<S>(
-    this: &CryptoMator<EntryStorageBackend<S>>,
+fn folder_path_to_cipher_and_dirid<S, L>(
+    this: &CryptoMator<EntryStorageBackend<S, L>>,
     plain_path: &VirtualPath,
 ) -> Result<(VirtualPathBuf, Vec<u8>)>
 where
     S: EntryStorage,
+    L: DirectoryLayout,
 {
     this.backend.with_path_cache(|cache| {
         if let Some((dir_id, cipher_path)) = cache.get(plain_path.as_str()) {
@@ -125,14 +126,19 @@ where
     })
 }
 
-impl<S> PathLayout for CryptoMator<EntryStorageBackend<S>>
+impl<S, L> PathLayout for CryptoMator<EntryStorageBackend<S, L>>
 where
     S: EntryStorage,
+    L: DirectoryLayout,
 {
     type EntryStorage = S;
+    type DirectoryLayout = L;
 
     fn entry_storage(&self) -> &Self::EntryStorage {
         self.backend.entry_storage()
+    }
+    fn directory_layout(&self) -> &Self::DirectoryLayout {
+        self.backend.directory_layout()
     }
     /// Resolves one logical path to its visible storage entry inside the parent storage directory.
     fn plain_path_to_cipher(&self, plain_path: &VirtualPath) -> Result<VirtualPathBuf> {
@@ -152,13 +158,17 @@ where
     }
 }
 
-impl<S: EntryStorage> EncryptionLayout for CryptoMator<EntryStorageBackend<S>> {}
+impl<S: EntryStorage, L: DirectoryLayout> EncryptionLayout
+    for CryptoMator<EntryStorageBackend<S, L>>
+{
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::{
         EncryptionLayout, FileType, NativeFileSystem, PathLayout, StorageFileSystem, Utf8Path,
+        encrypted_directory_id_backup, select_root_directory_token,
     };
     use crate::{CryptomatorBackend, CryptomatorEntryStorage};
     use std::sync::Arc;
@@ -180,6 +190,22 @@ mod tests {
         parent.join(format!("{}.c9r", path.file_name().unwrap()))
     }
 
+    /// Reads a directory identifier backup as an ordinary encrypted file.
+    fn read_directory_id_backup(
+        backend: &CryptoMator<CryptomatorBackend>,
+        directory: &crate::core::StorageDirectory,
+    ) -> Vec<u8> {
+        let ciphertext = raw_storage(backend)
+            .read_all(&directory.contents_path.join("dirid.c9r"))
+            .unwrap();
+        let (header, block) = ciphertext.split_at(CryptoMator::<CryptomatorBackend>::HEADER_LEN);
+        if block.is_empty() {
+            Vec::new()
+        } else {
+            backend.cipher_block_to_plain(header, 0, block).unwrap()
+        }
+    }
+
     /// Creates a deterministic Cryptomator backend with a materialized root storage directory.
     fn test_backend() -> (tempfile::TempDir, CryptoMator<CryptomatorBackend>) {
         let temp_dir = tempdir().unwrap();
@@ -192,14 +218,26 @@ mod tests {
 
         let directory_layout = Arc::new(CryptomatorDirectoryLayout::new(siv_key));
         let backend: CryptoMator<CryptomatorBackend> = CryptoMator {
-            backend: EntryStorageBackend::new(CryptomatorEntryStorage::new(
-                NativeFileSystem::new(root.to_owned()),
-                directory_layout,
-            )),
+            backend: EntryStorageBackend::new(
+                CryptomatorEntryStorage::new(
+                    NativeFileSystem::new(root.to_owned()),
+                    directory_layout.clone(),
+                ),
+                directory_layout.clone(),
+            ),
             siv_key,
         };
 
-        backend.entry_storage().initialize_root_directory().unwrap();
+        let token = select_root_directory_token(directory_layout.as_ref()).unwrap();
+        let directory_id_backup = encrypted_directory_id_backup::<
+            CryptomatorEntryStorage<NativeFileSystem, CryptomatorDirectoryLayout>,
+            _,
+        >(&backend, &token)
+        .unwrap();
+        backend
+            .entry_storage()
+            .initialize_root_directory(token, directory_id_backup)
+            .unwrap();
 
         (temp_dir, backend)
     }
@@ -342,6 +380,10 @@ mod tests {
                 .exists(&directory.contents_path)
                 .unwrap()
         );
+        assert_eq!(
+            read_directory_id_backup(&backend, &directory),
+            directory.token
+        );
         assert!(backend.metadata(p("docs")).unwrap().file_type == FileType::Directory);
     }
 
@@ -393,15 +435,14 @@ mod tests {
     #[test]
     fn list_dir_plain_names_filters_special_entries() {
         let (_temp_dir, backend) = test_backend();
-        let root_storage = backend
+        let root_directory = backend
             .entry_storage()
             .resolve_directory(VirtualPath::root())
-            .unwrap()
-            .contents_path;
-
-        raw_storage(&backend)
-            .put(&root_storage.join("dirid.c9r"), b"internal")
             .unwrap();
+        assert_eq!(
+            read_directory_id_backup(&backend, &root_directory),
+            root_directory.token
+        );
 
         let entries: Vec<_> = Arc::from(backend)
             .list_dir_plain_names(p(""))

@@ -43,14 +43,20 @@ impl DirectoryLayout for FixedDirectoryContentLayout {
 }
 
 /// Creates a native Cryptomator storage rooted in a temporary directory.
-fn cryptomator_storage() -> (tempfile::TempDir, CryptomatorEntryStorage<NativeFileSystem>) {
+fn cryptomator_storage() -> (
+    tempfile::TempDir,
+    CryptomatorEntryStorage<NativeFileSystem, FixedDirectoryContentLayout>,
+) {
     cryptomator_storage_with_threshold(DEFAULT_SHORTENING_THRESHOLD)
 }
 
 /// Creates a native Cryptomator storage with a custom shortening threshold.
 fn cryptomator_storage_with_threshold(
     shortening_threshold: usize,
-) -> (tempfile::TempDir, CryptomatorEntryStorage<NativeFileSystem>) {
+) -> (
+    tempfile::TempDir,
+    CryptomatorEntryStorage<NativeFileSystem, FixedDirectoryContentLayout>,
+) {
     let temp_dir = tempdir().unwrap();
     let root = Utf8Path::from_path(temp_dir.path()).unwrap().to_owned();
     (
@@ -65,6 +71,16 @@ fn cryptomator_storage_with_threshold(
             },
         ),
     )
+}
+
+/// Returns the deterministic child-directory token used by the test layout.
+fn directory_token() -> Vec<u8> {
+    b"12345678-1234-1234-1234-123456789abc".to_vec()
+}
+
+/// Returns opaque encrypted contents for a directory identifier backup.
+fn directory_id_backup() -> Vec<u8> {
+    b"encrypted-directory-id".to_vec()
 }
 
 /// Returns a canonical-looking detached contents path for storage tests.
@@ -88,7 +104,8 @@ fn short_entries_are_classified_from_their_physical_representation() {
     let directory = storage
         .create_directory(
             directory_path.clone(),
-            storage.generate_directory_token(),
+            directory_token(),
+            Some(directory_id_backup()),
             None,
         )
         .unwrap();
@@ -107,6 +124,28 @@ fn short_entries_are_classified_from_their_physical_representation() {
     assert!(entries.iter().any(|entry| {
         entry.file_name == "encoded-link" && entry.metadata.file_type == FileType::SymLink
     }));
+}
+
+#[test]
+fn directory_creation_requires_an_encrypted_identifier_backup() {
+    let (_temp_dir, storage) = cryptomator_storage();
+    let parent_contents = contents_path();
+    storage.storage_fs.mkdir_all(&parent_contents).unwrap();
+    let directory_path = parent_contents.join("encoded-directory");
+
+    let error = storage
+        .create_directory(directory_path.clone(), directory_token(), None, None)
+        .err()
+        .unwrap();
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(
+        !storage
+            .storage_fs
+            .exists(&storage.entry_paths(&directory_path).entry)
+            .unwrap()
+    );
+    assert!(!storage.storage_fs.exists(&child_contents_path()).unwrap());
 }
 
 #[test]
@@ -196,7 +235,8 @@ fn long_directory_and_symlink_use_name_c9s() {
     storage
         .create_directory(
             directory_path.clone(),
-            storage.generate_directory_token(),
+            directory_token(),
+            Some(directory_id_backup()),
             None,
         )
         .unwrap();
@@ -225,16 +265,17 @@ fn directory_removal_removes_the_complete_shortened_representation() {
     storage
         .create_directory(
             logical_path.clone(),
-            storage.generate_directory_token(),
+            directory_token(),
+            Some(directory_id_backup()),
             None,
         )
         .unwrap();
     let directory = storage.resolve_directory(&logical_path).unwrap();
     let token_backup = directory.contents_path.join(CRYPTOMATOR_DIR_ID_BACKUP_FILE);
-    storage
-        .storage_fs
-        .put(&token_backup, &directory.token)
-        .unwrap();
+    assert_eq!(
+        storage.storage_fs.read_all(&token_backup).unwrap(),
+        directory_id_backup()
+    );
 
     storage.remove_directory(&directory).unwrap();
 
@@ -251,7 +292,8 @@ fn directory_removal_preserves_representation_when_contents_are_not_empty() {
     storage
         .create_directory(
             logical_path.clone(),
-            storage.generate_directory_token(),
+            directory_token(),
+            Some(directory_id_backup()),
             None,
         )
         .unwrap();

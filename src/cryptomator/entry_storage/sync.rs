@@ -1,13 +1,13 @@
 use super::*;
 
 /// Lazily maps physical Cryptomator directory entries to represented entries.
-pub struct CryptomatorDirEntries<'a, F: StorageFileSystem> {
-    storage: &'a CryptomatorEntryStorage<F>,
+pub struct CryptomatorDirEntries<'a, F: StorageFileSystem, L: DirectoryLayout> {
+    storage: &'a CryptomatorEntryStorage<F, L>,
     contents_path: VirtualPathBuf,
     entries: F::DirEntries,
 }
 
-impl<F: StorageFileSystem> Iterator for CryptomatorDirEntries<'_, F> {
+impl<F: StorageFileSystem, L: DirectoryLayout> Iterator for CryptomatorDirEntries<'_, F, L> {
     type Item = std::io::Result<StorageDirEntry>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -36,7 +36,7 @@ impl<F: StorageFileSystem> Iterator for CryptomatorDirEntries<'_, F> {
                         Ok(StorageDirEntry {
                             file_name,
                             path,
-                            metadata: CryptomatorEntryStorage::<F>::normalize_metadata(
+                            metadata: CryptomatorEntryStorage::<F, L>::normalize_metadata(
                                 metadata,
                                 &classification,
                             ),
@@ -49,16 +49,16 @@ impl<F: StorageFileSystem> Iterator for CryptomatorDirEntries<'_, F> {
     }
 }
 
-impl<F: StorageFileSystem> EntryStorage for CryptomatorEntryStorage<F> {
+impl<F: StorageFileSystem, L: DirectoryLayout + 'static> EntryStorage
+    for CryptomatorEntryStorage<F, L>
+{
+    const REQUIRES_DIRECTORY_ID_BACKUP: bool = true;
+
     type DirEntries<'a>
-        = CryptomatorDirEntries<'a, F>
+        = CryptomatorDirEntries<'a, F, L>
     where
         Self: 'a;
     type OpenHandle = F::OpenHandle;
-
-    fn generate_directory_token(&self) -> Vec<u8> {
-        self.directory_layout.generate_directory_token()
-    }
 
     forward_storage_fs_operations!(
         F,
@@ -128,8 +128,17 @@ impl<F: StorageFileSystem> EntryStorage for CryptomatorEntryStorage<F> {
         })
     }
 
-    fn initialize_root_directory(&self) -> std::io::Result<StorageDirectory> {
-        Self::initialize_root_storage(&self.storage_fs, self.directory_layout.as_ref())
+    fn initialize_root_directory(
+        &self,
+        token: Vec<u8>,
+        directory_id_backup: Option<Vec<u8>>,
+    ) -> std::io::Result<StorageDirectory> {
+        Self::initialize_root_storage(
+            &self.storage_fs,
+            self.directory_layout.as_ref(),
+            token,
+            directory_id_backup,
+        )
     }
 
     fn create_file(
@@ -162,8 +171,10 @@ impl<F: StorageFileSystem> EntryStorage for CryptomatorEntryStorage<F> {
         &self,
         entry_path: VirtualPathBuf,
         token: Vec<u8>,
+        directory_id_backup: Option<Vec<u8>>,
         permissions: Option<Permissions>,
     ) -> std::io::Result<Metadata> {
+        let directory_id_backup = Self::require_directory_id_backup(directory_id_backup)?;
         let directory_layout = self.directory_layout.as_ref();
         directory_layout
             .validate_directory_token(&token, false)
@@ -193,6 +204,14 @@ impl<F: StorageFileSystem> EntryStorage for CryptomatorEntryStorage<F> {
             return Err(error);
         }
         if let Err(error) = self.storage_fs.mkdir(&contents_path, None) {
+            self.remove_partial_entry(&paths.entry);
+            return Err(error);
+        }
+        if let Err(error) = self.storage_fs.put_new(
+            &contents_path.join(CRYPTOMATOR_DIR_ID_BACKUP_FILE),
+            &directory_id_backup,
+        ) {
+            let _ = self.storage_fs.remove_dir_all(&contents_path);
             self.remove_partial_entry(&paths.entry);
             return Err(error);
         }

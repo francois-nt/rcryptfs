@@ -34,7 +34,10 @@ impl DirectoryLayout for DetachedTestLayout {
 }
 
 /// Creates a native GoCryptFS storage rooted in a temporary directory.
-fn gocryptfs_storage() -> (tempfile::TempDir, GoCryptFsEntryStorage<NativeFileSystem>) {
+fn gocryptfs_storage() -> (
+    tempfile::TempDir,
+    GoCryptFsEntryStorage<NativeFileSystem, DetachedTestLayout>,
+) {
     let temp_dir = tempdir().unwrap();
     let root = Utf8Path::from_path(temp_dir.path()).unwrap().to_owned();
     (
@@ -46,8 +49,16 @@ fn gocryptfs_storage() -> (tempfile::TempDir, GoCryptFsEntryStorage<NativeFileSy
     )
 }
 
+/// Returns the deterministic directory token used by the test layout.
+fn directory_token() -> Vec<u8> {
+    vec![7; 16]
+}
+
 /// Creates a native storage that shortens names longer than 62 bytes.
-fn short_name_storage() -> (tempfile::TempDir, GoCryptFsEntryStorage<NativeFileSystem>) {
+fn short_name_storage() -> (
+    tempfile::TempDir,
+    GoCryptFsEntryStorage<NativeFileSystem, DetachedTestLayout>,
+) {
     let temp_dir = tempdir().unwrap();
     let root = Utf8Path::from_path(temp_dir.path()).unwrap().to_owned();
     let options = GoCryptFsEntryStorageOptions {
@@ -68,12 +79,14 @@ fn short_name_storage() -> (tempfile::TempDir, GoCryptFsEntryStorage<NativeFileS
 #[test]
 fn gocryptfs_storage_materializes_directory_and_native_symlink() {
     let (_temp_dir, storage) = gocryptfs_storage();
-    let root = storage.initialize_root_directory().unwrap();
-    assert_eq!(root.token, vec![7; 16]);
+    let root = storage
+        .initialize_root_directory(directory_token(), None)
+        .unwrap();
+    assert_eq!(root.token, directory_token());
     let entry_path = VirtualPathBuf::from("docs");
-    let token = vec![7; 16];
+    let token = directory_token();
     let metadata = storage
-        .create_directory(entry_path.clone(), token.clone(), None)
+        .create_directory(entry_path.clone(), token.clone(), None, None)
         .unwrap();
     assert!(metadata.file_type == FileType::Directory);
     let directory = storage.resolve_directory(&entry_path).unwrap();
@@ -187,14 +200,16 @@ fn failed_long_file_recreation_preserves_existing_entry() {
 #[test]
 fn long_directory_name_resolves_to_its_content_entry() {
     let (_temp_dir, storage) = short_name_storage();
-    storage.initialize_root_directory().unwrap();
+    storage
+        .initialize_root_directory(directory_token(), None)
+        .unwrap();
     let logical_name = "encoded-directory".repeat(6);
     let logical_path = VirtualPath::new(&logical_name);
     let paths = storage.entry_paths(logical_path);
-    let token = vec![7; 16];
+    let token = directory_token();
 
     storage
-        .create_directory(logical_path.to_owned(), token.clone(), None)
+        .create_directory(logical_path.to_owned(), token.clone(), None, None)
         .unwrap();
     let directory = storage.resolve_directory(logical_path).unwrap();
 
@@ -209,12 +224,14 @@ fn long_directory_name_resolves_to_its_content_entry() {
 #[test]
 fn directory_removal_preserves_long_entry_when_directory_is_not_empty() {
     let (_temp_dir, storage) = short_name_storage();
-    storage.initialize_root_directory().unwrap();
+    storage
+        .initialize_root_directory(directory_token(), None)
+        .unwrap();
     let logical_name = "encoded-directory".repeat(6);
     let logical_path = VirtualPath::new(&logical_name);
     let paths = storage.entry_paths(logical_path);
     storage
-        .create_directory(logical_path.to_owned(), vec![7; 16], None)
+        .create_directory(logical_path.to_owned(), directory_token(), None, None)
         .unwrap();
     let directory = storage.resolve_directory(logical_path).unwrap();
     let marker = paths.content.join(GOCRYPTFS_DIRIV);
