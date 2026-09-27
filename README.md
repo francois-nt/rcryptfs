@@ -69,7 +69,7 @@ gocryptfs or Cryptomator.
 | Area | Current support | Limits |
 | --- | --- | --- |
 | gocryptfs | Initialize, read, and write common repositories, including long-name sidecars | Not every repository option or variant is supported |
-| Cryptomator | Initialize, read, and write the `SIV_GCM` subset of format 8; `.c9r`, shortened `.c9s` entries, and detached content directories | `SIV_CTRMAC` is unsupported; directory ID backups and conflict recovery remain incomplete |
+| Cryptomator | Initialize, read, and write the `SIV_GCM` subset of format 8; `.c9r`, shortened `.c9s` entries, detached content directories, and encrypted directory ID backups | `SIV_CTRMAC` and conflict recovery are unsupported |
 | Cryptomator metadata | Authenticated `vault.cryptomator` loading with `HS256`, `HS384`, and `HS512` signatures; masterkey version MAC validation; explicit cipher selection | Scoped to the implemented format 8 subset |
 | Cryptomator name shortening | Authenticated `shorteningThreshold` applied to the canonical entry representation | Defaults to `220` when the setting is absent |
 | Entry types | Files, directories, and symbolic links in both representations | Broader interoperability still needs testing |
@@ -211,8 +211,8 @@ and a concrete async storage implementation still need to be connected.
 ## Roadmap
 
 - Broader interoperability with gocryptfs and Cryptomator repositories.
-- Cryptomator directory ID backups, conflict handling, and `SIV_CTRMAC` support
-  when that compatibility work is resumed.
+- Cryptomator conflict handling and `SIV_CTRMAC` support when that
+  compatibility work is resumed.
 - Storage implementations beyond the native local filesystem.
 - Native `rcryptfs` repository initialization with encryption modes not tied
   to gocryptfs, and new formats assembled from independent crypto and entry
