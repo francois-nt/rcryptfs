@@ -189,7 +189,7 @@ The core separates encrypted filesystem behavior into replaceable layers:
 | `PathLayout` | Plain-to-cipher path resolution and path caching |
 | `EntryStorage` | Physical representation of files, directories, symlinks, and long names |
 | `DirectoryLayout` | Directory tokens and detached content locations used by an entry representation |
-| `StorageFileSystem` | Raw filesystem I/O without knowledge of encryption or entry formats |
+| `StorageFileSystem` | Raw filesystem I/O and validation of opaque storage-directory identities |
 | `ConfigFileSystem` | Restricted access to repository configuration files |
 | `CleartextFileSystem` | Public filesystem operations and encrypted file-handle construction |
 
@@ -204,9 +204,10 @@ each independent open operation.
 The design aims to keep repository access format-aware but backend-agnostic,
 isolate raw I/O from encryption, and keep the core independent from FUSE or any
 future access layer. Parallel async contracts now cover file handles, raw
-storage, entry representations, and encrypted layouts; GoCryptFS implements the
-async entry-storage layer. The cached backend, cleartext filesystem, session,
-and a concrete async storage implementation still need to be connected.
+storage, entry representations, encrypted layouts, and xattrs. GoCryptFS uses
+the shared path cache in both its sync and async layouts. The cleartext
+filesystem, session, and a concrete async storage implementation still need to
+be connected.
 
 ## Roadmap
 
