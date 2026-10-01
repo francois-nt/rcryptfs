@@ -1,9 +1,9 @@
 use crate::core::{
     AsyncEntryStorage, AsyncStorageFileSystem, DirectoryLayout, EntryStorage, EntryStorageBackend,
     FileOpenOptions, FsDirEntry, Metadata, NativeFileSystem, OrIoError, Permissions,
-    RenameOperation, RootDirectoryToken, StorageDirEntry, StorageDirectory, StorageFileSystem,
-    Utf8Path, Utf8PathBuf, VirtualPath, VirtualPathBuf, forward_storage_fs_operations,
-    temp_file_path,
+    RenameOperation, ResolvedStoragePath, ResolvedStoragePathBuf, RootDirectoryToken,
+    StorageDirEntry, StorageDirectory, StorageDirectoryId, StorageFileSystem, Utf8Path,
+    Utf8PathBuf, VirtualPath, VirtualPathBuf, forward_storage_fs_operations, temp_file_path,
 };
 use base64::{
     Engine,

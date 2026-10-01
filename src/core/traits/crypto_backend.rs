@@ -1,7 +1,13 @@
-use super::super::CipherPathCacheEntry;
+use super::super::PathCache;
 use super::{
-    AsyncEntryStorage, EntryStorage, FsDirEntry, Metadata, Permissions, Result, VirtualPath,
-    VirtualPathBuf,
+    AsyncEntryStorage, EntryStorage, FsDirEntry, Metadata, Permissions, ResolvedStoragePathBuf,
+    Result, VirtualPath, VirtualPathBuf,
+};
+use super::{
+    default_async_create_symlink, default_async_list_dir_plain_names, default_async_metadata,
+    default_async_mkdir, default_async_mknode, default_async_read_symlink, default_async_remove,
+    default_async_remove_dir, default_async_rename, default_async_set_permissions,
+    default_async_set_time,
 };
 use super::{
     default_create_symlink, default_list_dir_plain_names, default_metadata, default_mkdir,
@@ -9,16 +15,14 @@ use super::{
     default_set_permissions, default_set_time,
 };
 use futures_core::Stream;
-use std::{collections::BTreeMap, future::Future, time::SystemTime};
+use std::{future::Future, time::SystemTime};
 /// Marker trait for backend implementations.
 pub trait Backend {}
 
 /// Provides synchronized access to the plain-to-cipher path cache.
 pub trait PathCacheAccess {
-    fn with_path_cache<Res, F: FnOnce(&mut BTreeMap<String, CipherPathCacheEntry>) -> Res>(
-        &self,
-        f: F,
-    ) -> Res;
+    /// Returns the shared plain-to-cipher path cache.
+    fn path_cache(&self) -> &PathCache;
 }
 /// Trait for encryption and decryption operations.
 pub trait EncryptionTranslator {
@@ -97,31 +101,74 @@ pub enum RootDirectoryToken {
     Implicit(Vec<u8>),
 }
 
-/// Trait for extended attribute name and value translation.
-pub trait XattrLayout: EncryptionTranslator {
+/// Returns the platform-specific error used for unsupported extended attributes.
+fn unsupported_xattr<T>() -> std::io::Result<T> {
+    #[cfg(not(unix))]
+    let errno = libc::ENOTSUP;
+    #[cfg(unix)]
+    let errno = libc::ENOSYS;
+    Err(std::io::Error::from_raw_os_error(errno))
+}
+
+/// Provides synchronous extended attribute operations on plain paths.
+pub trait XattrLayout: PathLayout + EncryptionTranslator {
+    /// Returns one decrypted extended attribute value.
     fn get_xattr(&self, _path: &VirtualPath, _name: &str) -> std::io::Result<Vec<u8>> {
-        #[cfg(not(unix))]
-        return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
-        #[cfg(unix)]
-        return Err(std::io::Error::from_raw_os_error(libc::ENOSYS));
+        unsupported_xattr()
     }
+
+    /// Lists decrypted extended attribute names.
     fn list_xattr(&self, _path: &VirtualPath) -> std::io::Result<Vec<String>> {
-        #[cfg(not(unix))]
-        return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
-        #[cfg(unix)]
-        return Err(std::io::Error::from_raw_os_error(libc::ENOSYS));
+        unsupported_xattr()
     }
+
+    /// Removes one extended attribute.
     fn remove_xattr(&self, _path: &VirtualPath, _name: &str) -> std::io::Result<()> {
-        #[cfg(not(unix))]
-        return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
-        #[cfg(unix)]
-        return Err(std::io::Error::from_raw_os_error(libc::ENOSYS));
+        unsupported_xattr()
     }
+
+    /// Encrypts and stores one extended attribute value.
     fn set_xattr(&self, _path: &VirtualPath, _name: &str, _value: &[u8]) -> std::io::Result<()> {
-        #[cfg(not(unix))]
-        return Err(std::io::Error::from_raw_os_error(libc::ENOTSUP));
-        #[cfg(unix)]
-        return Err(std::io::Error::from_raw_os_error(libc::ENOSYS));
+        unsupported_xattr()
+    }
+}
+
+/// Provides asynchronous extended attribute operations on plain paths.
+pub trait AsyncXattrLayout: AsyncPathLayout + EncryptionTranslator {
+    /// Returns one decrypted extended attribute value.
+    fn get_xattr(
+        &self,
+        _path: &VirtualPath,
+        _name: &str,
+    ) -> impl Future<Output = std::io::Result<Vec<u8>>> + Send {
+        std::future::ready(unsupported_xattr())
+    }
+
+    /// Lists decrypted extended attribute names.
+    fn list_xattr(
+        &self,
+        _path: &VirtualPath,
+    ) -> impl Future<Output = std::io::Result<Vec<String>>> + Send {
+        std::future::ready(unsupported_xattr())
+    }
+
+    /// Removes one extended attribute.
+    fn remove_xattr(
+        &self,
+        _path: &VirtualPath,
+        _name: &str,
+    ) -> impl Future<Output = std::io::Result<()>> + Send {
+        std::future::ready(unsupported_xattr())
+    }
+
+    /// Encrypts and stores one extended attribute value.
+    fn set_xattr(
+        &self,
+        _path: &VirtualPath,
+        _name: &str,
+        _value: &[u8],
+    ) -> impl Future<Output = std::io::Result<()>> + Send {
+        std::future::ready(unsupported_xattr())
     }
 }
 
@@ -129,20 +176,11 @@ pub(crate) fn default_remove_cached_plain_path<T: PathCacheAccess>(
     backend: &T,
     plain_path: &VirtualPath,
 ) {
-    backend.with_path_cache(|cache| {
-        cache.remove(plain_path.as_str());
-        // Remove cached descendants in one range operation.
-        let prefix = format!("{plain_path}/");
-        let end = format!("{plain_path}0"); // b'0' == b'/' + 1
-        let mut tail = cache.split_off(&prefix); // >= prefix
-        let mut after = tail.split_off(&end); // >= end, so tail contains [prefix, end[
-
-        cache.append(&mut after); // [prefix, end[ was removed.
-    });
+    backend.path_cache().invalidate(plain_path);
 }
 
 /// Resolves plain paths against an encrypted entry layout.
-pub trait PathLayout {
+pub trait PathLayout: PathCacheAccess {
     /// Storage implementing the physical entry representation.
     type EntryStorage: EntryStorage;
     /// Directory policy used by this composed layout.
@@ -152,14 +190,14 @@ pub trait PathLayout {
     /// Returns the directory policy used by this composed layout.
     fn directory_layout(&self) -> &Self::DirectoryLayout;
     /// Converts a plain path to its cipher text equivalent.
-    fn plain_path_to_cipher(&self, plain_path: &VirtualPath) -> Result<VirtualPathBuf>;
+    fn plain_path_to_cipher(&self, plain_path: &VirtualPath) -> Result<ResolvedStoragePathBuf>;
 
     /// Invalidates one cached plain path and its cached descendants.
     fn remove_cached_plain_path(&self, plain_path: &VirtualPath);
 }
 
 /// Resolves plain paths against an asynchronous encrypted entry layout.
-pub trait AsyncPathLayout: Send + Sync + 'static {
+pub trait AsyncPathLayout: PathCacheAccess + Send + Sync + 'static {
     /// Storage implementing the physical entry representation.
     type EntryStorage: AsyncEntryStorage;
     /// Directory policy used by this composed layout.
@@ -175,7 +213,7 @@ pub trait AsyncPathLayout: Send + Sync + 'static {
     fn plain_path_to_cipher(
         &self,
         plain_path: &VirtualPath,
-    ) -> impl Future<Output = Result<VirtualPathBuf>> + Send;
+    ) -> impl Future<Output = Result<ResolvedStoragePathBuf>> + Send;
 
     /// Invalidates one cached plain path and its cached descendants.
     fn remove_cached_plain_path(&self, plain_path: &VirtualPath);
@@ -187,63 +225,83 @@ pub trait AsyncEncryptionLayout: AsyncPathLayout + EncryptionTranslator {
     fn list_dir_plain_names(
         &self,
         plain_path: &VirtualPath,
-    ) -> impl Stream<Item = std::io::Result<Vec<(FsDirEntry, VirtualPathBuf)>>> + Send;
+    ) -> impl Stream<Item = std::io::Result<Vec<(FsDirEntry, VirtualPathBuf)>>> + Send {
+        default_async_list_dir_plain_names(self, plain_path)
+    }
 
     /// Returns plain metadata for a path.
     fn metadata(
         &self,
         plain_path: &VirtualPath,
-    ) -> impl Future<Output = std::io::Result<Metadata>> + Send;
+    ) -> impl Future<Output = std::io::Result<Metadata>> + Send {
+        default_async_metadata(self, plain_path)
+    }
 
     /// Creates a plain regular file.
     fn mknode(
         &self,
         plain_path: &VirtualPath,
         permissions: Option<Permissions>,
-    ) -> impl Future<Output = std::io::Result<Metadata>> + Send;
+    ) -> impl Future<Output = std::io::Result<Metadata>> + Send {
+        default_async_mknode(self, plain_path, permissions)
+    }
 
     /// Creates a plain directory.
     fn mkdir(
         &self,
         plain_path: &VirtualPath,
         permissions: Option<Permissions>,
-    ) -> impl Future<Output = std::io::Result<Metadata>> + Send;
+    ) -> impl Future<Output = std::io::Result<Metadata>> + Send {
+        default_async_mkdir(self, plain_path, permissions)
+    }
 
     /// Removes a plain non-directory entry.
-    fn remove(&self, plain_path: &VirtualPath) -> impl Future<Output = std::io::Result<()>> + Send;
+    fn remove(&self, plain_path: &VirtualPath) -> impl Future<Output = std::io::Result<()>> + Send {
+        default_async_remove(self, plain_path)
+    }
 
     /// Removes a plain directory.
     fn remove_dir(
         &self,
         plain_path: &VirtualPath,
-    ) -> impl Future<Output = std::io::Result<()>> + Send;
+    ) -> impl Future<Output = std::io::Result<()>> + Send {
+        default_async_remove_dir(self, plain_path)
+    }
 
     /// Creates a plain symbolic link.
     fn create_symlink(
         &self,
         plain_path: &VirtualPath,
         target: &str,
-    ) -> impl Future<Output = std::io::Result<Metadata>> + Send;
+    ) -> impl Future<Output = std::io::Result<Metadata>> + Send {
+        default_async_create_symlink(self, plain_path, target)
+    }
 
     /// Reads a plain symbolic link target.
     fn read_symlink(
         &self,
         plain_path: &VirtualPath,
-    ) -> impl Future<Output = std::io::Result<String>> + Send;
+    ) -> impl Future<Output = std::io::Result<String>> + Send {
+        default_async_read_symlink(self, plain_path)
+    }
 
     /// Renames a plain entry.
     fn rename(
         &self,
         old_path: &VirtualPath,
         new_path: &VirtualPath,
-    ) -> impl Future<Output = std::io::Result<()>> + Send;
+    ) -> impl Future<Output = std::io::Result<()>> + Send {
+        default_async_rename(self, old_path, new_path)
+    }
 
     /// Updates permissions on a plain entry.
     fn set_permissions(
         &self,
         path: &VirtualPath,
         permissions: Permissions,
-    ) -> impl Future<Output = std::io::Result<Metadata>> + Send;
+    ) -> impl Future<Output = std::io::Result<Metadata>> + Send {
+        default_async_set_permissions(self, path, permissions)
+    }
 
     /// Sets access and modification times on a plain entry.
     fn set_time(
@@ -251,7 +309,9 @@ pub trait AsyncEncryptionLayout: AsyncPathLayout + EncryptionTranslator {
         path: &VirtualPath,
         atime: Option<SystemTime>,
         mtime: Option<SystemTime>,
-    ) -> impl Future<Output = std::io::Result<()>> + Send;
+    ) -> impl Future<Output = std::io::Result<()>> + Send {
+        default_async_set_time(self, path, atime, mtime)
+    }
 }
 
 pub trait EncryptionLayout: PathLayout + EncryptionTranslator {

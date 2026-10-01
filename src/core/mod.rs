@@ -21,5 +21,10 @@ pub use virtual_path::{JoinVirtualPath, VirtualPath, VirtualPathBuf};
 
 /// Returns whether a directory contains no entries.
 pub fn is_native_dir_empty(path: &Utf8Path) -> std::io::Result<bool> {
-    NativeFileSystem::new(path.to_owned()).is_dir_empty(VirtualPath::root())
+    let storage = NativeFileSystem::new(path.to_owned());
+    let root_id = storage.get_root_id()?;
+    storage.is_dir_empty(
+        ResolvedStoragePath::new(VirtualPath::root(), &root_id),
+        &root_id,
+    )
 }

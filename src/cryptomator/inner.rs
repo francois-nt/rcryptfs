@@ -2,10 +2,14 @@ use super::{
     CryptoMator, CryptomatorBackend, CryptomatorEntryStorage, CryptomatorEntryStorageOptions,
     DEFAULT_SHORTENING_THRESHOLD, layout::CryptomatorDirectoryLayout,
 };
-use crate::core::{
-    Backend, ConfigFileSystem, EncryptionTranslator, EntryStorage, EntryStorageBackend, MasterKey,
-    NativeFileSystem, Result, StorageConfigFileSystem, Utf8Path, VirtualPath, VirtualPathBuf,
-    XattrLayout, encrypted_directory_id_backup, select_root_directory_token,
+use crate::{
+    core::{
+        Backend, ConfigFileSystem, EncryptionTranslator, EntryStorage, EntryStorageBackend,
+        MasterKey, NativeFileSystem, PathLayout, Result, StorageConfigFileSystem, Utf8Path,
+        VirtualPath, VirtualPathBuf, XattrLayout, encrypted_directory_id_backup,
+        select_root_directory_token,
+    },
+    cryptomator::DefaultCryptomatorEntryStorage,
 };
 use aes_gcm::{
     Aes256Gcm,
@@ -430,10 +434,11 @@ impl CryptoMator<CryptomatorBackend> {
         let directory_layout = Arc::new(CryptomatorDirectoryLayout::new(master_keys.siv_key()));
         Self::write_config_and_initialize_root(&config_fs, &config, master_keys, |translator| {
             let token = select_root_directory_token(directory_layout.as_ref())?;
-            let directory_id_backup = encrypted_directory_id_backup::<
-                CryptomatorEntryStorage<NativeFileSystem, CryptomatorDirectoryLayout>,
-                _,
-            >(translator, &token)?;
+            let directory_id_backup = encrypted_directory_id_backup(
+                translator,
+                &token,
+                DefaultCryptomatorEntryStorage::REQUIRES_DIRECTORY_ID_BACKUP,
+            )?;
             CryptomatorEntryStorage::initialize_root_storage(
                 &storage_fs,
                 directory_layout.as_ref(),
@@ -478,7 +483,8 @@ where
         let (config, master_keys) = CryptoMatorConfig::try_new(password)?;
         Self::write_config_and_initialize_root(config_fs, &config, master_keys, |translator| {
             let token = select_root_directory_token(backend.directory_layout())?;
-            let directory_id_backup = encrypted_directory_id_backup::<S, _>(translator, &token)?;
+            let directory_id_backup =
+                encrypted_directory_id_backup(translator, &token, S::REQUIRES_DIRECTORY_ID_BACKUP)?;
             backend
                 .entry_storage()
                 .initialize_root_directory(token, directory_id_backup)
@@ -608,11 +614,12 @@ impl<T: Backend> CryptoMator<T> {
     }
 }
 
-impl<T: Backend> XattrLayout for CryptoMator<T> {}
+impl<T: Backend> XattrLayout for CryptoMator<T> where Self: PathLayout {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::ResolvedStoragePath;
     use crate::core::{PathLayout, StorageFileSystem};
     use tempfile::tempdir;
 
@@ -676,8 +683,13 @@ mod tests {
         let root = Utf8Path::from_path(temp_dir.path()).unwrap();
         let master_keys = CryptoMator::init_with_default_params(root, "password").unwrap();
         let vault = generate_vault_cryptomator(&master_keys, "SIV_GCM", THRESHOLD).unwrap();
-        NativeFileSystem::new(root.to_owned())
-            .put(VirtualPath::new(VAULT_FILE), vault.as_bytes())
+        let storage = NativeFileSystem::new(root.to_owned());
+        let root_id = storage.get_root_id().unwrap();
+        storage
+            .put(
+                ResolvedStoragePath::new(VirtualPath::new(VAULT_FILE), &root_id),
+                vault.as_bytes(),
+            )
             .unwrap();
 
         let cryptfs = CryptoMator::try_new(root, "password").unwrap();

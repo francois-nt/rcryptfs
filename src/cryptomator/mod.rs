@@ -24,3 +24,6 @@ pub type CryptomatorBackend<F = NativeFileSystem> = EntryStorageBackend<
     CryptomatorEntryStorage<F, CryptomatorDirectoryLayout>,
     CryptomatorDirectoryLayout,
 >;
+
+pub type DefaultCryptomatorEntryStorage =
+    CryptomatorEntryStorage<NativeFileSystem, CryptomatorDirectoryLayout>;

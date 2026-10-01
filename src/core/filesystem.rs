@@ -3,7 +3,7 @@ use crate::core::XattrLayout;
 use super::{
     BufferedFile, CryptFsFile, EncryptionLayout, EncryptionTranslator, EntryStorage, FileHandle,
     FileOpenOptions, FileSystem, FsDirEntry, Metadata, OrIoError, Permissions, ReadOnlyFileSystem,
-    VirtualPath,
+    ResolvedStoragePath, VirtualPath,
 };
 
 use std::sync::Arc;
@@ -77,7 +77,7 @@ impl<T> From<(T, Box<dyn FileBufferingPolicy>)> for CleartextFileSystem<T> {
 
 /// Opens an encrypted file and wraps it with the requested cache policy.
 fn try_open_crypt_file<T>(
-    path: &VirtualPath,
+    path: ResolvedStoragePath<'_>,
     backend: Arc<T>,
     mut options: FileOpenOptions,
     cache_policy: &dyn FileBufferingPolicy,
@@ -112,7 +112,7 @@ where
         let mut options = FileOpenOptions::default();
         options.read(true);
         try_open_crypt_file(
-            &cipher_path,
+            cipher_path.as_resolved_path(),
             self.fs.clone(),
             options,
             self.cache_policy.as_ref(),
@@ -154,7 +154,7 @@ where
     ) -> std::io::Result<Box<dyn FileHandle>> {
         let cipher_path = self.fs.plain_path_to_cipher(path).or_invalid()?;
         try_open_crypt_file(
-            &cipher_path,
+            cipher_path.as_resolved_path(),
             self.fs.clone(),
             options,
             self.cache_policy.as_ref(),
@@ -204,7 +204,9 @@ where
     }
     fn chown(&self, path: &VirtualPath, uid: Option<u32>, gid: Option<u32>) -> std::io::Result<()> {
         let cipher_path = self.fs.plain_path_to_cipher(path).or_invalid()?;
-        self.fs.entry_storage().chown(&cipher_path, uid, gid)
+        self.fs
+            .entry_storage()
+            .chown(cipher_path.as_resolved_path(), uid, gid)
     }
     fn create_symlink(&self, path: &VirtualPath, target_path: &str) -> std::io::Result<Metadata> {
         self.fs.create_symlink(path, target_path)

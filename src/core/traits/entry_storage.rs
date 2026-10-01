@@ -1,6 +1,6 @@
 use super::{
-    AsyncFileHandle, FileHandle, FileOpenOptions, Metadata, Permissions, VirtualPath,
-    VirtualPathBuf,
+    AsyncFileHandle, FileHandle, FileOpenOptions, Metadata, Permissions, ResolvedStoragePath,
+    ResolvedStoragePathBuf, StorageDirectoryId, VirtualPathBuf,
 };
 use futures_core::Stream;
 use std::{future::Future, time::SystemTime};
@@ -18,9 +18,11 @@ pub struct StorageDirEntry {
 /// Paths and opaque token required to materialize a logical directory.
 pub struct StorageDirectory {
     /// Physical path of the visible directory entry.
-    pub entry_path: VirtualPathBuf,
+    pub entry_path: ResolvedStoragePathBuf,
     /// Physical path of the directory containing its encoded children.
-    pub contents_path: VirtualPathBuf,
+    pub contents_path: ResolvedStoragePathBuf,
+    /// Identity of the directory containing its encoded children.
+    pub contents_id: StorageDirectoryId,
     /// Opaque directory identifier or initialization vector.
     pub token: Vec<u8>,
 }
@@ -60,8 +62,11 @@ macro_rules! forward_storage_fs_operations {
         let $mapped_path = $path;
     };
     (@bind_path $self:ident, $path:ident => $mapped_path:ident, $map_path:expr) => {
-        let mapped_path_owned = ($map_path)($self, $path);
-        let $mapped_path = mapped_path_owned.as_path();
+        let mapped_path_owned = ($map_path)($self, $path.path());
+        let $mapped_path = $crate::core::ResolvedStoragePath::new(
+            &mapped_path_owned,
+            $path.expected_parent_id(),
+        );
     };
     (@one $storage_fs_ty:ty, $field:ident, open_file_with $(, $map_path:expr)?) => {
         type OpenHandle =
@@ -69,7 +74,7 @@ macro_rules! forward_storage_fs_operations {
 
         fn open_file_with(
             &self,
-            path: &$crate::core::VirtualPath,
+            path: $crate::core::ResolvedStoragePath<'_>,
             options: $crate::core::FileOpenOptions,
         ) -> std::io::Result<Self::OpenHandle> {
             $crate::core::forward_storage_fs_operations!(
@@ -85,8 +90,8 @@ macro_rules! forward_storage_fs_operations {
     (@one $storage_fs_ty:ty, $field:ident, rename $(, $map_path:expr)?) => {
         fn rename(
             &self,
-            old_path: &$crate::core::VirtualPath,
-            new_path: &$crate::core::VirtualPath,
+            old_path: $crate::core::ResolvedStoragePath<'_>,
+            new_path: $crate::core::ResolvedStoragePath<'_>,
         ) -> std::io::Result<()> {
             $crate::core::forward_storage_fs_operations!(
                 @bind_path self, old_path => mapped_old_path $(, $map_path)?
@@ -104,7 +109,7 @@ macro_rules! forward_storage_fs_operations {
     (@one $storage_fs_ty:ty, $field:ident, set_permissions $(, $map_path:expr)?) => {
         fn set_permissions(
             &self,
-            path: &$crate::core::VirtualPath,
+            path: $crate::core::ResolvedStoragePath<'_>,
             permissions: $crate::core::Permissions,
         ) -> std::io::Result<()> {
             $crate::core::forward_storage_fs_operations!(
@@ -121,7 +126,7 @@ macro_rules! forward_storage_fs_operations {
     (@one $storage_fs_ty:ty, $field:ident, set_time $(, $map_path:expr)?) => {
         fn set_time(
             &self,
-            path: &$crate::core::VirtualPath,
+            path: $crate::core::ResolvedStoragePath<'_>,
             atime: Option<std::time::SystemTime>,
             mtime: Option<std::time::SystemTime>,
         ) -> std::io::Result<()> {
@@ -139,7 +144,7 @@ macro_rules! forward_storage_fs_operations {
     (@one $storage_fs_ty:ty, $field:ident, chown $(, $map_path:expr)?) => {
         fn chown(
             &self,
-            path: &$crate::core::VirtualPath,
+            path: $crate::core::ResolvedStoragePath<'_>,
             uid: Option<u32>,
             gid: Option<u32>,
         ) -> std::io::Result<()> {
@@ -157,7 +162,7 @@ macro_rules! forward_storage_fs_operations {
     (@one $storage_fs_ty:ty, $field:ident, get_xattr $(, $map_path:expr)?) => {
         fn get_xattr(
             &self,
-            path: &$crate::core::VirtualPath,
+            path: $crate::core::ResolvedStoragePath<'_>,
             name: &str,
         ) -> std::io::Result<Vec<u8>> {
             $crate::core::forward_storage_fs_operations!(
@@ -173,7 +178,7 @@ macro_rules! forward_storage_fs_operations {
     (@one $storage_fs_ty:ty, $field:ident, list_xattr $(, $map_path:expr)?) => {
         fn list_xattr(
             &self,
-            path: &$crate::core::VirtualPath,
+            path: $crate::core::ResolvedStoragePath<'_>,
         ) -> std::io::Result<Vec<String>> {
             $crate::core::forward_storage_fs_operations!(
                 @bind_path self, path => mapped_path $(, $map_path)?
@@ -187,7 +192,7 @@ macro_rules! forward_storage_fs_operations {
     (@one $storage_fs_ty:ty, $field:ident, remove_xattr $(, $map_path:expr)?) => {
         fn remove_xattr(
             &self,
-            path: &$crate::core::VirtualPath,
+            path: $crate::core::ResolvedStoragePath<'_>,
             name: &str,
         ) -> std::io::Result<()> {
             $crate::core::forward_storage_fs_operations!(
@@ -203,7 +208,7 @@ macro_rules! forward_storage_fs_operations {
     (@one $storage_fs_ty:ty, $field:ident, set_xattr $(, $map_path:expr)?) => {
         fn set_xattr(
             &self,
-            path: &$crate::core::VirtualPath,
+            path: $crate::core::ResolvedStoragePath<'_>,
             name: &str,
             value: &[u8],
         ) -> std::io::Result<()> {
@@ -239,24 +244,31 @@ pub trait EntryStorage: Send + Sync + 'static {
     where
         Self: 'a;
 
+    /// Returns the identity of the physical storage root.
+    fn get_root_id(&self) -> std::io::Result<StorageDirectoryId>;
+
     /// Opens a represented regular file using opaque physical options.
     fn open_file_with(
         &self,
-        path: &VirtualPath,
+        path: ResolvedStoragePath<'_>,
         options: FileOpenOptions,
     ) -> std::io::Result<Self::OpenHandle>;
 
     /// Returns metadata normalized to the represented logical entry.
-    fn metadata(&self, path: &VirtualPath) -> std::io::Result<Metadata>;
+    fn metadata(&self, path: ResolvedStoragePath<'_>) -> std::io::Result<Metadata>;
 
     /// Lists visible encoded entries from a directory contents location.
     fn read_dir<'a>(
         &'a self,
-        contents_path: VirtualPathBuf,
+        contents_path: ResolvedStoragePathBuf,
+        contents_id: StorageDirectoryId,
     ) -> std::io::Result<Self::DirEntries<'a>>;
 
     /// Resolves a stored directory to its complete physical description.
-    fn resolve_directory(&self, entry_path: &VirtualPath) -> std::io::Result<StorageDirectory>;
+    fn resolve_directory(
+        &self,
+        entry_path: ResolvedStoragePath<'_>,
+    ) -> std::io::Result<StorageDirectory>;
 
     /// Initializes the logical root with its token and optional encrypted identifier backup.
     fn initialize_root_directory(
@@ -268,7 +280,7 @@ pub trait EntryStorage: Send + Sync + 'static {
     /// Materializes a regular file with opaque initial contents.
     fn create_file(
         &self,
-        path: &VirtualPath,
+        path: ResolvedStoragePath<'_>,
         initial_contents: &[u8],
         permissions: Option<Permissions>,
     ) -> std::io::Result<Metadata>;
@@ -276,7 +288,7 @@ pub trait EntryStorage: Send + Sync + 'static {
     /// Materializes a directory with its token and optional encrypted identifier backup.
     fn create_directory(
         &self,
-        entry_path: VirtualPathBuf,
+        entry_path: ResolvedStoragePathBuf,
         token: Vec<u8>,
         directory_id_backup: Option<Vec<u8>>,
         permissions: Option<Permissions>,
@@ -286,46 +298,64 @@ pub trait EntryStorage: Send + Sync + 'static {
     fn remove_directory(&self, directory: &StorageDirectory) -> std::io::Result<()>;
 
     /// Removes a represented non-directory entry.
-    fn remove_entry(&self, path: &VirtualPath) -> std::io::Result<()>;
+    fn remove_entry(&self, path: ResolvedStoragePath<'_>) -> std::io::Result<()>;
 
     /// Materializes a logical symlink containing an opaque target payload.
-    fn create_symlink(&self, path: &VirtualPath, target: &[u8]) -> std::io::Result<Metadata>;
+    fn create_symlink(
+        &self,
+        path: ResolvedStoragePath<'_>,
+        target: &[u8],
+    ) -> std::io::Result<Metadata>;
 
     /// Reads the opaque target payload represented by a logical symlink.
-    fn read_symlink(&self, path: &VirtualPath) -> std::io::Result<Vec<u8>>;
+    fn read_symlink(&self, path: ResolvedStoragePath<'_>) -> std::io::Result<Vec<u8>>;
 
     /// Renames one represented entry without interpreting its encoded name.
-    fn rename(&self, old_path: &VirtualPath, new_path: &VirtualPath) -> std::io::Result<()>;
+    fn rename(
+        &self,
+        old_path: ResolvedStoragePath<'_>,
+        new_path: ResolvedStoragePath<'_>,
+    ) -> std::io::Result<()>;
 
     /// Sets permissions and returns normalized metadata for a represented entry.
     fn set_permissions(
         &self,
-        path: &VirtualPath,
+        path: ResolvedStoragePath<'_>,
         permissions: Permissions,
     ) -> std::io::Result<Metadata>;
 
     /// Sets access and modification times on a represented entry.
     fn set_time(
         &self,
-        path: &VirtualPath,
+        path: ResolvedStoragePath<'_>,
         atime: Option<SystemTime>,
         mtime: Option<SystemTime>,
     ) -> std::io::Result<()>;
 
     /// Changes ownership of a represented entry.
-    fn chown(&self, path: &VirtualPath, uid: Option<u32>, gid: Option<u32>) -> std::io::Result<()>;
+    fn chown(
+        &self,
+        path: ResolvedStoragePath<'_>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+    ) -> std::io::Result<()>;
 
     /// Reads one opaque extended-attribute value.
-    fn get_xattr(&self, path: &VirtualPath, name: &str) -> std::io::Result<Vec<u8>>;
+    fn get_xattr(&self, path: ResolvedStoragePath<'_>, name: &str) -> std::io::Result<Vec<u8>>;
 
     /// Lists opaque extended-attribute names.
-    fn list_xattr(&self, path: &VirtualPath) -> std::io::Result<Vec<String>>;
+    fn list_xattr(&self, path: ResolvedStoragePath<'_>) -> std::io::Result<Vec<String>>;
 
     /// Removes one opaque extended attribute.
-    fn remove_xattr(&self, path: &VirtualPath, name: &str) -> std::io::Result<()>;
+    fn remove_xattr(&self, path: ResolvedStoragePath<'_>, name: &str) -> std::io::Result<()>;
 
     /// Stores one opaque extended-attribute value.
-    fn set_xattr(&self, path: &VirtualPath, name: &str, value: &[u8]) -> std::io::Result<()>;
+    fn set_xattr(
+        &self,
+        path: ResolvedStoragePath<'_>,
+        name: &str,
+        value: &[u8],
+    ) -> std::io::Result<()>;
 }
 
 /// Asynchronously maps logical encoded entries to their physical representation.
@@ -340,29 +370,33 @@ pub trait AsyncEntryStorage: Send + Sync + 'static {
     /// Handle returned when opening a represented regular file.
     type OpenHandle: AsyncFileHandle;
 
+    /// Returns the identity of the physical storage root.
+    fn get_root_id(&self) -> impl Future<Output = std::io::Result<StorageDirectoryId>> + Send;
+
     /// Opens a represented regular file using opaque physical options.
     fn open_file_with(
         &self,
-        path: &VirtualPath,
+        path: ResolvedStoragePath<'_>,
         options: FileOpenOptions,
     ) -> impl Future<Output = std::io::Result<Self::OpenHandle>> + Send;
 
     /// Returns metadata normalized to the represented logical entry.
     fn metadata(
         &self,
-        path: &VirtualPath,
+        path: ResolvedStoragePath<'_>,
     ) -> impl Future<Output = std::io::Result<Metadata>> + Send;
 
     /// Lists visible encoded entries from a directory contents location.
     fn read_dir(
         &self,
-        contents_path: VirtualPathBuf,
+        contents_path: ResolvedStoragePathBuf,
+        contents_id: StorageDirectoryId,
     ) -> impl Stream<Item = std::io::Result<Vec<StorageDirEntry>>> + Send;
 
     /// Resolves a stored directory to its complete physical description.
     fn resolve_directory(
         &self,
-        entry_path: &VirtualPath,
+        entry_path: ResolvedStoragePath<'_>,
     ) -> impl Future<Output = std::io::Result<StorageDirectory>> + Send;
 
     /// Initializes the logical root with its token and optional encrypted identifier backup.
@@ -375,7 +409,7 @@ pub trait AsyncEntryStorage: Send + Sync + 'static {
     /// Materializes a regular file with opaque initial contents.
     fn create_file(
         &self,
-        path: &VirtualPath,
+        path: ResolvedStoragePath<'_>,
         initial_contents: &[u8],
         permissions: Option<Permissions>,
     ) -> impl Future<Output = std::io::Result<Metadata>> + Send;
@@ -383,7 +417,7 @@ pub trait AsyncEntryStorage: Send + Sync + 'static {
     /// Materializes a directory with its token and optional encrypted identifier backup.
     fn create_directory(
         &self,
-        entry_path: VirtualPathBuf,
+        entry_path: ResolvedStoragePathBuf,
         token: Vec<u8>,
         directory_id_backup: Option<Vec<u8>>,
         permissions: Option<Permissions>,
@@ -396,39 +430,42 @@ pub trait AsyncEntryStorage: Send + Sync + 'static {
     ) -> impl Future<Output = std::io::Result<()>> + Send;
 
     /// Removes a represented non-directory entry.
-    fn remove_entry(&self, path: &VirtualPath) -> impl Future<Output = std::io::Result<()>> + Send;
+    fn remove_entry(
+        &self,
+        path: ResolvedStoragePath<'_>,
+    ) -> impl Future<Output = std::io::Result<()>> + Send;
 
     /// Materializes a logical symlink containing an opaque target payload.
     fn create_symlink(
         &self,
-        path: &VirtualPath,
+        path: ResolvedStoragePath<'_>,
         target: &[u8],
     ) -> impl Future<Output = std::io::Result<Metadata>> + Send;
 
     /// Reads the opaque target payload represented by a logical symlink.
     fn read_symlink(
         &self,
-        path: &VirtualPath,
+        path: ResolvedStoragePath<'_>,
     ) -> impl Future<Output = std::io::Result<Vec<u8>>> + Send;
 
     /// Renames one represented entry without interpreting its encoded name.
     fn rename(
         &self,
-        old_path: &VirtualPath,
-        new_path: &VirtualPath,
+        old_path: ResolvedStoragePath<'_>,
+        new_path: ResolvedStoragePath<'_>,
     ) -> impl Future<Output = std::io::Result<()>> + Send;
 
     /// Sets permissions on a represented entry.
     fn set_permissions(
         &self,
-        path: &VirtualPath,
+        path: ResolvedStoragePath<'_>,
         permissions: Permissions,
     ) -> impl Future<Output = std::io::Result<Metadata>> + Send;
 
     /// Sets access and modification times on a represented entry.
     fn set_time(
         &self,
-        path: &VirtualPath,
+        path: ResolvedStoragePath<'_>,
         atime: Option<SystemTime>,
         mtime: Option<SystemTime>,
     ) -> impl Future<Output = std::io::Result<()>> + Send;
@@ -436,7 +473,7 @@ pub trait AsyncEntryStorage: Send + Sync + 'static {
     /// Changes ownership of a represented entry.
     fn chown(
         &self,
-        path: &VirtualPath,
+        path: ResolvedStoragePath<'_>,
         uid: Option<u32>,
         gid: Option<u32>,
     ) -> impl Future<Output = std::io::Result<()>> + Send;
@@ -444,27 +481,27 @@ pub trait AsyncEntryStorage: Send + Sync + 'static {
     /// Reads one opaque extended-attribute value.
     fn get_xattr(
         &self,
-        path: &VirtualPath,
+        path: ResolvedStoragePath<'_>,
         name: &str,
     ) -> impl Future<Output = std::io::Result<Vec<u8>>> + Send;
 
     /// Lists opaque extended-attribute names.
     fn list_xattr(
         &self,
-        path: &VirtualPath,
+        path: ResolvedStoragePath<'_>,
     ) -> impl Future<Output = std::io::Result<Vec<String>>> + Send;
 
     /// Removes one opaque extended attribute.
     fn remove_xattr(
         &self,
-        path: &VirtualPath,
+        path: ResolvedStoragePath<'_>,
         name: &str,
     ) -> impl Future<Output = std::io::Result<()>> + Send;
 
     /// Stores one opaque extended-attribute value.
     fn set_xattr(
         &self,
-        path: &VirtualPath,
+        path: ResolvedStoragePath<'_>,
         name: &str,
         value: &[u8],
     ) -> impl Future<Output = std::io::Result<()>> + Send;

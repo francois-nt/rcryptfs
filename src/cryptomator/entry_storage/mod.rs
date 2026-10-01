@@ -1,7 +1,8 @@
 use crate::core::{
     DirectoryLayout, EntryStorage, FileOpenOptions, FileType, Metadata, OrIoError, Permissions,
-    RenameOperation, RootDirectoryToken, StorageDirEntry, StorageDirectory, StorageFileSystem,
-    VirtualPath, VirtualPathBuf, forward_storage_fs_operations, temp_file_path,
+    RenameOperation, ResolvedStoragePath, ResolvedStoragePathBuf, RootDirectoryToken,
+    StorageDirEntry, StorageDirectory, StorageDirectoryId, StorageFileSystem, VirtualPath,
+    VirtualPathBuf, forward_storage_fs_operations, resolve_storage_path, temp_file_path,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE};
 use sha1::{Digest, Sha1};

@@ -467,9 +467,11 @@ mod tests {
 
         let mut options = FileOpenOptions::default();
         options.read(true).write(true).create(true);
+        let path = VirtualPathBuf::from("cipher.bin");
+        let root_id = backend.entry_storage().get_root_id().unwrap();
         let cipher_file = backend
             .entry_storage()
-            .open_file_with("cipher.bin".into(), options)
+            .open_file_with(ResolvedStoragePath::new(&path, &root_id), options)
             .unwrap();
         let file = CryptFsFile::try_from_file(cipher_file, backend, false).unwrap();
 
@@ -489,9 +491,11 @@ mod tests {
 
         let mut options = FileOpenOptions::default();
         options.read(true).write(true).create(true);
+        let path = VirtualPathBuf::from("cipher.bin");
+        let root_id = backend.entry_storage().get_root_id().unwrap();
         let cipher_file = backend
             .entry_storage()
-            .open_file_with("cipher.bin".into(), options)
+            .open_file_with(ResolvedStoragePath::new(&path, &root_id), options)
             .unwrap();
         let file = CryptFsFile::try_from_file(cipher_file, backend, false).unwrap();
 
@@ -674,9 +678,11 @@ mod tests {
 
         let mut options = FileOpenOptions::default();
         options.read(true).write(true).create(true);
+        let path = VirtualPathBuf::from("cipher.bin");
+        let root_id = backend.entry_storage().get_root_id().unwrap();
         let cipher_file = backend
             .entry_storage()
-            .open_file_with("cipher.bin".into(), options)
+            .open_file_with(ResolvedStoragePath::new(&path, &root_id), options)
             .unwrap();
         let _file = CryptFsFile::try_from_file(cipher_file, backend, false).unwrap();
 

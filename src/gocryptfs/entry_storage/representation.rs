@@ -6,11 +6,17 @@ pub(super) struct EntryPaths {
     pub(super) sidecar: Option<VirtualPathBuf>,
 }
 
+/// Resolved physical paths used to represent one opaque encoded entry.
+pub(super) struct ResolvedEntryPaths {
+    pub(super) content: ResolvedStoragePathBuf,
+    pub(super) sidecar: Option<ResolvedStoragePathBuf>,
+}
+
 /// Physical changes required to rename one GoCryptFS entry.
 pub(super) struct RenamePlan {
     pub(super) operations: Vec<RenameOperation>,
-    pub(super) staged_sidecar: Option<(VirtualPathBuf, Vec<u8>)>,
-    pub(super) cleanup_paths: Vec<VirtualPathBuf>,
+    pub(super) staged_sidecar: Option<(ResolvedStoragePathBuf, Vec<u8>)>,
+    pub(super) cleanup_paths: Vec<ResolvedStoragePathBuf>,
 }
 
 /// Returns whether a raw GoCryptFS entry is internal to the representation.
@@ -62,6 +68,17 @@ impl<F, L: DirectoryLayout> GoCryptFsEntryStorage<F, L> {
         }
     }
 
+    /// Maps an already-resolved logical entry to its physical representation.
+    pub(super) fn resolved_entry_paths(&self, path: ResolvedStoragePath<'_>) -> ResolvedEntryPaths {
+        let paths = self.entry_paths(path.path());
+        ResolvedEntryPaths {
+            content: ResolvedStoragePathBuf::new(paths.content, path.expected_parent_id().clone()),
+            sidecar: paths.sidecar.map(|sidecar| {
+                ResolvedStoragePathBuf::new(sidecar, path.expected_parent_id().clone())
+            }),
+        }
+    }
+
     /// Returns the sidecar associated with an already-physical content path.
     pub(super) fn physical_sidecar_path(path: &VirtualPath) -> Option<VirtualPathBuf> {
         let name = path.file_name()?;
@@ -74,7 +91,7 @@ impl<F, L: DirectoryLayout> GoCryptFsEntryStorage<F, L> {
 
     /// Validates that a GoCryptFS directory stores children in its visible entry.
     pub(super) fn validate_directory(directory: &StorageDirectory) -> std::io::Result<()> {
-        if directory.entry_path != directory.contents_path {
+        if directory.entry_path.path() != directory.contents_path.path() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "GoCryptFS directory entry and contents paths must match",
@@ -86,11 +103,12 @@ impl<F, L: DirectoryLayout> GoCryptFsEntryStorage<F, L> {
     /// Plans an atomic representation rename and its temporary cleanup.
     pub(super) fn rename_plan(
         &self,
-        old_path: &VirtualPath,
-        new_path: &VirtualPath,
+        old_path: ResolvedStoragePath<'_>,
+        new_path: ResolvedStoragePath<'_>,
+        root_id: &StorageDirectoryId,
     ) -> std::io::Result<RenamePlan> {
-        let old = self.entry_paths(old_path);
-        let new = self.entry_paths(new_path);
+        let old = self.resolved_entry_paths(old_path);
+        let new = self.resolved_entry_paths(new_path);
         let mut operations = if old.content == new.content {
             Vec::new()
         } else {
@@ -100,10 +118,13 @@ impl<F, L: DirectoryLayout> GoCryptFsEntryStorage<F, L> {
 
         let staged_sidecar = if old.sidecar != new.sidecar {
             let staged = if let Some(new_sidecar) = new.sidecar {
-                let name = new_path.file_name().ok_or_else(|| {
+                let name = new_path.path().file_name().ok_or_else(|| {
                     std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing entry name")
                 })?;
-                let staging = temp_file_path(&format!("rename-sidecar:{new_sidecar}"), false);
+                let staging = ResolvedStoragePathBuf::new(
+                    temp_file_path(&format!("rename-sidecar:{}", new_sidecar.path()), false),
+                    root_id.clone(),
+                );
                 operations.push(RenameOperation::ignore_existing(
                     staging.clone(),
                     new_sidecar,
@@ -115,7 +136,10 @@ impl<F, L: DirectoryLayout> GoCryptFsEntryStorage<F, L> {
             };
 
             if let Some(old_sidecar) = old.sidecar {
-                let retired = temp_file_path(&format!("retired-sidecar:{old_sidecar}"), false);
+                let retired = ResolvedStoragePathBuf::new(
+                    temp_file_path(&format!("retired-sidecar:{}", old_sidecar.path()), false),
+                    root_id.clone(),
+                );
                 operations.push(RenameOperation::replace(old_sidecar, retired.clone()));
                 cleanup_paths.push(retired);
             }

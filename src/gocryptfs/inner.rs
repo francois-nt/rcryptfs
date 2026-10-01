@@ -262,10 +262,12 @@ impl GoCryptFs<GoCryptFsBackend> {
         let directory_layout = Arc::new(GoCryptFsDirectoryLayout);
         Self::write_config_and_initialize_root(&config_fs, password, |translator| {
             let token = select_root_directory_token(directory_layout.as_ref())?;
-            let directory_id_backup = encrypted_directory_id_backup::<
-                GoCryptFsEntryStorage<NativeFileSystem, GoCryptFsDirectoryLayout>,
-                _,
-            >(translator, &token)?;
+            let directory_id_backup = encrypted_directory_id_backup(
+                translator,
+                &token,
+                GoCryptFsEntryStorage::< NativeFileSystem,
+                GoCryptFsDirectoryLayout > ::REQUIRES_DIRECTORY_ID_BACKUP,
+            )?;
             GoCryptFsEntryStorage::initialize_root_storage(
                 &storage_fs,
                 directory_layout.as_ref(),
@@ -307,7 +309,8 @@ where
     ) -> Result<Vec<u8>> {
         Self::write_config_and_initialize_root(config_fs, password, |translator| {
             let token = select_root_directory_token(backend.directory_layout())?;
-            let directory_id_backup = encrypted_directory_id_backup::<S, _>(translator, &token)?;
+            let directory_id_backup =
+                encrypted_directory_id_backup(translator, &token, S::REQUIRES_DIRECTORY_ID_BACKUP)?;
             backend
                 .entry_storage()
                 .initialize_root_directory(token, directory_id_backup)

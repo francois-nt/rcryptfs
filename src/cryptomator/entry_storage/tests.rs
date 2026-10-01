@@ -1,6 +1,17 @@
 use super::*;
 use crate::core::{DirectoryContentLayout, NativeFileSystem, ReadAt, Utf8Path};
+use std::sync::LazyLock;
 use tempfile::tempdir;
+
+static DIRECTORY_ID: LazyLock<StorageDirectoryId> = LazyLock::new(Default::default);
+
+fn resolved(path: &VirtualPath) -> ResolvedStoragePath<'_> {
+    ResolvedStoragePath::new(path, &DIRECTORY_ID)
+}
+
+fn resolved_buf(path: impl Into<VirtualPathBuf>) -> ResolvedStoragePathBuf {
+    ResolvedStoragePathBuf::new(path.into(), StorageDirectoryId::default())
+}
 
 struct FixedDirectoryContentLayout {
     contents_path: VirtualPathBuf,
@@ -103,18 +114,20 @@ fn short_entries_are_classified_from_their_physical_representation() {
 
     let directory = storage
         .create_directory(
-            directory_path.clone(),
+            resolved_buf(directory_path.clone()),
             directory_token(),
             Some(directory_id_backup()),
             None,
         )
         .unwrap();
     assert!(directory.file_type == FileType::Directory);
-    let symlink = storage.create_symlink(&symlink_path, b"target").unwrap();
+    let symlink = storage
+        .create_symlink(resolved(&symlink_path), b"target")
+        .unwrap();
     assert!(symlink.file_type == FileType::SymLink);
 
     let entries = storage
-        .read_dir(parent_contents)
+        .read_dir(resolved_buf(parent_contents), StorageDirectoryId::default())
         .unwrap()
         .collect::<std::io::Result<Vec<_>>>()
         .unwrap();
@@ -134,7 +147,12 @@ fn directory_creation_requires_an_encrypted_identifier_backup() {
     let directory_path = parent_contents.join("encoded-directory");
 
     let error = storage
-        .create_directory(directory_path.clone(), directory_token(), None, None)
+        .create_directory(
+            resolved_buf(directory_path.clone()),
+            directory_token(),
+            None,
+            None,
+        )
         .err()
         .unwrap();
 
@@ -142,10 +160,15 @@ fn directory_creation_requires_an_encrypted_identifier_backup() {
     assert!(
         !storage
             .storage_fs
-            .exists(&storage.entry_paths(&directory_path).entry)
+            .exists(resolved(&storage.entry_paths(&directory_path).entry))
             .unwrap()
     );
-    assert!(!storage.storage_fs.exists(&child_contents_path()).unwrap());
+    assert!(
+        !storage
+            .storage_fs
+            .exists(resolved(&child_contents_path()))
+            .unwrap()
+    );
 }
 
 #[test]
@@ -156,22 +179,22 @@ fn long_file_uses_and_validates_name_c9s() {
     let long_name = "a".repeat(DEFAULT_SHORTENING_THRESHOLD);
     let logical_path = parent_contents.join(&long_name);
     storage
-        .create_file(&logical_path, b"ciphertext", None)
+        .create_file(resolved(&logical_path), b"ciphertext", None)
         .unwrap();
 
     let paths = storage.entry_paths(&logical_path);
     assert!(paths.is_shortened());
-    assert!(storage.storage_fs.exists(&paths.entry).unwrap());
+    assert!(storage.storage_fs.exists(resolved(&paths.entry)).unwrap());
     assert_eq!(
         storage
             .storage_fs
-            .read_all(&paths.entry.join(CRYPTOMATOR_NAME_FILE))
+            .read_all(resolved(&paths.entry.join(CRYPTOMATOR_NAME_FILE)))
             .unwrap(),
         format!("{long_name}{CRYPTOMATOR_REGULAR_SUFFIX}").as_bytes()
     );
 
     let entries = storage
-        .read_dir(parent_contents)
+        .read_dir(resolved_buf(parent_contents), StorageDirectoryId::default())
         .unwrap()
         .collect::<std::io::Result<Vec<_>>>()
         .unwrap();
@@ -181,17 +204,22 @@ fn long_file_uses_and_validates_name_c9s() {
 
     let mut options = FileOpenOptions::default();
     options.read(true);
-    let handle = storage.open_file_with(&logical_path, options).unwrap();
+    let handle = storage
+        .open_file_with(resolved(&logical_path), options)
+        .unwrap();
     let mut data = [0; 10];
     assert_eq!(handle.read_all_at(0, &mut data).unwrap(), data.len());
     assert_eq!(&data, b"ciphertext");
 
     storage
         .storage_fs
-        .put(&paths.entry.join(CRYPTOMATOR_NAME_FILE), b"wrong.c9r")
+        .put(
+            resolved(&paths.entry.join(CRYPTOMATOR_NAME_FILE)),
+            b"wrong.c9r",
+        )
         .unwrap();
     assert!(matches!(
-        storage.metadata(&logical_path),
+        storage.metadata(resolved(&logical_path)),
         Err(error) if error.kind() == std::io::ErrorKind::InvalidData
     ));
 }
@@ -203,21 +231,24 @@ fn read_dir_ignores_foreign_names_but_reports_malformed_entries() {
     storage.storage_fs.mkdir_all(&parent_contents).unwrap();
     storage
         .storage_fs
-        .put(&parent_contents.join("sync-conflict"), b"foreign")
+        .put(resolved(&parent_contents.join("sync-conflict")), b"foreign")
         .unwrap();
 
     let entries = storage
-        .read_dir(parent_contents.clone())
+        .read_dir(
+            resolved_buf(parent_contents.clone()),
+            StorageDirectoryId::default(),
+        )
         .unwrap()
         .collect::<Vec<_>>();
     assert!(entries.is_empty());
 
     storage
         .storage_fs
-        .mkdir(&parent_contents.join("broken.c9s"), None)
+        .mkdir(resolved(&parent_contents.join("broken.c9s")), None)
         .unwrap();
     let entries = storage
-        .read_dir(parent_contents)
+        .read_dir(resolved_buf(parent_contents), StorageDirectoryId::default())
         .unwrap()
         .collect::<Vec<_>>();
     assert_eq!(entries.len(), 1);
@@ -234,13 +265,15 @@ fn long_directory_and_symlink_use_name_c9s() {
 
     storage
         .create_directory(
-            directory_path.clone(),
+            resolved_buf(directory_path.clone()),
             directory_token(),
             Some(directory_id_backup()),
             None,
         )
         .unwrap();
-    storage.create_symlink(&symlink_path, b"target").unwrap();
+    storage
+        .create_symlink(resolved(&symlink_path), b"target")
+        .unwrap();
 
     for logical_path in [&directory_path, &symlink_path] {
         let paths = storage.entry_paths(logical_path);
@@ -248,12 +281,18 @@ fn long_directory_and_symlink_use_name_c9s() {
         assert!(
             storage
                 .storage_fs
-                .exists(&paths.entry.join(CRYPTOMATOR_NAME_FILE))
+                .exists(resolved(&paths.entry.join(CRYPTOMATOR_NAME_FILE)))
                 .unwrap()
         );
     }
-    assert!(storage.metadata(&directory_path).unwrap().file_type == FileType::Directory);
-    assert!(storage.metadata(&symlink_path).unwrap().file_type == FileType::SymLink);
+    assert!(
+        storage
+            .metadata(resolved(&directory_path))
+            .unwrap()
+            .file_type
+            == FileType::Directory
+    );
+    assert!(storage.metadata(resolved(&symlink_path)).unwrap().file_type == FileType::SymLink);
 }
 
 #[test]
@@ -264,23 +303,36 @@ fn directory_removal_removes_the_complete_shortened_representation() {
     let logical_path = parent_contents.join("d".repeat(DEFAULT_SHORTENING_THRESHOLD));
     storage
         .create_directory(
-            logical_path.clone(),
+            resolved_buf(logical_path.clone()),
             directory_token(),
             Some(directory_id_backup()),
             None,
         )
         .unwrap();
-    let directory = storage.resolve_directory(&logical_path).unwrap();
+    let directory = storage.resolve_directory(resolved(&logical_path)).unwrap();
     let token_backup = directory.contents_path.join(CRYPTOMATOR_DIR_ID_BACKUP_FILE);
     assert_eq!(
-        storage.storage_fs.read_all(&token_backup).unwrap(),
+        storage
+            .storage_fs
+            .read_all(resolved(&token_backup))
+            .unwrap(),
         directory_id_backup()
     );
 
     storage.remove_directory(&directory).unwrap();
 
-    assert!(!storage.storage_fs.exists(&directory.entry_path).unwrap());
-    assert!(!storage.storage_fs.exists(&directory.contents_path).unwrap());
+    assert!(
+        !storage
+            .storage_fs
+            .exists(directory.entry_path.as_resolved_path())
+            .unwrap()
+    );
+    assert!(
+        !storage
+            .storage_fs
+            .exists(directory.contents_path.as_resolved_path())
+            .unwrap()
+    );
 }
 
 #[test]
@@ -291,24 +343,37 @@ fn directory_removal_preserves_representation_when_contents_are_not_empty() {
     let logical_path = parent_contents.join("directory");
     storage
         .create_directory(
-            logical_path.clone(),
+            resolved_buf(logical_path.clone()),
             directory_token(),
             Some(directory_id_backup()),
             None,
         )
         .unwrap();
-    let directory = storage.resolve_directory(&logical_path).unwrap();
+    let directory = storage.resolve_directory(resolved(&logical_path)).unwrap();
     let marker = directory.entry_path.join(CRYPTOMATOR_DIR_FILE);
     let unexpected = directory.contents_path.join("unexpected.c9r");
-    storage.storage_fs.put(&unexpected, b"contents").unwrap();
+    storage
+        .storage_fs
+        .put(resolved(&unexpected), b"contents")
+        .unwrap();
 
     let error = storage.remove_directory(&directory).unwrap_err();
 
     assert_eq!(error.raw_os_error(), Some(libc::ENOTEMPTY));
-    assert!(storage.storage_fs.exists(&directory.entry_path).unwrap());
-    assert!(storage.storage_fs.exists(&directory.contents_path).unwrap());
-    assert!(storage.storage_fs.exists(&marker).unwrap());
-    assert!(storage.storage_fs.exists(&unexpected).unwrap());
+    assert!(
+        storage
+            .storage_fs
+            .exists(directory.entry_path.as_resolved_path())
+            .unwrap()
+    );
+    assert!(
+        storage
+            .storage_fs
+            .exists(directory.contents_path.as_resolved_path())
+            .unwrap()
+    );
+    assert!(storage.storage_fs.exists(resolved(&marker)).unwrap());
+    assert!(storage.storage_fs.exists(resolved(&unexpected)).unwrap());
 }
 
 #[test]
@@ -317,20 +382,25 @@ fn entry_removal_preserves_container_with_unexpected_contents() {
     let parent_contents = contents_path();
     storage.storage_fs.mkdir_all(&parent_contents).unwrap();
     let logical_path = parent_contents.join("s".repeat(DEFAULT_SHORTENING_THRESHOLD));
-    storage.create_symlink(&logical_path, b"target").unwrap();
+    storage
+        .create_symlink(resolved(&logical_path), b"target")
+        .unwrap();
     let paths = storage.entry_paths(&logical_path);
     let symlink = paths.entry.join(CRYPTOMATOR_SYMLINK_FILE);
     let name = paths.entry.join(CRYPTOMATOR_NAME_FILE);
     let unexpected = paths.entry.join("unexpected");
-    storage.storage_fs.put(&unexpected, b"contents").unwrap();
+    storage
+        .storage_fs
+        .put(resolved(&unexpected), b"contents")
+        .unwrap();
 
-    let error = storage.remove_entry(&logical_path).unwrap_err();
+    let error = storage.remove_entry(resolved(&logical_path)).unwrap_err();
 
     assert_eq!(error.raw_os_error(), Some(libc::ENOTEMPTY));
-    assert!(storage.storage_fs.exists(&paths.entry).unwrap());
-    assert!(storage.storage_fs.exists(&symlink).unwrap());
-    assert!(storage.storage_fs.exists(&name).unwrap());
-    assert!(storage.storage_fs.exists(&unexpected).unwrap());
+    assert!(storage.storage_fs.exists(resolved(&paths.entry)).unwrap());
+    assert!(storage.storage_fs.exists(resolved(&symlink)).unwrap());
+    assert!(storage.storage_fs.exists(resolved(&name)).unwrap());
+    assert!(storage.storage_fs.exists(resolved(&unexpected)).unwrap());
 }
 
 #[test]
@@ -339,18 +409,20 @@ fn metadata_rejects_conflicting_container_markers() {
     let parent_contents = contents_path();
     storage.storage_fs.mkdir_all(&parent_contents).unwrap();
     let logical_path = parent_contents.join("encoded");
-    storage.create_symlink(&logical_path, b"target").unwrap();
+    storage
+        .create_symlink(resolved(&logical_path), b"target")
+        .unwrap();
     let physical = storage.entry_paths(&logical_path).entry;
     storage
         .storage_fs
         .put(
-            &physical.join(CRYPTOMATOR_DIR_FILE),
+            resolved(&physical.join(CRYPTOMATOR_DIR_FILE)),
             b"12345678-1234-1234-1234-123456789abc",
         )
         .unwrap();
 
     assert!(matches!(
-        storage.metadata(&logical_path),
+        storage.metadata(resolved(&logical_path)),
         Err(error) if error.kind() == std::io::ErrorKind::InvalidData
     ));
 }
@@ -360,16 +432,19 @@ fn metadata_does_not_accept_entries_outside_a_contents_directory() {
     let (_temp_dir, storage) = cryptomator_storage();
     storage
         .storage_fs
-        .mkdir(VirtualPath::new("outside"), None)
+        .mkdir(resolved(VirtualPath::new("outside")), None)
         .unwrap();
     storage
         .storage_fs
-        .put(VirtualPath::new("outside/encoded.c9r"), b"ciphertext")
+        .put(
+            resolved(VirtualPath::new("outside/encoded.c9r")),
+            b"ciphertext",
+        )
         .unwrap();
 
     assert!(
         storage
-            .metadata(VirtualPath::new("outside/encoded"))
+            .metadata(resolved(VirtualPath::new("outside/encoded")))
             .unwrap()
             .file_type
             == FileType::Other
@@ -386,26 +461,34 @@ fn rename_moves_files_across_the_shortening_boundary() {
     let second_long_path = parent_contents.join("b".repeat(DEFAULT_SHORTENING_THRESHOLD));
 
     storage
-        .create_file(&short_path, b"ciphertext", None)
+        .create_file(resolved(&short_path), b"ciphertext", None)
         .unwrap();
-    storage.rename(&short_path, &first_long_path).unwrap();
+    storage
+        .rename(resolved(&short_path), resolved(&first_long_path))
+        .unwrap();
     assert_eq!(
         storage
             .storage_fs
-            .read_all(&storage.entry_paths(&first_long_path).contents_path())
+            .read_all(resolved(
+                &storage.entry_paths(&first_long_path).contents_path(),
+            ))
             .unwrap(),
         b"ciphertext"
     );
-    storage.rename(&first_long_path, &second_long_path).unwrap();
-    storage.rename(&second_long_path, &short_path).unwrap();
+    storage
+        .rename(resolved(&first_long_path), resolved(&second_long_path))
+        .unwrap();
+    storage
+        .rename(resolved(&second_long_path), resolved(&short_path))
+        .unwrap();
     assert_eq!(
         storage
             .storage_fs
-            .read_all(&storage.entry_paths(&short_path).contents_path())
+            .read_all(resolved(&storage.entry_paths(&short_path).contents_path()))
             .unwrap(),
         b"ciphertext"
     );
-    assert!(storage.metadata(&short_path).is_ok());
+    assert!(storage.metadata(resolved(&short_path)).is_ok());
 }
 
 #[test]
@@ -418,15 +501,17 @@ fn custom_threshold_controls_shortening_and_name_validation() {
     let direct_path = parent_contents.join("a".repeat(direct_name_len));
     let shortened_path = parent_contents.join("b".repeat(direct_name_len + 1));
 
-    storage.create_file(&direct_path, b"direct", None).unwrap();
     storage
-        .create_file(&shortened_path, b"shortened", None)
+        .create_file(resolved(&direct_path), b"direct", None)
+        .unwrap();
+    storage
+        .create_file(resolved(&shortened_path), b"shortened", None)
         .unwrap();
 
     assert!(!storage.entry_paths(&direct_path).is_shortened());
     assert!(storage.entry_paths(&shortened_path).is_shortened());
     let entries = storage
-        .read_dir(parent_contents)
+        .read_dir(resolved_buf(parent_contents), StorageDirectoryId::default())
         .unwrap()
         .collect::<std::io::Result<Vec<_>>>()
         .unwrap();

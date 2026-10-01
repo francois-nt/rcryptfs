@@ -1,9 +1,12 @@
 use super::CryptoMator;
 use crate::core::{
-    DirectoryContentLayout, DirectoryLayout, EncryptionLayout, EncryptionTranslator, EntryStorage,
-    EntryStorageBackend, OrIoError, PathCacheAccess, PathLayout, Result, RootDirectoryToken,
+    CacheCommit, CacheLookup, CipherPathCacheEntry, DirectoryContentLayout, DirectoryLayout,
+    EncryptionLayout, EncryptionTranslator, EntryStorage, EntryStorageBackend, OrIoError,
+    PathCache, PathCacheAccess, PathLayout, ResolvedStoragePathBuf, Result, RootDirectoryToken,
     VirtualPath, VirtualPathBuf, default_remove_cached_plain_path,
 };
+
+const PATH_CACHE_RETRIES: usize = 8;
 
 /// Canonical Cryptomator directory policy derived from the SIV key.
 pub struct CryptomatorDirectoryLayout {
@@ -70,60 +73,91 @@ impl DirectoryLayout for CryptomatorDirectoryLayout {
     }
 }
 
+impl<S, L: DirectoryLayout> PathCacheAccess for CryptoMator<EntryStorageBackend<S, L>> {
+    fn path_cache(&self) -> &PathCache {
+        self.backend.path_cache()
+    }
+}
+
 /// Resolves a plain folder path to its storage directory and dir id.
-fn folder_path_to_cipher_and_dirid<S, L>(
+fn resolve_folder<S, L>(
     this: &CryptoMator<EntryStorageBackend<S, L>>,
     plain_path: &VirtualPath,
-) -> Result<(VirtualPathBuf, Vec<u8>)>
+) -> Result<CipherPathCacheEntry>
 where
     S: EntryStorage,
     L: DirectoryLayout,
 {
-    this.backend.with_path_cache(|cache| {
-        if let Some((dir_id, cipher_path)) = cache.get(plain_path.as_str()) {
-            Ok((cipher_path.to_owned(), dir_id.clone()))
-        } else {
-            if plain_path.as_str().is_empty() {
-                let directory = this
-                    .entry_storage()
-                    .resolve_directory(VirtualPath::root())?;
-                cache.insert(
-                    String::default(),
-                    (directory.token.clone(), directory.contents_path.clone()),
-                );
-                return Ok((directory.contents_path, directory.token));
-            }
-
-            let mut partial_plain_path = VirtualPathBuf::from("");
-            let mut absolute_path = VirtualPathBuf::default();
-            for plain_part in plain_path.iter() {
-                if let Some((dir_id, cipher_parent)) = cache.get(partial_plain_path.as_str()) {
-                    let cipher_part = this.plain_name_to_cipher(dir_id, plain_part)?;
-                    absolute_path = cipher_parent.join(cipher_part);
-                } else {
-                    let directory = this.entry_storage().resolve_directory(&absolute_path)?;
-                    absolute_path = directory.contents_path;
-                    cache.insert(
-                        partial_plain_path.as_str().into(),
-                        (directory.token.clone(), absolute_path.clone()),
-                    );
-                    let cipher_part = this.plain_name_to_cipher(&directory.token, plain_part)?;
-                    absolute_path.push(cipher_part);
-                }
-                partial_plain_path.push(plain_part);
-            }
-
-            let directory = this.entry_storage().resolve_directory(&absolute_path)?;
-            absolute_path = directory.contents_path;
-
-            cache.insert(
-                partial_plain_path.as_str().into(),
-                (directory.token.clone(), absolute_path.clone()),
-            );
-
-            Ok((absolute_path, directory.token))
+    for _ in 0..PATH_CACHE_RETRIES {
+        let snapshot = this.path_cache().snapshot_blocking(plain_path);
+        match snapshot.lookup(plain_path) {
+            CacheLookup::Hit(entry) => match snapshot.commit(Vec::new()) {
+                CacheCommit::Committed => return Ok(entry),
+                CacheCommit::Invalidated | CacheCommit::Conflict(_) => continue,
+            },
+            CacheLookup::Invalidated => continue,
+            CacheLookup::Miss => {}
         }
-    })
+
+        let mut staged = Vec::new();
+        let mut partial = VirtualPathBuf::default();
+        let mut absolute = ResolvedStoragePathBuf::new(
+            VirtualPathBuf::default(),
+            this.entry_storage().get_root_id()?,
+        );
+        let mut invalidated = false;
+
+        for plain_part in plain_path.iter() {
+            let entry = match snapshot.lookup(&partial) {
+                CacheLookup::Hit(entry) => entry,
+                CacheLookup::Miss => {
+                    let directory = this
+                        .entry_storage()
+                        .resolve_directory(absolute.as_resolved_path())?;
+                    let entry = CipherPathCacheEntry {
+                        token: directory.token,
+                        contents_path: directory.contents_path,
+                        contents_id: directory.contents_id,
+                    };
+                    staged.push((partial.as_str().to_owned(), entry.clone()));
+                    entry
+                }
+                CacheLookup::Invalidated => {
+                    invalidated = true;
+                    break;
+                }
+            };
+            absolute = ResolvedStoragePathBuf::new(
+                entry
+                    .contents_path
+                    .path()
+                    .join(this.plain_name_to_cipher(&entry.token, plain_part)?),
+                entry.contents_id,
+            );
+            partial.push(plain_part);
+        }
+        if invalidated {
+            continue;
+        }
+
+        let directory = this
+            .entry_storage()
+            .resolve_directory(absolute.as_resolved_path())?;
+        let cached = CipherPathCacheEntry {
+            token: directory.token,
+            contents_path: directory.contents_path,
+            contents_id: directory.contents_id,
+        };
+        staged.push((partial.as_str().to_owned(), cached.clone()));
+        match snapshot.commit(staged) {
+            CacheCommit::Committed => return Ok(cached),
+            CacheCommit::Invalidated => {}
+            CacheCommit::Conflict(path) => {
+                log::warn!("conflicting cached resolution for {path}");
+            }
+        }
+    }
+    anyhow::bail!("path cache changed repeatedly while resolving {plain_path}")
 }
 
 impl<S, L> PathLayout for CryptoMator<EntryStorageBackend<S, L>>
@@ -141,16 +175,19 @@ where
         self.backend.directory_layout()
     }
     /// Resolves one logical path to its visible storage entry inside the parent storage directory.
-    fn plain_path_to_cipher(&self, plain_path: &VirtualPath) -> Result<VirtualPathBuf> {
+    fn plain_path_to_cipher(&self, plain_path: &VirtualPath) -> Result<ResolvedStoragePathBuf> {
         if plain_path.as_str().is_empty() {
-            return Ok(folder_path_to_cipher_and_dirid(self, plain_path)?.0);
+            return Ok(resolve_folder(self, plain_path)?.contents_path);
         }
 
         let parent = plain_path.parent().unwrap_or_else(VirtualPath::root);
         let name = plain_path.file_name().or_invalid()?;
-        let (cipher_parent_path, dir_id) = folder_path_to_cipher_and_dirid(self, parent)?;
-        let cipher_name = self.plain_name_to_cipher(&dir_id, name)?;
-        Ok(cipher_parent_path.join(cipher_name))
+        let parent = resolve_folder(self, parent)?;
+        let cipher_name = self.plain_name_to_cipher(&parent.token, name)?;
+        Ok(ResolvedStoragePathBuf::new(
+            parent.contents_path.path().join(cipher_name),
+            parent.contents_id,
+        ))
     }
     /// Drops one cached plain path and all cached descendants derived from it.
     fn remove_cached_plain_path(&self, plain_path: &VirtualPath) {
@@ -167,16 +204,24 @@ impl<S: EntryStorage, L: DirectoryLayout> EncryptionLayout
 mod tests {
     use super::*;
     use crate::core::{
-        EncryptionLayout, FileType, NativeFileSystem, PathLayout, StorageFileSystem, Utf8Path,
-        encrypted_directory_id_backup, select_root_directory_token,
+        EncryptionLayout, FileType, NativeFileSystem, PathLayout, ResolvedStoragePath,
+        StorageDirectoryId, StorageFileSystem, Utf8Path, encrypted_directory_id_backup,
+        select_root_directory_token,
     };
+    use crate::cryptomator::DefaultCryptomatorEntryStorage;
     use crate::{CryptomatorBackend, CryptomatorEntryStorage};
-    use std::sync::Arc;
+    use std::sync::{Arc, LazyLock};
     use tempfile::tempdir;
 
     /// Creates a borrowed plain path for tests.
     fn p(path: &str) -> &VirtualPath {
         VirtualPath::new(path)
+    }
+
+    static DIRECTORY_ID: LazyLock<StorageDirectoryId> = LazyLock::new(Default::default);
+
+    fn resolved(path: &VirtualPath) -> ResolvedStoragePath<'_> {
+        ResolvedStoragePath::new(path, &DIRECTORY_ID)
     }
 
     /// Returns the raw filesystem used by a test backend.
@@ -196,7 +241,10 @@ mod tests {
         directory: &crate::core::StorageDirectory,
     ) -> Vec<u8> {
         let ciphertext = raw_storage(backend)
-            .read_all(&directory.contents_path.join("dirid.c9r"))
+            .read_all(ResolvedStoragePath::new(
+                &directory.contents_path.join("dirid.c9r"),
+                &directory.contents_id,
+            ))
             .unwrap();
         let (header, block) = ciphertext.split_at(CryptoMator::<CryptomatorBackend>::HEADER_LEN);
         if block.is_empty() {
@@ -229,10 +277,11 @@ mod tests {
         };
 
         let token = select_root_directory_token(directory_layout.as_ref()).unwrap();
-        let directory_id_backup = encrypted_directory_id_backup::<
-            CryptomatorEntryStorage<NativeFileSystem, CryptomatorDirectoryLayout>,
-            _,
-        >(&backend, &token)
+        let directory_id_backup = encrypted_directory_id_backup(
+            &backend,
+            &token,
+            DefaultCryptomatorEntryStorage::REQUIRES_DIRECTORY_ID_BACKUP,
+        )
         .unwrap();
         backend
             .entry_storage()
@@ -341,7 +390,9 @@ mod tests {
 
         let cipher_path = backend.plain_path_to_cipher(p("empty.txt")).unwrap();
         let physical_path = physical_entry_path(&cipher_path);
-        let raw_metadata = raw_storage(&backend).metadata(&physical_path).unwrap();
+        let raw_metadata = raw_storage(&backend)
+            .metadata(resolved(&physical_path))
+            .unwrap();
         let plain_metadata = backend.metadata(p("empty.txt")).unwrap();
         let duplicate_error = backend.mknode(p("empty.txt"), None).err().unwrap();
 
@@ -366,18 +417,22 @@ mod tests {
         let physical_path = physical_entry_path(&cipher_path);
         let directory = backend
             .entry_storage()
-            .resolve_directory(&cipher_path)
+            .resolve_directory(cipher_path.as_resolved_path())
             .unwrap();
 
-        assert!(raw_storage(&backend).exists(&physical_path).unwrap());
         assert!(
             raw_storage(&backend)
-                .exists(&physical_path.join("dir.c9r"))
+                .exists(resolved(&physical_path))
                 .unwrap()
         );
         assert!(
             raw_storage(&backend)
-                .exists(&directory.contents_path)
+                .exists(resolved(&physical_path.join("dir.c9r")))
+                .unwrap()
+        );
+        assert!(
+            raw_storage(&backend)
+                .exists(directory.contents_path.as_resolved_path())
                 .unwrap()
         );
         assert_eq!(
@@ -396,15 +451,19 @@ mod tests {
         let physical_path = physical_entry_path(&cipher_path);
         let directory = backend
             .entry_storage()
-            .resolve_directory(&cipher_path)
+            .resolve_directory(cipher_path.as_resolved_path())
             .unwrap();
 
         backend.remove_dir(p("docs")).unwrap();
 
-        assert!(!raw_storage(&backend).exists(&physical_path).unwrap());
         assert!(
             !raw_storage(&backend)
-                .exists(&directory.contents_path)
+                .exists(resolved(&physical_path))
+                .unwrap()
+        );
+        assert!(
+            !raw_storage(&backend)
+                .exists(directory.contents_path.as_resolved_path())
                 .unwrap()
         );
     }
@@ -419,7 +478,11 @@ mod tests {
         let file_path = backend.plain_path_to_cipher(p("file.txt")).unwrap();
         let physical_file_path = physical_entry_path(&file_path);
         backend.remove(p("file.txt")).unwrap();
-        assert!(!raw_storage(&backend).exists(&physical_file_path).unwrap());
+        assert!(
+            !raw_storage(&backend)
+                .exists(resolved(&physical_file_path))
+                .unwrap()
+        );
 
         backend.create_symlink(p("link"), "../target.txt").unwrap();
         let symlink_path = backend.plain_path_to_cipher(p("link")).unwrap();
@@ -427,7 +490,7 @@ mod tests {
         backend.remove(p("link")).unwrap();
         assert!(
             !raw_storage(&backend)
-                .exists(&physical_symlink_path)
+                .exists(resolved(&physical_symlink_path))
                 .unwrap()
         );
     }
@@ -437,7 +500,7 @@ mod tests {
         let (_temp_dir, backend) = test_backend();
         let root_directory = backend
             .entry_storage()
-            .resolve_directory(VirtualPath::root())
+            .resolve_directory(resolved(VirtualPath::root()))
             .unwrap();
         assert_eq!(
             read_directory_id_backup(&backend, &root_directory),

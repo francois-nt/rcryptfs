@@ -1,18 +1,39 @@
 use super::{
     DirectoryLayout, EncryptionLayout, EncryptionTranslator, EntryStorage, FileType, FsDirEntry,
-    Metadata, OrIoError, Permissions, RootDirectoryToken, StorageDirEntry, VirtualPath,
-    VirtualPathBuf,
+    Metadata, OrIoError, Permissions, ResolvedStoragePathBuf, RootDirectoryToken, StorageDirEntry,
+    StorageFileSystem, VirtualPath, VirtualPathBuf,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::Digest;
 use std::time::SystemTime;
+
+/// Resolves a raw storage path by validating every existing ancestor from the root.
+pub(crate) fn resolve_storage_path<F: StorageFileSystem + ?Sized>(
+    storage: &F,
+    path: &VirtualPath,
+) -> std::io::Result<ResolvedStoragePathBuf> {
+    let mut parent_id = storage.get_root_id()?;
+    let mut current = VirtualPathBuf::default();
+    let mut components = path.components().peekable();
+    while let Some(component) = components.next() {
+        if components.peek().is_none() {
+            break;
+        }
+        current.push(component);
+        let folder = ResolvedStoragePathBuf::new(current.clone(), parent_id);
+        parent_id = storage.get_folder_id(folder.as_resolved_path())?;
+    }
+    Ok(ResolvedStoragePathBuf::new(path.to_owned(), parent_id))
+}
 
 pub(super) fn default_metadata<T: EncryptionLayout + ?Sized>(
     this: &T,
     plain_path: &VirtualPath,
 ) -> std::io::Result<Metadata> {
     let cipher_path = this.plain_path_to_cipher(plain_path).or_invalid()?;
-    let metadata = this.entry_storage().metadata(&cipher_path)?;
+    let metadata = this
+        .entry_storage()
+        .metadata(cipher_path.as_resolved_path())?;
     storage_metadata_to_plain(this, metadata)
 }
 
@@ -31,7 +52,7 @@ pub(crate) fn storage_metadata_to_plain<T: EncryptionTranslator + ?Sized>(
 }
 
 /// Decrypts one represented directory entry and converts its metadata.
-fn storage_dir_entry_to_plain<T: EncryptionTranslator + ?Sized>(
+pub(super) fn storage_dir_entry_to_plain<T: EncryptionTranslator + ?Sized>(
     this: &T,
     parent_token: &[u8],
     entry: StorageDirEntry,
@@ -55,16 +76,21 @@ pub(super) fn default_list_dir_plain_names<'a, T: EncryptionLayout + ?Sized>(
     plain_path: &VirtualPath,
 ) -> std::io::Result<impl Iterator<Item = std::io::Result<(FsDirEntry, VirtualPathBuf)>> + 'a> {
     let entry_path = if plain_path.is_empty() {
-        VirtualPathBuf::default()
+        ResolvedStoragePathBuf::new(
+            VirtualPathBuf::default(),
+            this.entry_storage().get_root_id()?,
+        )
     } else {
         this.plain_path_to_cipher(plain_path).or_invalid()?
     };
-    let directory = this.entry_storage().resolve_directory(&entry_path)?;
+    let directory = this
+        .entry_storage()
+        .resolve_directory(entry_path.as_resolved_path())?;
     let token = directory.token;
 
     Ok(this
         .entry_storage()
-        .read_dir(directory.contents_path)?
+        .read_dir(directory.contents_path, directory.contents_id)?
         .map(move |entry| storage_dir_entry_to_plain(this, &token, entry?)))
 }
 
@@ -79,9 +105,11 @@ pub(super) fn default_mknode<T: EncryptionLayout + ?Sized>(
     } else {
         Vec::new()
     };
-    let metadata =
-        this.entry_storage()
-            .create_file(&cipher_path, &initial_contents, permissions)?;
+    let metadata = this.entry_storage().create_file(
+        cipher_path.as_resolved_path(),
+        &initial_contents,
+        permissions,
+    )?;
     storage_metadata_to_plain(this, metadata)
 }
 
@@ -96,7 +124,12 @@ pub(super) fn default_mkdir<T: EncryptionLayout + ?Sized, L: DirectoryLayout + ?
     directory_layout
         .validate_directory_token(&token, false)
         .or_invalid()?;
-    let directory_id_backup = encrypted_directory_id_backup::<T::EntryStorage, _>(this, &token)?;
+    let directory_id_backup = encrypted_directory_id_backup(
+        this,
+        &token,
+        <T::EntryStorage as EntryStorage>::REQUIRES_DIRECTORY_ID_BACKUP,
+    )?;
+    let _mutation = this.path_cache().begin_mutation(&[plain_path]);
     let metadata = this.entry_storage().create_directory(
         entry_path,
         token,
@@ -107,15 +140,15 @@ pub(super) fn default_mkdir<T: EncryptionLayout + ?Sized, L: DirectoryLayout + ?
 }
 
 /// Encrypts a directory identifier as a complete single-block file when required.
-pub(crate) fn encrypted_directory_id_backup<S, T>(
+pub(crate) fn encrypted_directory_id_backup<T>(
     translator: &T,
     token: &[u8],
+    requires_backup: bool,
 ) -> std::io::Result<Option<Vec<u8>>>
 where
-    S: EntryStorage,
     T: EncryptionTranslator + ?Sized,
 {
-    if !S::REQUIRES_DIRECTORY_ID_BACKUP {
+    if !requires_backup {
         return Ok(None);
     }
 
@@ -152,7 +185,8 @@ pub(super) fn default_remove<T: EncryptionLayout + ?Sized>(
     plain_path: &VirtualPath,
 ) -> std::io::Result<()> {
     let cipher_path = this.plain_path_to_cipher(plain_path).or_invalid()?;
-    this.entry_storage().remove_entry(&cipher_path)
+    this.entry_storage()
+        .remove_entry(cipher_path.as_resolved_path())
 }
 
 pub(super) fn default_remove_dir<T: EncryptionLayout + ?Sized>(
@@ -160,9 +194,11 @@ pub(super) fn default_remove_dir<T: EncryptionLayout + ?Sized>(
     plain_path: &VirtualPath,
 ) -> std::io::Result<()> {
     let entry_path = this.plain_path_to_cipher(plain_path).or_invalid()?;
-    let directory = this.entry_storage().resolve_directory(&entry_path)?;
+    let directory = this
+        .entry_storage()
+        .resolve_directory(entry_path.as_resolved_path())?;
+    let _mutation = this.path_cache().begin_mutation(&[plain_path]);
     this.entry_storage().remove_directory(&directory)?;
-    this.remove_cached_plain_path(plain_path);
     Ok(())
 }
 pub(super) fn default_create_symlink<T: EncryptionLayout + ?Sized>(
@@ -176,7 +212,7 @@ pub(super) fn default_create_symlink<T: EncryptionLayout + ?Sized>(
         .or_invalid()?;
     let metadata = this
         .entry_storage()
-        .create_symlink(&cipher_path, &cipher_target)?;
+        .create_symlink(cipher_path.as_resolved_path(), &cipher_target)?;
     storage_metadata_to_plain(this, metadata)
 }
 pub(super) fn default_read_symlink<T: EncryptionLayout + ?Sized>(
@@ -184,7 +220,9 @@ pub(super) fn default_read_symlink<T: EncryptionLayout + ?Sized>(
     plain_path: &VirtualPath,
 ) -> std::io::Result<String> {
     let cipher_path = this.plain_path_to_cipher(plain_path).or_invalid()?;
-    let cipher_target = this.entry_storage().read_symlink(&cipher_path)?;
+    let cipher_target = this
+        .entry_storage()
+        .read_symlink(cipher_path.as_resolved_path())?;
     let plain_value = this
         .cipher_metavalue_to_plain(&cipher_target)
         .or_invalid()?;
@@ -199,10 +237,11 @@ pub(super) fn default_rename<T: EncryptionLayout + ?Sized>(
 ) -> std::io::Result<()> {
     let old_cipher_path = this.plain_path_to_cipher(old_path).or_invalid()?;
     let new_cipher_path = this.plain_path_to_cipher(new_path).or_invalid()?;
-    this.entry_storage()
-        .rename(&old_cipher_path, &new_cipher_path)?;
-    this.remove_cached_plain_path(old_path);
-    this.remove_cached_plain_path(new_path);
+    let _mutation = this.path_cache().begin_mutation(&[old_path, new_path]);
+    this.entry_storage().rename(
+        old_cipher_path.as_resolved_path(),
+        new_cipher_path.as_resolved_path(),
+    )?;
     Ok(())
 }
 
@@ -212,7 +251,9 @@ pub(super) fn default_set_permissions<T: EncryptionLayout + ?Sized>(
     permissions: Permissions,
 ) -> std::io::Result<Metadata> {
     let path = this.plain_path_to_cipher(plain_path).or_invalid()?;
-    let metadata = this.entry_storage().set_permissions(&path, permissions)?;
+    let metadata = this
+        .entry_storage()
+        .set_permissions(path.as_resolved_path(), permissions)?;
     storage_metadata_to_plain(this, metadata)
 }
 /// Sets access and modification times.
@@ -223,7 +264,8 @@ pub(super) fn default_set_time<T: EncryptionLayout + ?Sized>(
     mtime: Option<SystemTime>,
 ) -> std::io::Result<()> {
     let path = this.plain_path_to_cipher(path).or_invalid()?;
-    this.entry_storage().set_time(&path, atime, mtime)
+    this.entry_storage()
+        .set_time(path.as_resolved_path(), atime, mtime)
 }
 
 pub(crate) fn temp_file_path(path: &str, is_dir_iv: bool) -> VirtualPathBuf {

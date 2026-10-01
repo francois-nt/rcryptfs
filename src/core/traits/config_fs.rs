@@ -1,4 +1,4 @@
-use super::{StorageFileSystem, VirtualPath};
+use super::{StorageFileSystem, VirtualPath, resolve_storage_path};
 
 /// Restricted filesystem view used for repository configuration files.
 pub trait ConfigFileSystem: Send + Sync {
@@ -32,22 +32,28 @@ impl<'a, F: StorageFileSystem + ?Sized> StorageConfigFileSystem<'a, F> {
 
 impl<F: StorageFileSystem + ?Sized> ConfigFileSystem for StorageConfigFileSystem<'_, F> {
     fn is_empty(&self) -> std::io::Result<bool> {
-        self.storage_fs.is_dir_empty(VirtualPath::root())
+        let root = resolve_storage_path(self.storage_fs, VirtualPath::root())?;
+        self.storage_fs
+            .is_dir_empty(root.as_resolved_path(), root.expected_parent_id())
     }
 
     fn exists(&self, path: &VirtualPath) -> std::io::Result<bool> {
-        self.storage_fs.exists(path)
+        let path = resolve_storage_path(self.storage_fs, path)?;
+        self.storage_fs.exists(path.as_resolved_path())
     }
 
     fn read_all(&self, path: &VirtualPath) -> std::io::Result<Vec<u8>> {
-        self.storage_fs.read_all(path)
+        let path = resolve_storage_path(self.storage_fs, path)?;
+        self.storage_fs.read_all(path.as_resolved_path())
     }
 
     fn put_new(&self, path: &VirtualPath, data: &[u8]) -> std::io::Result<()> {
-        self.storage_fs.put_new(path, data)
+        let path = resolve_storage_path(self.storage_fs, path)?;
+        self.storage_fs.put_new(path.as_resolved_path(), data)
     }
 
     fn remove(&self, path: &VirtualPath) -> std::io::Result<()> {
-        self.storage_fs.remove(path)
+        let path = resolve_storage_path(self.storage_fs, path)?;
+        self.storage_fs.remove(path.as_resolved_path())
     }
 }

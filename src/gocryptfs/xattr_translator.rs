@@ -60,27 +60,32 @@ where
         let cipher_path = self.plain_path_to_cipher(path).or_invalid()?;
         let cipher_name = plain_xattr_name_to_cipher(self, name).or_invalid()?;
 
-        let cipher_xattr_value = self.entry_storage().get_xattr(&cipher_path, &cipher_name)?;
+        let cipher_xattr_value = self
+            .entry_storage()
+            .get_xattr(cipher_path.as_resolved_path(), &cipher_name)?;
         cipher_xattr_value_to_plain(self, &cipher_xattr_value).or_invalid()
     }
     fn set_xattr(&self, path: &VirtualPath, name: &str, value: &[u8]) -> std::io::Result<()> {
         let cipher_path = self.plain_path_to_cipher(path).or_invalid()?;
         let cipher_name = plain_xattr_name_to_cipher(self, name).or_invalid()?;
         let cipher_xattr_value = plain_xattr_value_to_cipher(self, value).or_invalid()?;
-        self.entry_storage()
-            .set_xattr(&cipher_path, &cipher_name, &cipher_xattr_value)
+        self.entry_storage().set_xattr(
+            cipher_path.as_resolved_path(),
+            &cipher_name,
+            &cipher_xattr_value,
+        )
     }
     fn remove_xattr(&self, path: &VirtualPath, name: &str) -> std::io::Result<()> {
         let cipher_path = self.plain_path_to_cipher(path).or_invalid()?;
         let cipher_name = plain_xattr_name_to_cipher(self, name).or_invalid()?;
         self.entry_storage()
-            .remove_xattr(&cipher_path, &cipher_name)
+            .remove_xattr(cipher_path.as_resolved_path(), &cipher_name)
     }
     fn list_xattr(&self, path: &VirtualPath) -> std::io::Result<Vec<String>> {
         let cipher_path = self.plain_path_to_cipher(path).or_invalid()?;
         Ok(self
             .entry_storage()
-            .list_xattr(&cipher_path)?
+            .list_xattr(cipher_path.as_resolved_path())?
             .into_iter()
             .filter_map(|name| cipher_xattr_name_to_plain(self, &name).ok())
             .collect())
