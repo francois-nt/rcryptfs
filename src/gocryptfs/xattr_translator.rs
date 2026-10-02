@@ -1,7 +1,7 @@
 use super::GoCryptFs;
 use crate::core::{
-    DirectoryLayout, EncryptionTranslator, EntryStorage, EntryStorageBackend, OrIoError,
-    PathLayout, VirtualPath, XattrLayout,
+    DirectoryLayout, EncryptionLayout, EncryptionTranslator, EntryStorage, EntryStorageBackend,
+    OrIoError, PathLayout, VirtualPath, XattrLayout, retry_stale,
 };
 
 const XATTR_IV: &[u8] = b"xattr_name_iv_xx";
@@ -57,37 +57,44 @@ where
     L: DirectoryLayout,
 {
     fn get_xattr(&self, path: &VirtualPath, name: &str) -> std::io::Result<Vec<u8>> {
-        let cipher_path = self.plain_path_to_cipher(path).or_invalid()?;
-        let cipher_name = plain_xattr_name_to_cipher(self, name).or_invalid()?;
-
-        let cipher_xattr_value = self
-            .entry_storage()
-            .get_xattr(cipher_path.as_resolved_path(), &cipher_name)?;
-        cipher_xattr_value_to_plain(self, &cipher_xattr_value).or_invalid()
+        retry_stale(self, || {
+            let cipher_path = self.plain_path_to_cipher(path)?;
+            let cipher_name = plain_xattr_name_to_cipher(self, name)?;
+            let value = self
+                .entry_storage()
+                .get_xattr(cipher_path.as_resolved_path(), &cipher_name)?;
+            cipher_xattr_value_to_plain(self, &value)
+        })
     }
     fn set_xattr(&self, path: &VirtualPath, name: &str, value: &[u8]) -> std::io::Result<()> {
-        let cipher_path = self.plain_path_to_cipher(path).or_invalid()?;
-        let cipher_name = plain_xattr_name_to_cipher(self, name).or_invalid()?;
-        let cipher_xattr_value = plain_xattr_value_to_cipher(self, value).or_invalid()?;
-        self.entry_storage().set_xattr(
-            cipher_path.as_resolved_path(),
-            &cipher_name,
-            &cipher_xattr_value,
-        )
+        retry_stale(self, || {
+            let cipher_path = self.plain_path_to_cipher(path)?;
+            let cipher_name = plain_xattr_name_to_cipher(self, name)?;
+            let cipher_value = plain_xattr_value_to_cipher(self, value)?;
+            self.entry_storage().set_xattr(
+                cipher_path.as_resolved_path(),
+                &cipher_name,
+                &cipher_value,
+            )
+        })
     }
     fn remove_xattr(&self, path: &VirtualPath, name: &str) -> std::io::Result<()> {
-        let cipher_path = self.plain_path_to_cipher(path).or_invalid()?;
-        let cipher_name = plain_xattr_name_to_cipher(self, name).or_invalid()?;
-        self.entry_storage()
-            .remove_xattr(cipher_path.as_resolved_path(), &cipher_name)
+        retry_stale(self, || {
+            let cipher_path = self.plain_path_to_cipher(path)?;
+            let cipher_name = plain_xattr_name_to_cipher(self, name)?;
+            self.entry_storage()
+                .remove_xattr(cipher_path.as_resolved_path(), &cipher_name)
+        })
     }
     fn list_xattr(&self, path: &VirtualPath) -> std::io::Result<Vec<String>> {
-        let cipher_path = self.plain_path_to_cipher(path).or_invalid()?;
-        Ok(self
-            .entry_storage()
-            .list_xattr(cipher_path.as_resolved_path())?
-            .into_iter()
-            .filter_map(|name| cipher_xattr_name_to_plain(self, &name).ok())
-            .collect())
+        retry_stale(self, || {
+            let cipher_path = self.plain_path_to_cipher(path)?;
+            Ok(self
+                .entry_storage()
+                .list_xattr(cipher_path.as_resolved_path())?
+                .into_iter()
+                .filter_map(|name| cipher_xattr_name_to_plain(self, &name).ok())
+                .collect())
+        })
     }
 }

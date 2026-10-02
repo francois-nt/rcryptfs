@@ -4,7 +4,7 @@ use crate::core::{
     CipherPathCacheEntry, DirectoryContentLayout, DirectoryLayout, EncryptionLayout,
     EncryptionTranslator, EntryStorage, EntryStorageBackend, PathCache, PathCacheAccess,
     PathLayout, ResolvedStoragePathBuf, Result, RootDirectoryToken, VirtualPath, VirtualPathBuf,
-    default_remove_cached_plain_path,
+    crypto_io_result, default_remove_cached_plain_path,
 };
 
 const PATH_CACHE_RETRIES: usize = 8;
@@ -58,25 +58,19 @@ where
     S: EntryStorage,
     L: DirectoryLayout,
 {
-    type EntryStorage = S;
-    type DirectoryLayout = L;
-
-    fn entry_storage(&self) -> &Self::EntryStorage {
-        self.backend.entry_storage()
-    }
-    fn directory_layout(&self) -> &Self::DirectoryLayout {
-        self.backend.directory_layout()
-    }
     fn remove_cached_plain_path(&self, plain_path: &VirtualPath) {
         default_remove_cached_plain_path(&self.backend, plain_path);
     }
 
     /// Converts a plain path to its cipher text equivalent.
-    fn plain_path_to_cipher(&self, plain_path: &VirtualPath) -> Result<ResolvedStoragePathBuf> {
+    fn plain_path_to_cipher(
+        &self,
+        plain_path: &VirtualPath,
+    ) -> std::io::Result<ResolvedStoragePathBuf> {
         if plain_path.is_empty() {
             return Ok(ResolvedStoragePathBuf::new(
                 VirtualPathBuf::default(),
-                self.entry_storage().get_root_id()?,
+                self.backend.entry_storage().get_root_id()?,
             ));
         }
         for _ in 0..PATH_CACHE_RETRIES {
@@ -85,7 +79,7 @@ where
             let mut partial = VirtualPathBuf::default();
             let mut absolute = ResolvedStoragePathBuf::new(
                 VirtualPathBuf::default(),
-                self.entry_storage().get_root_id()?,
+                self.backend.entry_storage().get_root_id()?,
             );
             let mut invalidated = false;
 
@@ -94,6 +88,7 @@ where
                     CacheLookup::Hit(entry) => entry,
                     CacheLookup::Miss => {
                         let directory = self
+                            .backend
                             .entry_storage()
                             .resolve_directory(absolute.as_resolved_path())?;
                         let entry = CipherPathCacheEntry {
@@ -110,10 +105,9 @@ where
                     }
                 };
                 absolute = ResolvedStoragePathBuf::new(
-                    entry
-                        .contents_path
-                        .path()
-                        .join(self.plain_name_to_cipher(&entry.token, plain_part)?),
+                    entry.contents_path.path().join(crypto_io_result(
+                        self.plain_name_to_cipher(&entry.token, plain_part),
+                    )?),
                     entry.contents_id,
                 );
                 partial.push(plain_part);
@@ -129,7 +123,9 @@ where
                 }
             }
         }
-        anyhow::bail!("path cache changed repeatedly while resolving {plain_path}")
+        Err(std::io::Error::other(format!(
+            "path cache changed repeatedly while resolving {plain_path}"
+        )))
     }
 }
 
@@ -138,22 +134,14 @@ where
     S: AsyncEntryStorage,
     L: DirectoryLayout + 'static,
 {
-    type EntryStorage = S;
-    type DirectoryLayout = L;
-    fn entry_storage(&self) -> &Self::EntryStorage {
-        self.backend.entry_storage()
-    }
-    fn directory_layout(&self) -> &Self::DirectoryLayout {
-        self.backend.directory_layout()
-    }
     async fn plain_path_to_cipher(
         &self,
         plain_path: &VirtualPath,
-    ) -> Result<ResolvedStoragePathBuf> {
+    ) -> std::io::Result<ResolvedStoragePathBuf> {
         if plain_path.is_empty() {
             return Ok(ResolvedStoragePathBuf::new(
                 VirtualPathBuf::default(),
-                self.entry_storage().get_root_id().await?,
+                self.backend.entry_storage().get_root_id().await?,
             ));
         }
         for _ in 0..PATH_CACHE_RETRIES {
@@ -162,7 +150,7 @@ where
             let mut partial = VirtualPathBuf::default();
             let mut absolute = ResolvedStoragePathBuf::new(
                 VirtualPathBuf::default(),
-                self.entry_storage().get_root_id().await?,
+                self.backend.entry_storage().get_root_id().await?,
             );
             let mut invalidated = false;
 
@@ -171,6 +159,7 @@ where
                     CacheLookup::Hit(entry) => entry,
                     CacheLookup::Miss => {
                         let directory = self
+                            .backend
                             .entry_storage()
                             .resolve_directory(absolute.as_resolved_path())
                             .await?;
@@ -188,10 +177,9 @@ where
                     }
                 };
                 absolute = ResolvedStoragePathBuf::new(
-                    entry
-                        .contents_path
-                        .path()
-                        .join(self.plain_name_to_cipher(&entry.token, plain_part)?),
+                    entry.contents_path.path().join(crypto_io_result(
+                        self.plain_name_to_cipher(&entry.token, plain_part),
+                    )?),
                     entry.contents_id,
                 );
                 partial.push(plain_part);
@@ -207,7 +195,9 @@ where
                 }
             }
         }
-        anyhow::bail!("path cache changed repeatedly while resolving {plain_path}")
+        Err(std::io::Error::other(format!(
+            "path cache changed repeatedly while resolving {plain_path}"
+        )))
     }
     fn remove_cached_plain_path(&self, plain_path: &VirtualPath) {
         default_remove_cached_plain_path(&self.backend, plain_path);
@@ -217,11 +207,31 @@ where
 impl<S: EntryStorage, L: DirectoryLayout> EncryptionLayout
     for GoCryptFs<EntryStorageBackend<S, L>>
 {
+    type EntryStorage = S;
+    type DirectoryLayout = L;
+
+    fn entry_storage(&self) -> &Self::EntryStorage {
+        self.backend.entry_storage()
+    }
+
+    fn directory_layout(&self) -> &Self::DirectoryLayout {
+        self.backend.directory_layout()
+    }
 }
 
 impl<S: AsyncEntryStorage, L: DirectoryLayout + 'static> AsyncEncryptionLayout
     for GoCryptFs<EntryStorageBackend<S, L>>
 {
+    type EntryStorage = S;
+    type DirectoryLayout = L;
+
+    fn entry_storage(&self) -> &Self::EntryStorage {
+        self.backend.entry_storage()
+    }
+
+    fn directory_layout(&self) -> &Self::DirectoryLayout {
+        self.backend.directory_layout()
+    }
 }
 
 #[cfg(test)]

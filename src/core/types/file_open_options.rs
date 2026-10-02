@@ -2,7 +2,7 @@ use super::Permissions;
 use std::fs::OpenOptions;
 
 /// Options for opening files.
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct FileOpenOptions {
     // generic
     pub read: bool,

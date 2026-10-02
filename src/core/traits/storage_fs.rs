@@ -154,6 +154,9 @@ impl RenameOperation {
 }
 
 /// Provides the filesystem operations required by encrypted storage layouts.
+///
+/// Identity mismatches must return [`std::io::ErrorKind::StaleNetworkFileHandle`]
+/// before any requested mutation is applied, so callers may safely retry once.
 pub trait StorageFileSystem: Send + Sync + 'static {
     /// Handle returned when opening a file.
     type OpenHandle: FileHandle;
@@ -391,6 +394,10 @@ pub trait StorageFileSystem: Send + Sync + 'static {
 }
 
 /// Provides asynchronous filesystem operations required by encrypted storage layouts.
+///
+/// Identity mismatches must return [`std::io::ErrorKind::StaleNetworkFileHandle`]
+/// before any requested mutation is applied, so callers may safely retry once.
+/// A directory listing must report such a mismatch before yielding its first batch.
 pub trait AsyncStorageFileSystem: Send + Sync + 'static {
     /// Handle returned when opening a file.
     type OpenHandle: AsyncFileHandle;

@@ -3,7 +3,7 @@ use crate::core::{
     CacheCommit, CacheLookup, CipherPathCacheEntry, DirectoryContentLayout, DirectoryLayout,
     EncryptionLayout, EncryptionTranslator, EntryStorage, EntryStorageBackend, OrIoError,
     PathCache, PathCacheAccess, PathLayout, ResolvedStoragePathBuf, Result, RootDirectoryToken,
-    VirtualPath, VirtualPathBuf, default_remove_cached_plain_path,
+    VirtualPath, VirtualPathBuf, crypto_io_result, default_remove_cached_plain_path,
 };
 
 const PATH_CACHE_RETRIES: usize = 8;
@@ -83,7 +83,7 @@ impl<S, L: DirectoryLayout> PathCacheAccess for CryptoMator<EntryStorageBackend<
 fn resolve_folder<S, L>(
     this: &CryptoMator<EntryStorageBackend<S, L>>,
     plain_path: &VirtualPath,
-) -> Result<CipherPathCacheEntry>
+) -> std::io::Result<CipherPathCacheEntry>
 where
     S: EntryStorage,
     L: DirectoryLayout,
@@ -103,7 +103,7 @@ where
         let mut partial = VirtualPathBuf::default();
         let mut absolute = ResolvedStoragePathBuf::new(
             VirtualPathBuf::default(),
-            this.entry_storage().get_root_id()?,
+            this.backend.entry_storage().get_root_id()?,
         );
         let mut invalidated = false;
 
@@ -112,6 +112,7 @@ where
                 CacheLookup::Hit(entry) => entry,
                 CacheLookup::Miss => {
                     let directory = this
+                        .backend
                         .entry_storage()
                         .resolve_directory(absolute.as_resolved_path())?;
                     let entry = CipherPathCacheEntry {
@@ -128,10 +129,9 @@ where
                 }
             };
             absolute = ResolvedStoragePathBuf::new(
-                entry
-                    .contents_path
-                    .path()
-                    .join(this.plain_name_to_cipher(&entry.token, plain_part)?),
+                entry.contents_path.path().join(crypto_io_result(
+                    this.plain_name_to_cipher(&entry.token, plain_part),
+                )?),
                 entry.contents_id,
             );
             partial.push(plain_part);
@@ -141,6 +141,7 @@ where
         }
 
         let directory = this
+            .backend
             .entry_storage()
             .resolve_directory(absolute.as_resolved_path())?;
         let cached = CipherPathCacheEntry {
@@ -157,7 +158,9 @@ where
             }
         }
     }
-    anyhow::bail!("path cache changed repeatedly while resolving {plain_path}")
+    Err(std::io::Error::other(format!(
+        "path cache changed repeatedly while resolving {plain_path}"
+    )))
 }
 
 impl<S, L> PathLayout for CryptoMator<EntryStorageBackend<S, L>>
@@ -165,17 +168,11 @@ where
     S: EntryStorage,
     L: DirectoryLayout,
 {
-    type EntryStorage = S;
-    type DirectoryLayout = L;
-
-    fn entry_storage(&self) -> &Self::EntryStorage {
-        self.backend.entry_storage()
-    }
-    fn directory_layout(&self) -> &Self::DirectoryLayout {
-        self.backend.directory_layout()
-    }
     /// Resolves one logical path to its visible storage entry inside the parent storage directory.
-    fn plain_path_to_cipher(&self, plain_path: &VirtualPath) -> Result<ResolvedStoragePathBuf> {
+    fn plain_path_to_cipher(
+        &self,
+        plain_path: &VirtualPath,
+    ) -> std::io::Result<ResolvedStoragePathBuf> {
         if plain_path.as_str().is_empty() {
             return Ok(resolve_folder(self, plain_path)?.contents_path);
         }
@@ -183,7 +180,7 @@ where
         let parent = plain_path.parent().unwrap_or_else(VirtualPath::root);
         let name = plain_path.file_name().or_invalid()?;
         let parent = resolve_folder(self, parent)?;
-        let cipher_name = self.plain_name_to_cipher(&parent.token, name)?;
+        let cipher_name = crypto_io_result(self.plain_name_to_cipher(&parent.token, name))?;
         Ok(ResolvedStoragePathBuf::new(
             parent.contents_path.path().join(cipher_name),
             parent.contents_id,
@@ -198,6 +195,16 @@ where
 impl<S: EntryStorage, L: DirectoryLayout> EncryptionLayout
     for CryptoMator<EntryStorageBackend<S, L>>
 {
+    type EntryStorage = S;
+    type DirectoryLayout = L;
+
+    fn entry_storage(&self) -> &Self::EntryStorage {
+        self.backend.entry_storage()
+    }
+
+    fn directory_layout(&self) -> &Self::DirectoryLayout {
+        self.backend.directory_layout()
+    }
 }
 
 #[cfg(test)]

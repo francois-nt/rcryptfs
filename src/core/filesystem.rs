@@ -1,9 +1,8 @@
 use crate::core::XattrLayout;
 
 use super::{
-    BufferedFile, CryptFsFile, EncryptionLayout, EncryptionTranslator, EntryStorage, FileHandle,
-    FileOpenOptions, FileSystem, FsDirEntry, Metadata, OrIoError, Permissions, ReadOnlyFileSystem,
-    ResolvedStoragePath, VirtualPath,
+    BufferedFile, CryptFsFile, EncryptionLayout, FileHandle, FileOpenOptions, FileSystem,
+    FsDirEntry, Metadata, Permissions, ReadOnlyFileSystem, VirtualPath,
 };
 
 use std::sync::Arc;
@@ -77,20 +76,16 @@ impl<T> From<(T, Box<dyn FileBufferingPolicy>)> for CleartextFileSystem<T> {
 
 /// Opens an encrypted file and wraps it with the requested cache policy.
 fn try_open_crypt_file<T>(
-    path: ResolvedStoragePath<'_>,
+    path: &VirtualPath,
     backend: Arc<T>,
-    mut options: FileOpenOptions,
+    options: FileOpenOptions,
     cache_policy: &dyn FileBufferingPolicy,
 ) -> std::io::Result<Box<dyn FileHandle>>
 where
-    T: EncryptionTranslator + EncryptionLayout + Send + Sync + 'static,
+    T: EncryptionLayout + Send + Sync + 'static,
 {
-    if options.append {
-        options.write = true;
-    }
     let readonly = options.is_readonly();
-    options.read(true).append(false);
-    let cipher_file = backend.entry_storage().open_file_with(path, options)?;
+    let cipher_file = backend.open_file_with(path, options)?;
     let crypt_file = CryptFsFile::try_from_file(cipher_file, backend, readonly)?;
 
     if cache_policy.cache_write() {
@@ -105,18 +100,12 @@ where
 
 impl<T> ReadOnlyFileSystem for CleartextFileSystem<T>
 where
-    T: EncryptionTranslator + EncryptionLayout + XattrLayout + Send + Sync + 'static,
+    T: EncryptionLayout + XattrLayout + Send + Sync + 'static,
 {
     fn open_readonly(&self, path: &VirtualPath) -> std::io::Result<Box<dyn FileHandle>> {
-        let cipher_path = self.fs.plain_path_to_cipher(path).or_invalid()?;
         let mut options = FileOpenOptions::default();
         options.read(true);
-        try_open_crypt_file(
-            cipher_path.as_resolved_path(),
-            self.fs.clone(),
-            options,
-            self.cache_policy.as_ref(),
-        )
+        try_open_crypt_file(path, self.fs.clone(), options, self.cache_policy.as_ref())
     }
     fn metadata(&self, path: &VirtualPath) -> std::io::Result<Metadata> {
         self.fs.metadata(path)
@@ -144,7 +133,7 @@ where
 
 impl<T> FileSystem for CleartextFileSystem<T>
 where
-    T: EncryptionTranslator + EncryptionLayout + XattrLayout + Send + Sync + 'static,
+    T: EncryptionLayout + XattrLayout + Send + Sync + 'static,
 {
     /// Opens a file with the specified options.
     fn open_file_with(
@@ -152,13 +141,7 @@ where
         path: &VirtualPath,
         options: FileOpenOptions,
     ) -> std::io::Result<Box<dyn FileHandle>> {
-        let cipher_path = self.fs.plain_path_to_cipher(path).or_invalid()?;
-        try_open_crypt_file(
-            cipher_path.as_resolved_path(),
-            self.fs.clone(),
-            options,
-            self.cache_policy.as_ref(),
-        )
+        try_open_crypt_file(path, self.fs.clone(), options, self.cache_policy.as_ref())
     }
     /// Creates a new directory with given permissions.
     fn mkdir(
@@ -203,10 +186,7 @@ where
         self.fs.set_time(path, atime, mtime)
     }
     fn chown(&self, path: &VirtualPath, uid: Option<u32>, gid: Option<u32>) -> std::io::Result<()> {
-        let cipher_path = self.fs.plain_path_to_cipher(path).or_invalid()?;
-        self.fs
-            .entry_storage()
-            .chown(cipher_path.as_resolved_path(), uid, gid)
+        self.fs.chown(path, uid, gid)
     }
     fn create_symlink(&self, path: &VirtualPath, target_path: &str) -> std::io::Result<Metadata> {
         self.fs.create_symlink(path, target_path)

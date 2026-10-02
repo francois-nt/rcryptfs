@@ -4,9 +4,9 @@ use super::{
 };
 use crate::{
     core::{
-        Backend, ConfigFileSystem, EncryptionTranslator, EntryStorage, EntryStorageBackend,
-        MasterKey, NativeFileSystem, PathLayout, Result, StorageConfigFileSystem, Utf8Path,
-        VirtualPath, VirtualPathBuf, XattrLayout, encrypted_directory_id_backup,
+        Backend, ConfigFileSystem, EncryptionLayout, EncryptionTranslator, EntryStorage,
+        EntryStorageBackend, MasterKey, NativeFileSystem, Result, StorageConfigFileSystem,
+        Utf8Path, VirtualPath, VirtualPathBuf, XattrLayout, encrypted_directory_id_backup,
         select_root_directory_token,
     },
     cryptomator::DefaultCryptomatorEntryStorage,
@@ -614,13 +614,13 @@ impl<T: Backend> CryptoMator<T> {
     }
 }
 
-impl<T: Backend> XattrLayout for CryptoMator<T> where Self: PathLayout {}
+impl<T: Backend> XattrLayout for CryptoMator<T> where Self: EncryptionLayout {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::ResolvedStoragePath;
-    use crate::core::{PathLayout, StorageFileSystem};
+    use crate::core::StorageFileSystem;
     use tempfile::tempdir;
 
     /// Returns deterministic master keys for vault tests.
