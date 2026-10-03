@@ -1,16 +1,9 @@
 use crate::core::{VirtualPath, VirtualPathBuf};
 use parking_lot::{Condvar, Mutex};
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum ScopeMode {
-    Shared,
-    Exclusive,
-}
-
-/// One pending or active set of namespace paths.
 struct NamespaceScope {
     id: u64,
-    mode: ScopeMode,
+    exclusive: bool,
     paths: Vec<VirtualPathBuf>,
 }
 
@@ -41,7 +34,7 @@ impl NamespaceLockManager {
         I: IntoIterator<Item = P>,
         P: AsRef<VirtualPath>,
     {
-        self.acquire(ScopeMode::Shared, paths)
+        self.acquire(false, paths)
     }
 
     /// Acquires a scope excluding every overlapping namespace mutation.
@@ -53,27 +46,35 @@ impl NamespaceLockManager {
         I: IntoIterator<Item = P>,
         P: AsRef<VirtualPath>,
     {
-        self.acquire(ScopeMode::Exclusive, paths)
+        self.acquire(true, paths)
     }
 
-    fn acquire<I, P>(&self, mode: ScopeMode, paths: I) -> std::io::Result<NamespaceScopeGuard<'_>>
+    fn acquire<I, P>(&self, exclusive: bool, paths: I) -> std::io::Result<NamespaceScopeGuard<'_>>
     where
         I: IntoIterator<Item = P>,
         P: AsRef<VirtualPath>,
     {
         let paths = normalize_scope(paths)?;
         let mut state = self.state.lock();
+
         let id = state.next_id;
-        state.next_id = state
-            .next_id
+        state.next_id = id
             .checked_add(1)
             .ok_or_else(|| std::io::Error::other("namespace lock identifier overflow"))?;
-        state.waiting.push(NamespaceScope { id, mode, paths });
+
+        state.waiting.push(NamespaceScope {
+            id,
+            exclusive,
+            paths,
+        });
 
         loop {
-            let Some(position) = state.waiting.iter().position(|scope| scope.id == id) else {
-                return Err(std::io::Error::other("waiting namespace scope disappeared"));
-            };
+            let position = state
+                .waiting
+                .iter()
+                .position(|scope| scope.id == id)
+                .ok_or_else(|| std::io::Error::other("waiting namespace scope disappeared"))?;
+
             if can_activate(&state, position) {
                 let scope = state.waiting.remove(position);
                 state.active.push(scope);
@@ -102,38 +103,18 @@ fn can_activate(state: &NamespaceLockState, position: usize) -> bool {
     !state
         .active
         .iter()
-        .any(|active| scopes_conflict(request, active))
-        && !state.waiting[..position]
-            .iter()
-            .any(|waiting| scopes_conflict(request, waiting))
+        .chain(&state.waiting[..position])
+        .any(|scope| conflicts(request, scope))
 }
 
 /// Returns whether two scopes need exclusive access to overlapping paths.
-fn scopes_conflict(left: &NamespaceScope, right: &NamespaceScope) -> bool {
-    (left.mode == ScopeMode::Exclusive || right.mode == ScopeMode::Exclusive)
-        && left.paths.iter().any(|left_path| {
-            right
-                .paths
+fn conflicts(a: &NamespaceScope, b: &NamespaceScope) -> bool {
+    (a.exclusive || b.exclusive)
+        && a.paths.iter().any(|a| {
+            b.paths
                 .iter()
-                .any(|right_path| paths_overlap(left_path, right_path))
+                .any(|b| a.is_ancestor_or_same(b) || b.is_ancestor_or_same(a))
         })
-}
-
-/// Returns whether either path contains the other.
-fn paths_overlap(left: &VirtualPath, right: &VirtualPath) -> bool {
-    is_ancestor_or_same(left, right) || is_ancestor_or_same(right, left)
-}
-
-/// Returns whether both paths are equal or the first contains the second.
-fn is_ancestor_or_same(ancestor: &VirtualPath, path: &VirtualPath) -> bool {
-    if ancestor.is_empty() {
-        return true;
-    }
-    path.as_str() == ancestor.as_str()
-        || path
-            .as_str()
-            .strip_prefix(ancestor.as_str())
-            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 /// Normalizes, deduplicates, and removes redundant descendant paths.
@@ -142,46 +123,15 @@ where
     I: IntoIterator<Item = P>,
     P: AsRef<VirtualPath>,
 {
-    let mut normalized = Vec::new();
-    for path in paths {
-        let mut components = Vec::new();
-        for component in path.as_ref().components() {
-            match component {
-                "." => {}
-                ".." => {
-                    if components.pop().is_none() {
-                        return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
-                    }
-                }
-                component if component.contains('\0') => {
-                    return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
-                }
-                component => components.push(component),
-            }
-        }
-        let mut path = VirtualPathBuf::default();
-        for component in components {
-            path.push(component);
-        }
-        normalized.push(path);
-    }
+    let mut paths: Vec<_> = paths
+        .into_iter()
+        .map(|path| path.as_ref().normalize())
+        .collect::<std::io::Result<_>>()?;
 
-    normalized.sort_by(|left, right| {
-        left.components()
-            .count()
-            .cmp(&right.components().count())
-            .then_with(|| left.cmp(right))
-    });
-    let mut scope: Vec<VirtualPathBuf> = Vec::with_capacity(normalized.len());
-    for path in normalized {
-        if !scope
-            .iter()
-            .any(|ancestor| is_ancestor_or_same(ancestor.as_path(), path.as_path()))
-        {
-            scope.push(path);
-        }
-    }
-    Ok(scope)
+    paths.sort_unstable();
+    paths.dedup_by(|path, parent| parent.is_ancestor_or_same(path.as_path()));
+
+    Ok(paths)
 }
 
 #[cfg(test)]

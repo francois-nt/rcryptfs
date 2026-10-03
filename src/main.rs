@@ -273,7 +273,7 @@ fn run_mount(mount_args: &MountArgs, is_background_child: bool) -> Result<()> {
             .and_then(|v| parse_number_of_threads(v))
             .filter(|v| *v > 0)
             .map(fuser_ng::ThreadCount::from)
-            .unwrap_or_default();
+            .unwrap_or_else(|| 1.into());
 
         log::debug!("num threads is {num_threads:?}");
         let mut fuse_args = Vec::with_capacity(mount_args.fuse_opts.len() + 1);

@@ -1,4 +1,6 @@
-use crate::core::{Backend, DirectoryLayout, PathCacheAccess, StorageDirectoryId, VirtualPath};
+use crate::core::{
+    Backend, DirectoryLayout, PathCacheAccess, StorageDirectoryId, VirtualPath, VirtualPathBuf,
+};
 use parking_lot::{Condvar, Mutex};
 use std::{
     collections::BTreeMap,
@@ -22,14 +24,14 @@ pub struct CipherPathCacheEntry {
 struct PathCacheState {
     next_snapshot: u64,
     snapshots: BTreeMap<u64, ActiveSnapshot>,
-    mutations: Vec<String>,
-    entries: BTreeMap<String, CipherPathCacheEntry>,
+    mutations: Vec<VirtualPathBuf>,
+    entries: BTreeMap<VirtualPathBuf, CipherPathCacheEntry>,
     waiters: Vec<Waker>,
 }
 
 /// Resolution registered while storage I/O runs without the cache lock.
 struct ActiveSnapshot {
-    path: String,
+    path: VirtualPathBuf,
     invalidated: bool,
 }
 
@@ -64,23 +66,23 @@ pub enum CacheCommit {
     /// The resolved path changed before the staged entries could be published.
     Invalidated,
     /// Another resolution produced a different entry for this plain path.
-    Conflict(String),
+    Conflict(VirtualPathBuf),
 }
 
 /// Invalidates cached paths around one namespace mutation.
 pub struct PathCacheMutation<'a> {
     cache: &'a PathCache,
-    paths: Vec<String>,
+    paths: Vec<VirtualPathBuf>,
 }
 
 impl PathCache {
     /// Waits synchronously until no relevant namespace mutation is running.
     pub fn snapshot_blocking(&self, path: &VirtualPath) -> PathCacheSnapshot<'_> {
         let mut state = self.state.lock();
-        while has_relevant_mutation(&state, path.as_str()) {
+        while has_relevant_mutation(&state, path) {
             self.stable.wait(&mut state);
         }
-        let id = state.register_snapshot(path.as_str().to_owned());
+        let id = state.register_snapshot(path.to_owned());
         PathCacheSnapshot {
             cache: self,
             id,
@@ -90,7 +92,7 @@ impl PathCache {
 
     /// Waits asynchronously until no relevant namespace mutation is running.
     pub async fn snapshot_async(&self, path: &VirtualPath) -> PathCacheSnapshot<'_> {
-        let path = path.as_str().to_owned();
+        let path = path.to_owned();
         let id = poll_fn(|context| {
             let mut state = self.state.lock();
             if has_relevant_mutation(&state, &path) {
@@ -119,7 +121,7 @@ impl PathCache {
     pub fn begin_mutation(&self, paths: &[&VirtualPath]) -> PathCacheMutation<'_> {
         let paths = paths
             .iter()
-            .map(|path| path.as_str().to_owned())
+            .map(|path| (*path).to_owned())
             .collect::<Vec<_>>();
         let mut state = self.state.lock();
         state.mutations.extend(paths.iter().cloned());
@@ -134,11 +136,11 @@ impl PathCache {
     /// Invalidates one cached path and every cached descendant.
     pub fn invalidate(&self, path: &VirtualPath) {
         let mut state = self.state.lock();
-        invalidate_snapshots(&mut state.snapshots, path.as_str());
-        invalidate_subtree(&mut state.entries, path.as_str());
+        invalidate_snapshots(&mut state.snapshots, path);
+        invalidate_subtree(&mut state.entries, path);
     }
 
-    fn finish_mutation(&self, paths: &[String]) {
+    fn finish_mutation(&self, paths: &[VirtualPathBuf]) {
         let waiters = {
             let mut state = self.state.lock();
             for path in paths {
@@ -157,7 +159,7 @@ impl PathCache {
 }
 
 impl PathCacheState {
-    fn register_snapshot(&mut self, path: String) -> u64 {
+    fn register_snapshot(&mut self, path: VirtualPathBuf) -> u64 {
         let id = self.next_snapshot;
         self.next_snapshot = self.next_snapshot.wrapping_add(1);
         let _ = self.snapshots.insert(
@@ -184,14 +186,14 @@ impl PathCacheSnapshot<'_> {
         } else {
             state
                 .entries
-                .get(path.as_str())
+                .get(path)
                 .cloned()
                 .map_or(CacheLookup::Miss, CacheLookup::Hit)
         }
     }
 
     /// Publishes completed resolutions if this snapshot is still current.
-    pub fn commit(mut self, staged: Vec<(String, CipherPathCacheEntry)>) -> CacheCommit {
+    pub fn commit(mut self, staged: Vec<(VirtualPathBuf, CipherPathCacheEntry)>) -> CacheCommit {
         let mut state = self.cache.state.lock();
         let conflict = staged.iter().find_map(|(path, candidate)| {
             state
@@ -233,35 +235,31 @@ impl Drop for PathCacheMutation<'_> {
     }
 }
 
-fn mutation_affects_path(mutation: &str, path: &str) -> bool {
-    mutation.is_empty()
-        || mutation == path
-        || path
-            .strip_prefix(mutation)
-            .is_some_and(|p| p.starts_with('/'))
-}
-
-fn has_relevant_mutation(state: &PathCacheState, path: &str) -> bool {
+fn has_relevant_mutation(state: &PathCacheState, path: &VirtualPath) -> bool {
     state
         .mutations
         .iter()
-        .any(|mutation| mutation_affects_path(mutation, path))
+        .any(|mutation| mutation.is_ancestor_or_same(path))
 }
 
-fn invalidate_snapshots(snapshots: &mut BTreeMap<u64, ActiveSnapshot>, path: &str) {
+fn invalidate_snapshots(snapshots: &mut BTreeMap<u64, ActiveSnapshot>, path: &VirtualPath) {
     for snapshot in snapshots.values_mut() {
-        snapshot.invalidated |= mutation_affects_path(path, &snapshot.path);
+        snapshot.invalidated |= path.is_ancestor_or_same(&snapshot.path);
     }
 }
 
-fn invalidate_subtree(entries: &mut BTreeMap<String, CipherPathCacheEntry>, path: &str) {
-    if path.is_empty() {
-        entries.clear();
-    } else {
-        entries.remove(path);
-        let prefix = format!("{path}/");
-        let end = format!("{path}0"); // b'0' == b'/' + 1
-        entries.extract_if(prefix..end, |_, _| true).for_each(drop); // [prefix, end[ was removed.
+fn invalidate_subtree(
+    entries: &mut BTreeMap<VirtualPathBuf, CipherPathCacheEntry>,
+    path: &VirtualPath,
+) {
+    let mut tail = entries.split_off(&path.to_owned());
+    if let Some(end) = tail
+        .keys()
+        .find(|candidate| !path.is_ancestor_or_same(candidate))
+        .cloned()
+    {
+        let mut after = tail.split_off(&end);
+        entries.append(&mut after);
     }
 }
 
@@ -345,12 +343,16 @@ mod tests {
         ));
         assert!(matches!(
             snapshot.commit(vec![
-                (String::new(), cache_entry(0, VirtualPathBuf::default())),
+                (
+                    VirtualPathBuf::default(),
+                    cache_entry(0, VirtualPathBuf::default()),
+                ),
                 ("docs".into(), cache_entry(1, "cipher-docs")),
                 (
                     "docs/nested".into(),
                     cache_entry(2, "cipher-docs/cipher-nested"),
                 ),
+                ("docs!".into(), cache_entry(3, "cipher-docs-sibling")),
             ]),
             CacheCommit::Committed
         ));
@@ -368,6 +370,10 @@ mod tests {
         assert!(matches!(
             snapshot.lookup(VirtualPath::new("docs/nested")),
             CacheLookup::Miss
+        ));
+        assert!(matches!(
+            snapshot.lookup(VirtualPath::new("docs!")),
+            CacheLookup::Hit(_)
         ));
     }
 

@@ -507,7 +507,7 @@ mod tests {
             if attempt == 0 {
                 let snapshot = layout.0.snapshot_blocking(VirtualPath::root());
                 snapshot.commit(vec![(
-                    String::new(),
+                    VirtualPathBuf::default(),
                     CipherPathCacheEntry {
                         token: Vec::new(),
                         contents_path: ResolvedStoragePathBuf::new(

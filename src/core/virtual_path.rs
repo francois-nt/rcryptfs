@@ -1,10 +1,26 @@
 use camino::{Utf8Path, Utf8PathBuf};
-use std::{borrow::Borrow, fmt, ops::Deref, str::FromStr};
+use std::{borrow::Borrow, cmp::Ordering, fmt, ops::Deref, str::FromStr};
 
 /// Borrowed UTF-8 path whose only separator is the Unix slash.
 #[repr(transparent)]
-#[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(PartialEq, Eq, Hash)]
 pub struct VirtualPath(str);
+
+impl Ord for VirtualPath {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.components()
+            .cmp(other.components())
+            // Keep Ord consistent with Eq for non-canonical paths
+            // such as "a/b" and "a//b".
+            .then_with(|| self.as_str().cmp(other.as_str()))
+    }
+}
+
+impl PartialOrd for VirtualPath {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
 impl VirtualPath {
     /// Returns the virtual filesystem root.
@@ -60,6 +76,36 @@ impl VirtualPath {
         result.push(path);
         result
     }
+
+    pub fn normalize(&self) -> std::io::Result<VirtualPathBuf> {
+        let mut components = Vec::new();
+
+        for component in self.components() {
+            match component {
+                "." => {}
+                ".." => {
+                    components.pop().ok_or_else(invalid_path)?;
+                }
+                component if component.contains('\0') => return Err(invalid_path()),
+                component => components.push(component),
+            }
+        }
+
+        Ok(components.join("/").into())
+    }
+    /// Returns whether both paths are equal or the first contains the second.
+    pub fn is_ancestor_or_same(&self, path: &VirtualPath) -> bool {
+        self.is_empty()
+            || path.as_str() == self.as_str()
+            || path
+                .as_str()
+                .strip_prefix(self.as_str())
+                .is_some_and(|suffix| suffix.starts_with('/'))
+    }
+}
+
+fn invalid_path() -> std::io::Error {
+    std::io::Error::from_raw_os_error(libc::EINVAL)
 }
 
 /// Joins virtual paths below native UTF-8 roots.
@@ -135,8 +181,20 @@ impl ToOwned for VirtualPath {
 }
 
 /// Owned UTF-8 path whose only separator is the Unix slash.
-#[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Default, PartialEq, Eq, Hash)]
 pub struct VirtualPathBuf(String);
+
+impl Ord for VirtualPathBuf {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.as_path().cmp(other.as_path())
+    }
+}
+
+impl PartialOrd for VirtualPathBuf {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
 impl VirtualPathBuf {
     /// Returns this owned path as a borrowed Unix path.
@@ -282,5 +340,33 @@ mod tests {
             root.join_virtual_path(VirtualPath::new("a/../../hello"))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn ordering_is_lexicographical_by_components() {
+        let mut paths = [
+            VirtualPathBuf::from("b"),
+            VirtualPathBuf::from("a-b"),
+            VirtualPathBuf::from("a/c"),
+            VirtualPathBuf::from("a/b/c"),
+            VirtualPathBuf::from("a"),
+            VirtualPathBuf::from("a/b"),
+        ];
+
+        paths.sort();
+
+        assert_eq!(
+            paths.map(|path| path.as_str().to_owned()),
+            ["a", "a/b", "a/b/c", "a/c", "a-b", "b",]
+        );
+    }
+
+    #[test]
+    fn ordering_remains_consistent_with_equality() {
+        let a = VirtualPath::new("a/b");
+        let b = VirtualPath::new("a//b");
+
+        assert_ne!(a, b);
+        assert_ne!(a.cmp(b), Ordering::Equal);
     }
 }

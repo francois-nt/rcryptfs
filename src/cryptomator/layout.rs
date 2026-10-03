@@ -120,7 +120,7 @@ where
                         contents_path: directory.contents_path,
                         contents_id: directory.contents_id,
                     };
-                    staged.push((partial.as_str().to_owned(), entry.clone()));
+                    staged.push((partial.clone(), entry.clone()));
                     entry
                 }
                 CacheLookup::Invalidated => {
@@ -149,7 +149,7 @@ where
             contents_path: directory.contents_path,
             contents_id: directory.contents_id,
         };
-        staged.push((partial.as_str().to_owned(), cached.clone()));
+        staged.push((partial.clone(), cached.clone()));
         match snapshot.commit(staged) {
             CacheCommit::Committed => return Ok(cached),
             CacheCommit::Invalidated => {}
