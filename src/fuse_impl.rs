@@ -96,7 +96,7 @@ impl HasFlag for u32 {
 }
 
 /// Opens a file through the filesystem backend and stores it in the open file table.
-fn open<T: FileSystem + ?Sized, C: OpenFileTable>(
+fn open<T: FileSystem<dyn FileHandle> + ?Sized, C: OpenFileTable>(
     backend: &T,
     open_files: &C,
     inode: u64,
@@ -524,7 +524,7 @@ impl<C: OpenFileTable> Filesystem for FileSystemSession<C> {
     }
 }
 
-fn readdir<T: ReadOnlyFileSystem + ?Sized>(
+fn readdir<T: ReadOnlyFileSystem<dyn FileHandle> + ?Sized>(
     fs: impl AsRef<T>,
     path: &ResolvedPath,
 ) -> fuser_ng::ResultReaddirBatch {
@@ -572,7 +572,7 @@ fn readdir<T: ReadOnlyFileSystem + ?Sized>(
     Ok(result)
 }
 
-fn getattr<T: ReadOnlyFileSystem + ?Sized, C: OpenFileTable>(
+fn getattr<T: ReadOnlyFileSystem<dyn FileHandle> + ?Sized, C: OpenFileTable>(
     fs: impl AsRef<T>,
     open_files: &C,
     _req: RequestInfo,
@@ -647,7 +647,7 @@ fn check_access(
     Ok(())
 }
 
-fn access<T: ReadOnlyFileSystem + ?Sized>(
+fn access<T: ReadOnlyFileSystem<dyn FileHandle> + ?Sized>(
     fs: impl AsRef<T>,
     req: RequestInfo,
     path: &ResolvedPath,

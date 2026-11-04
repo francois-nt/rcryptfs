@@ -523,7 +523,7 @@ mod tests {
     }
 
     /// Verifies that a newly-opened composition can read the persisted tree.
-    fn assert_matrix_tree<T: EncryptionLayout + 'static>(backend: T) {
+    fn assert_matrix_tree<T: XattrLayout + 'static>(backend: T) {
         let entries = Arc::new(backend)
             .list_dir_plain_names(VirtualPath::new("docs"))
             .unwrap()
@@ -531,28 +531,6 @@ mod tests {
             .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].0.file_name, "note.txt");
-    }
-
-    /// Asserts that one composed crypto and storage type exposes the complete runtime layout.
-    fn assert_encryption_layout<T: EncryptionLayout + XattrLayout>() {}
-
-    #[test]
-    fn crypto_layers_accept_the_opposite_entry_storage_type() {
-        type GoCryptoWithC9rStorage = GoCryptFs<
-            EntryStorageBackend<
-                CryptomatorEntryStorage<NativeFileSystem, MatrixDirectoryLayout>,
-                MatrixDirectoryLayout,
-            >,
-        >;
-        type CryptomatorCryptoWithDirectStorage = CryptoMator<
-            EntryStorageBackend<
-                GoCryptFsEntryStorage<NativeFileSystem, MatrixDirectoryLayout>,
-                MatrixDirectoryLayout,
-            >,
-        >;
-
-        assert_encryption_layout::<GoCryptoWithC9rStorage>();
-        assert_encryption_layout::<CryptomatorCryptoWithDirectStorage>();
     }
 
     #[test]

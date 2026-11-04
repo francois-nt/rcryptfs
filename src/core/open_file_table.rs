@@ -1,4 +1,4 @@
-use super::{FileCapabilities, FileHandle, OpenFileTable, OrIoError};
+use super::{FileCapabilities, FileHandle, Handler, OpenFileTable, OrIoError};
 use parking_lot::{Condvar, Mutex, RwLock};
 use std::{
     collections::HashMap,
@@ -21,14 +21,14 @@ impl OpenFileTable for UnsafeOpenFileTable {
         opener: F,
     ) -> std::io::Result<u64>
     where
-        F: FnOnce() -> std::io::Result<Box<dyn FileHandle>>,
+        F: FnOnce() -> std::io::Result<Handler<dyn FileHandle>>,
     {
         let file = opener()?;
         let file = Box::new(file);
         Ok(Box::into_raw(file) as usize as u64)
     }
     fn release(&self, id: u64) -> std::io::Result<()> {
-        let file = unsafe { Box::from_raw(id as usize as *mut Box<dyn FileHandle>) };
+        let file = unsafe { Box::from_raw(id as usize as *mut Handler<dyn FileHandle>) };
         let result = file.flush();
         drop(file);
         result
@@ -38,13 +38,13 @@ impl OpenFileTable for UnsafeOpenFileTable {
         id: u64,
         handler: F,
     ) -> std::io::Result<U> {
-        let file = unsafe { &*(id as usize as *const Box<dyn FileHandle>) };
-        handler(file.as_ref())
+        let file = unsafe { &*(id as usize as *const Handler<dyn FileHandle>) };
+        handler(&**file)
     }
 }
 
 struct SharedHandle {
-    file: Box<dyn FileHandle>,
+    file: Handler<dyn FileHandle>,
     capabilities: FileCapabilities,
 }
 
@@ -70,7 +70,7 @@ impl SharedFile {
         opener: F,
     ) -> std::io::Result<()>
     where
-        F: FnOnce() -> std::io::Result<Box<dyn FileHandle>>,
+        F: FnOnce() -> std::io::Result<Handler<dyn FileHandle>>,
     {
         let _open_guard = self.open_gate.lock();
         let needs_replacement =
@@ -97,7 +97,7 @@ impl SharedFile {
     {
         let handle = self.handle.read();
         let handle = handle.as_ref().or_io_error(libc::EBADF)?;
-        handler(handle.file.as_ref())
+        handler(&*handle.file)
     }
 
     /// Flushes the physical handle before the final open reference is removed.
@@ -214,7 +214,7 @@ impl OpenFileTable for LockedOpenFileTable {
         opener: F,
     ) -> std::io::Result<u64>
     where
-        F: FnOnce() -> std::io::Result<Box<dyn FileHandle>>,
+        F: FnOnce() -> std::io::Result<Handler<dyn FileHandle>>,
     {
         let shared = self.reserve_inode(inode);
         if let Err(error) = shared.open(capabilities, replace_existing, opener) {
@@ -265,7 +265,7 @@ impl OpenFileTable for LockedOpenFileTable {
         let handle = shared.handle.read();
         match handle.as_ref() {
             Some(handle) if handle.capabilities.contains(capabilities) => {
-                handler(handle.file.as_ref()).map(Some)
+                handler(&*handle.file).map(Some)
             }
             _ => Ok(None),
         }
@@ -357,12 +357,29 @@ mod tests {
         identity: u64,
         flushes: &Arc<AtomicUsize>,
         drops: &Arc<AtomicUsize>,
-    ) -> Box<dyn FileHandle> {
-        Box::new(TestFile {
+    ) -> Handler<dyn FileHandle> {
+        Handler::<dyn FileHandle>::from_repr(Box::new(TestFile {
             identity,
             flushes: flushes.clone(),
             drops: drops.clone(),
-        })
+        }))
+    }
+
+    #[test]
+    fn unsafe_table_releases_its_stored_handler() {
+        let table = UnsafeOpenFileTable;
+        let flushes = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let id = table
+            .open(7, FileCapabilities::ReadWrite, false, || {
+                Ok(test_file(42, &flushes, &drops))
+            })
+            .unwrap();
+
+        assert_eq!(table.access(id, Size::size).unwrap(), 42);
+        table.release(id).unwrap();
+        assert_eq!(flushes.load(Ordering::Relaxed), 1);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
     }
 
     #[test]

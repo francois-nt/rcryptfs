@@ -141,7 +141,9 @@ impl<W: FileHandle> ModifiedTime for BufferedFile<W> {
 
 impl<W: FileHandle> SetLen for BufferedFile<W> {
     fn set_len(&self, new_size: u64) -> std::io::Result<()> {
-        self.flush_staging()?;
+        // Keep concurrent writes out until the inner resize completes.
+        let mut state = self.state.lock();
+        self.flush_staging_locked(&mut state)?;
         self.inner.set_len(new_size)
     }
 }
@@ -259,7 +261,6 @@ mod tests {
         buffered.write_all_at(100, b"abc").unwrap();
 
         assert_eq!(buffered.size().unwrap(), 103);
-        assert_file_handle(&buffered);
     }
 
     #[test]
@@ -281,6 +282,4 @@ mod tests {
         buffered.flush().unwrap();
         assert_eq!(buffered.inner.get_modified().unwrap(), requested);
     }
-
-    fn assert_file_handle(_file: &impl FileHandle) {}
 }

@@ -299,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn create_and_read_symlink_roundtrip() {
+    fn symlink_roundtrip_preserves_metadata_and_listing() {
         let (_temp_dir, backend) = test_backend();
 
         backend.create_symlink(p("link"), "../target.txt").unwrap();
@@ -310,12 +310,6 @@ mod tests {
         assert_eq!(target, "../target.txt");
         assert!(metadata.file_type == FileType::SymLink);
         assert!(u16::from(metadata.permissions) == 0o777);
-    }
-
-    #[test]
-    fn list_dir_plain_names_returns_symlink_entry() {
-        let (_temp_dir, backend) = test_backend();
-        backend.create_symlink(p("link"), "../target.txt").unwrap();
 
         let entries: Vec<_> = Arc::from(backend)
             .list_dir_plain_names(p(""))

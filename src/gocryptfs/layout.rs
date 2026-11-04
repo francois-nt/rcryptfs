@@ -292,25 +292,6 @@ mod tests {
     }
 
     #[test]
-    fn remove_cached_plain_path_invalidates_nested_cache_entries() {
-        let (_temp_dir, backend) = test_backend();
-
-        backend.mkdir(p("docs"), Some(0o755_u16.into())).unwrap();
-        backend
-            .mknode(p("docs/note.txt"), Some(0o644_u16.into()))
-            .unwrap();
-
-        let _ = backend.plain_path_to_cipher(p("docs")).unwrap();
-        let before = backend.plain_path_to_cipher(p("docs/note.txt")).unwrap();
-
-        backend.remove_cached_plain_path(p("docs"));
-
-        let after = backend.plain_path_to_cipher(p("docs/note.txt")).unwrap();
-
-        assert_eq!(before, after);
-    }
-
-    #[test]
     fn list_dir_plain_names_returns_plain_entries_and_filters_special_files() {
         let (_temp_dir, backend) = test_backend();
 

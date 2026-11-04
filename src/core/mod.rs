@@ -1,5 +1,6 @@
 mod backend_provider;
 mod buffered_file;
+mod cleartext_file;
 mod cryptfs_file;
 mod filesystem;
 mod open_file_table;
@@ -11,6 +12,7 @@ pub use backend_provider::{
     BackendProvider, MasterKey, PROVIDERS, build_filesystem, get_providers_name, init_filesystem,
 };
 pub use buffered_file::BufferedFile;
+pub use cleartext_file::CleartextFile;
 pub use cryptfs_file::CryptFsFile;
 pub use filesystem::{CleartextFileSystem, FileBuffering, FileBufferingPolicy, NoBuffering};
 pub use open_file_table::{LockedOpenFileTable, UnsafeOpenFileTable};

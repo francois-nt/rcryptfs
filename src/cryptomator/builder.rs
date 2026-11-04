@@ -1,10 +1,13 @@
 use super::CryptoMator;
 use crate::core::{
-    BackendProvider, CleartextFileSystem, ConfigFileSystem, DirectoryLayout, EntryStorage,
-    EntryStorageBackend, FileBufferingPolicy, FileSystem, MasterKey, NativeFileSystem, Result,
-    StorageConfigFileSystem,
+    BackendProvider, CleartextFileSystem, ConfigFileSystem, DirectoryLayout, DynamicFileSystem,
+    EntryStorage, EntryStorageBackend, FileBufferingPolicy, Handler, MasterKey, NativeFileSystem,
+    Result, StorageConfigFileSystem,
 };
 use crate::{Utf8Path, register_provider};
+
+/// Concrete filesystem built over the supplied entry and directory layouts.
+type BuiltFileSystem<S, L> = CleartextFileSystem<CryptoMator<EntryStorageBackend<S, L>>>;
 
 /// Backend provider for Cryptomator repositories.
 pub struct CryptoMatorBuilder;
@@ -25,7 +28,7 @@ impl CryptoMatorBuilder {
         config_fs: &C,
         password: &str,
         cache_policy: Box<dyn FileBufferingPolicy>,
-    ) -> Result<Box<dyn FileSystem>>
+    ) -> Result<Handler<BuiltFileSystem<S, L>>>
     where
         S: EntryStorage,
         L: DirectoryLayout + 'static,
@@ -36,7 +39,7 @@ impl CryptoMatorBuilder {
             cache_policy,
         )
             .into();
-        Ok(Box::new(cryptfs))
+        Ok(Handler::new(cryptfs))
     }
 
     /// Initializes a Cryptomator crypto configuration over an entry representation.
@@ -44,14 +47,13 @@ impl CryptoMatorBuilder {
         backend: &EntryStorageBackend<S, L>,
         config_fs: &C,
         password: &str,
-    ) -> Result<Box<dyn MasterKey>>
+    ) -> Result<Handler<impl MasterKey + 'static + use<S, L, C>>>
     where
         S: EntryStorage,
         L: DirectoryLayout,
         C: ConfigFileSystem + ?Sized,
     {
-        CryptoMator::init_with_backend(backend, config_fs, password)
-            .map(|keys| -> Box<dyn MasterKey> { Box::new(keys) })
+        CryptoMator::init_with_backend(backend, config_fs, password).map(Handler::new)
     }
 }
 
@@ -68,17 +70,17 @@ impl BackendProvider for CryptoMatorBuilder {
         root: &Utf8Path,
         password: &str,
         cache_policy: Box<dyn FileBufferingPolicy>,
-    ) -> Result<Box<dyn FileSystem>> {
+    ) -> Result<Handler<DynamicFileSystem>> {
         let cryptfs: CleartextFileSystem<CryptoMator> =
             (CryptoMator::try_new(root, password)?, cache_policy).into();
-        Ok(Box::new(cryptfs))
+        Ok(Handler::<DynamicFileSystem>::from_repr(Box::new(cryptfs)))
     }
     fn init_with_default_params(
         &self,
         root: &Utf8Path,
         password: &str,
-    ) -> Result<Box<dyn MasterKey>> {
+    ) -> Result<Handler<dyn MasterKey>> {
         CryptoMator::init_with_default_params(root, password)
-            .map(|keys| -> Box<dyn MasterKey> { Box::new(keys) })
+            .map(|keys| Handler::<dyn MasterKey>::from_repr(Box::new(keys)))
     }
 }

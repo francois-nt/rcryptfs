@@ -1,8 +1,9 @@
 use crate::core::XattrLayout;
 
 use super::{
-    BufferedFile, CryptFsFile, EncryptionLayout, FileHandle, FileOpenOptions, FileSystem,
-    FsDirEntry, Metadata, Permissions, ReadOnlyFileSystem, VirtualPath,
+    CleartextFile, CryptFsFile, EncryptionLayout, EntryStorage, FileHandle, FileOpenOptions,
+    FileSystem, FsDirEntry, Handler, HandlerTarget, Metadata, Permissions, ReadOnlyFileSystem,
+    VirtualPath,
 };
 
 use std::sync::Arc;
@@ -74,13 +75,18 @@ impl<T> From<(T, Box<dyn FileBufferingPolicy>)> for CleartextFileSystem<T> {
     }
 }
 
+/// Concrete cleartext file produced by an encryption layout.
+type OpenCleartextFile<T> = CleartextFile<
+    CryptFsFile<T, <<T as EncryptionLayout>::EntryStorage as EntryStorage>::OpenHandle>,
+>;
+
 /// Opens an encrypted file and wraps it with the requested cache policy.
 fn try_open_crypt_file<T>(
     path: &VirtualPath,
     backend: Arc<T>,
     options: FileOpenOptions,
     cache_policy: &dyn FileBufferingPolicy,
-) -> std::io::Result<Box<dyn FileHandle>>
+) -> std::io::Result<OpenCleartextFile<T>>
 where
     T: EncryptionLayout + Send + Sync + 'static,
 {
@@ -88,24 +94,24 @@ where
     let cipher_file = backend.open_file_with(path, options)?;
     let crypt_file = CryptFsFile::try_from_file(cipher_file, backend, readonly)?;
 
-    if cache_policy.cache_write() {
-        Ok(Box::new(BufferedFile::new(
-            crypt_file,
-            T::PLAIN_BLOCK_LEN as usize,
-        )))
-    } else {
-        Ok(Box::new(crypt_file))
-    }
+    Ok(CleartextFile::new(
+        crypt_file,
+        T::PLAIN_BLOCK_LEN as usize,
+        cache_policy.cache_write(),
+    ))
 }
 
-impl<T> ReadOnlyFileSystem for CleartextFileSystem<T>
+impl<T, F> ReadOnlyFileSystem<F> for CleartextFileSystem<T>
 where
     T: EncryptionLayout + XattrLayout + Send + Sync + 'static,
+    F: FileHandle + HandlerTarget + ?Sized,
+    Handler<F>: From<OpenCleartextFile<T>>,
 {
-    fn open_readonly(&self, path: &VirtualPath) -> std::io::Result<Box<dyn FileHandle>> {
+    fn open_readonly(&self, path: &VirtualPath) -> std::io::Result<Handler<F>> {
         let mut options = FileOpenOptions::default();
         options.read(true);
         try_open_crypt_file(path, self.fs.clone(), options, self.cache_policy.as_ref())
+            .map(Handler::from)
     }
     fn metadata(&self, path: &VirtualPath) -> std::io::Result<Metadata> {
         self.fs.metadata(path)
@@ -131,17 +137,20 @@ where
     }
 }
 
-impl<T> FileSystem for CleartextFileSystem<T>
+impl<T, F> FileSystem<F> for CleartextFileSystem<T>
 where
     T: EncryptionLayout + XattrLayout + Send + Sync + 'static,
+    F: FileHandle + HandlerTarget + ?Sized,
+    Handler<F>: From<OpenCleartextFile<T>>,
 {
     /// Opens a file with the specified options.
     fn open_file_with(
         &self,
         path: &VirtualPath,
         options: FileOpenOptions,
-    ) -> std::io::Result<Box<dyn FileHandle>> {
+    ) -> std::io::Result<Handler<F>> {
         try_open_crypt_file(path, self.fs.clone(), options, self.cache_policy.as_ref())
+            .map(Handler::from)
     }
     /// Creates a new directory with given permissions.
     fn mkdir(
@@ -197,5 +206,72 @@ where
     }
     fn set_xattr(&self, path: &VirtualPath, name: &str, value: &[u8]) -> std::io::Result<()> {
         self.fs.set_xattr(path, name, value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        CryptoMator, CryptomatorBackend,
+        core::{DynamicFileSystem, EncryptionTranslator, ReadAt, Size, Utf8Path, WriteAt},
+    };
+
+    #[test]
+    fn concrete_and_dynamic_handles_preserve_buffering_modes() {
+        type Backend = CryptoMator<CryptomatorBackend>;
+
+        let root = tempfile::tempdir().unwrap();
+        let root_path = Utf8Path::from_path(root.path()).unwrap();
+        Backend::init_with_default_params(root_path, "password").unwrap();
+
+        for cache_write in [false, true] {
+            let backend = Backend::try_new(root_path, "password").unwrap();
+            let policy = if cache_write {
+                FileBuffering::default().with_cache_write()
+            } else {
+                FileBuffering::default()
+            };
+            let fs: CleartextFileSystem<Backend> =
+                (backend, Box::new(policy) as Box<dyn FileBufferingPolicy>).into();
+            let path = VirtualPath::new(if cache_write { "buffered" } else { "direct" });
+            let mut options = FileOpenOptions::default();
+            options.read(true).write(true).create(true);
+
+            let file: Handler<OpenCleartextFile<Backend>> =
+                fs.open_file_with(path, options.clone()).unwrap();
+            file.write_all_at(0, b"abcdef").unwrap();
+            assert_eq!(file.size().unwrap(), 6);
+            let mut data = [0; 6];
+            file.read_exact_at(0, &mut data).unwrap();
+            assert_eq!(&data, b"abcdef");
+
+            let mut readonly = FileOpenOptions::default();
+            readonly.read(true);
+            let cipher_file = fs.fs.open_file_with(path, readonly).unwrap();
+            assert_eq!(
+                cipher_file.size().unwrap() == Backend::HEADER_LEN as u64,
+                cache_write
+            );
+            file.flush().unwrap();
+
+            let file: Handler<OpenCleartextFile<Backend>> = fs.open_readonly(path).unwrap();
+            file.read_exact_at(0, &mut data).unwrap();
+            assert_eq!(&data, b"abcdef");
+
+            let fs: Box<DynamicFileSystem> = Box::new(fs);
+            let file = fs.open_file_with(path, options).unwrap();
+            file.write_all_at(2, b"XY").unwrap();
+            file.set_len(5).unwrap();
+            file.sync(false).unwrap();
+            assert_eq!(file.size().unwrap(), 5);
+            let mut data = [0; 5];
+            fs.open_readonly(path)
+                .unwrap()
+                .read_exact_at(0, &mut data)
+                .unwrap();
+            assert_eq!(&data, b"abXYe");
+            assert_eq!(fs.metadata(path).unwrap().len, 5);
+        }
     }
 }

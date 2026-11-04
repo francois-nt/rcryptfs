@@ -1,4 +1,4 @@
-use super::{FileBufferingPolicy, FileSystem, Result, Utf8Path};
+use super::{DynamicFileSystem, FileBufferingPolicy, Handler, HandlerTarget, Result, Utf8Path};
 use linkme::distributed_slice;
 
 pub trait MasterKey {
@@ -24,13 +24,15 @@ pub trait MasterKey {
     }
 }
 
+crate::impl_dyn_handler_target!(MasterKey);
+
 /// Builds a filesystem implementation for a backend that recognizes a cipher root.
 pub trait BackendProvider: Send + Sync {
     fn init_with_default_params(
         &self,
         root: &Utf8Path,
         password: &str,
-    ) -> Result<Box<dyn MasterKey>>;
+    ) -> Result<Handler<dyn MasterKey>>;
     fn name(&self) -> &'static str;
     fn probe(&self, root: &Utf8Path) -> bool;
     fn try_build(
@@ -38,7 +40,7 @@ pub trait BackendProvider: Send + Sync {
         root: &Utf8Path,
         password: &str,
         cache_policy: Box<dyn FileBufferingPolicy>,
-    ) -> Result<Box<dyn FileSystem>>;
+    ) -> Result<Handler<DynamicFileSystem>>;
 }
 
 /// Registry of backend providers linked into the current binary.
@@ -61,7 +63,7 @@ pub fn build_filesystem(
     root_path: &Utf8Path,
     password: &str,
     cache_policy: impl FileBufferingPolicy + 'static,
-) -> Result<Box<dyn FileSystem>> {
+) -> Result<Handler<DynamicFileSystem>> {
     for &provider in PROVIDERS {
         if provider.probe(root_path) {
             return provider.try_build(root_path, password, Box::new(cache_policy));
@@ -74,7 +76,7 @@ pub fn init_filesystem(
     root_path: &Utf8Path,
     password: &str,
     name: &str,
-) -> Result<Box<dyn MasterKey>> {
+) -> Result<Handler<dyn MasterKey>> {
     for &provider in PROVIDERS {
         if provider.name() == name {
             return provider.init_with_default_params(root_path, password);

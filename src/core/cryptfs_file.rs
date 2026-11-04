@@ -20,6 +20,7 @@ struct PlainEnd {
 pub struct CryptFsFile<T: EncryptionTranslator, F: FileHandle> {
     backend: Arc<T>,
     cipher_file: F,
+    /// Also serializes writes and resizes against block reads.
     header: RwLock<Vec<u8>>,
 }
 
@@ -51,13 +52,13 @@ impl<T: EncryptionTranslator, F: FileHandle> CryptFsFile<T, F> {
         Ok(buffer)
     }
     /// Creates and persists a fresh header for a newly materialized cipher file.
-    fn create_header(&self) -> std::io::Result<()> {
-        let header = self
+    fn create_header(&self, header: &mut Vec<u8>) -> std::io::Result<()> {
+        let new_header = self
             .backend
             .generate_cipher_header()
             .or_io_error(libc::EIO)?;
-        self.cipher_file.write_all_at(0, &header)?;
-        *self.header.write() = header;
+        self.cipher_file.write_all_at(0, &new_header)?;
+        *header = new_header;
         Ok(())
     }
     /// Returns the current on-disk cipher file size.
@@ -243,6 +244,8 @@ impl<T: EncryptionTranslator, F: FileHandle> ReadAt for CryptFsFile<T, F> {
             return Ok(0);
         }
         debug!("trying to read at offset {} for len {}", offset, buf.len());
+        // Shared access excludes concurrent writes and resizes for the whole read.
+        let header = self.header.read();
         let physical_size = self.get_physical_size()?;
         if buf.is_empty() || physical_size < T::HEADER_LEN as u64 {
             error!(
@@ -253,8 +256,6 @@ impl<T: EncryptionTranslator, F: FileHandle> ReadAt for CryptFsFile<T, F> {
         }
 
         let buf_len = buf.len();
-
-        let header = self.header.read();
 
         let plain_start = offset;
         let plain_end = plain_start + buf.len() as u64;
@@ -328,12 +329,13 @@ impl<T: EncryptionTranslator, F: FileHandle> WriteAt for CryptFsFile<T, F> {
             return Ok(0);
         }
 
+        // Exclusive access serializes header creation and block read-modify-write cycles.
+        let mut header = self.header.write();
         let mut current_cipher_len = self.get_physical_size()?;
         if current_cipher_len < T::HEADER_LEN as u64 {
             current_cipher_len = T::HEADER_LEN as u64;
-            self.create_header()?;
+            self.create_header(&mut header)?;
         }
-        let header = self.header.read();
         let current_plain_len = self
             .backend
             .cipher_size_to_plain(current_cipher_len)
@@ -397,6 +399,7 @@ impl<T: EncryptionTranslator, F: FileHandle> WriteAt for CryptFsFile<T, F> {
 impl<T: EncryptionTranslator, F: FileHandle> Size for CryptFsFile<T, F> {
     /// Returns the logical plain-text file size.
     fn size(&self) -> std::io::Result<u64> {
+        let _read_guard = self.header.read();
         self.backend
             .cipher_size_to_plain(self.get_physical_size()?)
             .or_invalid()
@@ -424,6 +427,8 @@ impl<T: EncryptionTranslator, F: FileHandle> SetSync for CryptFsFile<T, F> {
 impl<T: EncryptionTranslator, F: FileHandle> SetLen for CryptFsFile<T, F> {
     /// Resizes the plain file while keeping the final encrypted block consistent.
     fn set_len(&self, target_plain_len: u64) -> std::io::Result<()> {
+        // Exclusive access keeps boundary re-encoding and the physical resize atomic.
+        let mut header = self.header.write();
         if target_plain_len > 0 {
             let current_cipher_len = self.get_physical_size()?;
             let current_plain_len = self
@@ -432,9 +437,8 @@ impl<T: EncryptionTranslator, F: FileHandle> SetLen for CryptFsFile<T, F> {
                 .or_invalid()?;
 
             if current_plain_len == 0 {
-                self.create_header()?;
+                self.create_header(&mut header)?;
             }
-            let header = self.header.read();
             self.prepare_len_change(
                 current_plain_len,
                 target_plain_len,
@@ -579,59 +583,33 @@ mod tests {
     }
 
     #[test]
-    fn gocryptfs_aligned_extension_to_next_block_reencodes_previous_last_block() {
-        let (_temp_dir, file) = open_gocryptfs_test_file();
+    fn gocryptfs_aligned_extensions_reencode_previous_last_block() {
         let block_len =
             <GoCryptFs<GoCryptFsBackend> as EncryptionTranslator>::PLAIN_BLOCK_LEN as usize;
         let offset_in_block = 64usize;
         let first = sample_data(728);
         let tail = b"tail";
 
-        file.write_all_at(offset_in_block as u64, &first).unwrap();
-        file.write_all_at(block_len as u64, tail).unwrap();
+        for block in [1, 2] {
+            let (_temp_dir, file) = open_gocryptfs_test_file();
+            file.write_all_at(offset_in_block as u64, &first).unwrap();
+            file.write_all_at((block * block_len) as u64, tail).unwrap();
 
-        let mut first_block = vec![0u8; block_len];
-        let bytes_read = file.read_at(0, &mut first_block).unwrap();
+            let mut first_block = vec![0u8; block_len];
+            let bytes_read = file.read_at(0, &mut first_block).unwrap();
 
-        assert_eq!(bytes_read, block_len);
-        assert!(first_block[..offset_in_block].iter().all(|&b| b == 0));
-        assert_eq!(
-            &first_block[offset_in_block..offset_in_block + first.len()],
-            first.as_slice()
-        );
-        assert!(
-            first_block[offset_in_block + first.len()..]
-                .iter()
-                .all(|&b| b == 0)
-        );
-    }
-
-    #[test]
-    fn gocryptfs_aligned_gap_extension_reencodes_previous_last_block() {
-        let (_temp_dir, file) = open_gocryptfs_test_file();
-        let block_len =
-            <GoCryptFs<GoCryptFsBackend> as EncryptionTranslator>::PLAIN_BLOCK_LEN as usize;
-        let offset_in_block = 64usize;
-        let first = sample_data(728);
-        let tail = b"tail";
-
-        file.write_all_at(offset_in_block as u64, &first).unwrap();
-        file.write_all_at((2 * block_len) as u64, tail).unwrap();
-
-        let mut first_block = vec![0u8; block_len];
-        let bytes_read = file.read_at(0, &mut first_block).unwrap();
-
-        assert_eq!(bytes_read, block_len);
-        assert!(first_block[..offset_in_block].iter().all(|&b| b == 0));
-        assert_eq!(
-            &first_block[offset_in_block..offset_in_block + first.len()],
-            first.as_slice()
-        );
-        assert!(
-            first_block[offset_in_block + first.len()..]
-                .iter()
-                .all(|&b| b == 0)
-        );
+            assert_eq!(bytes_read, block_len, "extension to block {block}");
+            assert!(first_block[..offset_in_block].iter().all(|&b| b == 0));
+            assert_eq!(
+                &first_block[offset_in_block..offset_in_block + first.len()],
+                first.as_slice()
+            );
+            assert!(
+                first_block[offset_in_block + first.len()..]
+                    .iter()
+                    .all(|&b| b == 0)
+            );
+        }
     }
 
     #[test]

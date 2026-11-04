@@ -277,28 +277,30 @@ mod tests {
     #[test]
     fn block_roundtrip_preserves_plain_data() {
         let backend = test_backend();
-        let header = backend.generate_cipher_header().unwrap();
-        let plain_data = b"hello encrypted world";
 
-        let cipher_data = backend
-            .plain_block_to_cipher(&header, 0, plain_data)
-            .unwrap();
-        let decrypted_data = backend
-            .cipher_block_to_plain(&header, 0, &cipher_data)
-            .unwrap();
+        for plain_data in [b"hello encrypted world".as_slice(), b""] {
+            let header = backend.generate_cipher_header().unwrap();
+            let cipher_data = backend
+                .plain_block_to_cipher(&header, 0, plain_data)
+                .unwrap();
+            let decrypted_data = backend
+                .cipher_block_to_plain(&header, 0, &cipher_data)
+                .unwrap();
 
-        assert_eq!(decrypted_data, plain_data);
+            assert_eq!(decrypted_data, plain_data);
+        }
     }
 
     #[test]
     fn metavalue_roundtrip_preserves_plain_data() {
         let backend = test_backend();
-        let plain_value = b"/some/symlink/target";
 
-        let cipher_value = backend.plain_metavalue_to_cipher(plain_value).unwrap();
-        let decrypted_value = backend.cipher_metavalue_to_plain(&cipher_value).unwrap();
+        for plain_value in [b"/some/symlink/target".as_slice(), b""] {
+            let cipher_value = backend.plain_metavalue_to_cipher(plain_value).unwrap();
+            let decrypted_value = backend.cipher_metavalue_to_plain(&cipher_value).unwrap();
 
-        assert_eq!(decrypted_value, plain_value);
+            assert_eq!(decrypted_value, plain_value);
+        }
     }
 
     #[test]
@@ -380,26 +382,5 @@ mod tests {
                 .cipher_size_to_plain((CryptoMator::<MemoryBackend>::HEADER_LEN - 1) as u64)
                 .is_err()
         );
-    }
-
-    #[test]
-    fn empty_block_roundtrip_preserves_plain_data() {
-        let backend = test_backend();
-        let header = backend.generate_cipher_header().unwrap();
-        let cipher_data = backend.plain_block_to_cipher(&header, 0, b"").unwrap();
-        let decrypted_data = backend
-            .cipher_block_to_plain(&header, 0, &cipher_data)
-            .unwrap();
-
-        assert_eq!(decrypted_data, b"");
-    }
-
-    #[test]
-    fn empty_metavalue_roundtrip_preserves_plain_data() {
-        let backend = test_backend();
-        let cipher_value = backend.plain_metavalue_to_cipher(b"").unwrap();
-        let decrypted_value = backend.cipher_metavalue_to_plain(&cipher_value).unwrap();
-
-        assert_eq!(decrypted_value, b"");
     }
 }

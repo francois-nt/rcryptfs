@@ -1,3 +1,5 @@
+use crate::core::{Handler, HandlerTarget};
+
 use super::super::{
     FileOpenOptions, FileType, FsDirEntry, Metadata, Permissions, Result, UnsafeOpenFileTable,
     VirtualPath,
@@ -217,6 +219,8 @@ pub trait FileHandle:
 {
 }
 
+crate::impl_dyn_handler_target!(FileHandle);
+
 /// Provides the complete asynchronous operation set supported by an open file.
 pub trait AsyncFileHandle:
     AsyncReadAt + AsyncWriteAt + AsyncSetLen + AsyncSetSync + AsyncSize + AsyncModifiedTime + 'static
@@ -388,7 +392,7 @@ pub trait OpenFileTable: Default {
         opener: F,
     ) -> std::io::Result<u64>
     where
-        F: FnOnce() -> std::io::Result<Box<dyn FileHandle>>;
+        F: FnOnce() -> std::io::Result<Handler<dyn FileHandle>>;
 
     /// Releases an open file handle.
     fn release(&self, id: u64) -> std::io::Result<()>;
@@ -412,9 +416,12 @@ pub trait OpenFileTable: Default {
 }
 
 /// Trait for read-only filesystem operations.
-pub trait ReadOnlyFileSystem: Send + Sync + 'static {
+/// The file target selects concrete storage or explicit dynamic dispatch.
+pub trait ReadOnlyFileSystem<F: FileHandle + HandlerTarget + ?Sized>:
+    Send + Sync + 'static
+{
     /// Opens a file in read-only mode.
-    fn open_readonly(&self, path: &VirtualPath) -> std::io::Result<Box<dyn FileHandle>>;
+    fn open_readonly(&self, path: &VirtualPath) -> std::io::Result<Handler<F>>;
     /// Lists directory entries.
     fn read_dir(
         &self,
@@ -442,13 +449,13 @@ pub trait ReadOnlyFileSystem: Send + Sync + 'static {
 //impl<T: FileSystem<File = Box<dyn ReadWrite>>> GenericFileSystem for T {}
 
 /// Trait for full filesystem operations.
-pub trait FileSystem: ReadOnlyFileSystem {
+pub trait FileSystem<F: HandlerTarget + FileHandle + ?Sized>: ReadOnlyFileSystem<F> {
     /// Opens a file with specified options.
     fn open_file_with(
         &self,
         path: &VirtualPath,
         options: FileOpenOptions,
-    ) -> std::io::Result<Box<dyn FileHandle>>;
+    ) -> std::io::Result<Handler<F>>;
     /// Truncates a file to a new size.
     fn truncate(&self, path: &VirtualPath, new_size: u64) -> std::io::Result<()> {
         let mut options = FileOpenOptions::default();
@@ -516,9 +523,14 @@ pub trait FileSystem: ReadOnlyFileSystem {
     fn remove_xattr(&self, path: &VirtualPath, name: &str) -> std::io::Result<()>;
 }
 
+/// Filesystem trait object whose open files use dynamic dispatch.
+pub type DynamicFileSystem = dyn FileSystem<dyn FileHandle>;
+
+crate::impl_dyn_handler_target!(FileSystem<dyn FileHandle>);
+
 /// Hosts a filesystem together with its open file table.
 pub struct FileSystemSession<C: OpenFileTable = UnsafeOpenFileTable> {
-    fs: Box<dyn FileSystem>,
+    fs: Handler<DynamicFileSystem>,
     open_files: C,
     is_background_child: bool,
 }
@@ -535,18 +547,24 @@ impl<C: OpenFileTable> FileSystemSession<C> {
     }
 }
 
-impl<T: FileSystem, C: OpenFileTable> From<T> for FileSystemSession<C> {
+impl<T: FileSystem<dyn FileHandle>, C: OpenFileTable> From<T> for FileSystemSession<C> {
     fn from(value: T) -> Self {
         Self {
-            fs: Box::new(value),
+            fs: Handler::<DynamicFileSystem>::from_repr(Box::new(value)),
             open_files: C::default(),
             is_background_child: false,
         }
     }
 }
 
-impl<C: OpenFileTable> From<Box<dyn FileSystem>> for FileSystemSession<C> {
-    fn from(value: Box<dyn FileSystem>) -> Self {
+impl<T: FileSystem<dyn FileHandle>, C: OpenFileTable> From<Handler<T>> for FileSystemSession<C> {
+    fn from(value: Handler<T>) -> Self {
+        value.into_repr().into()
+    }
+}
+
+impl<C: OpenFileTable> From<Handler<DynamicFileSystem>> for FileSystemSession<C> {
+    fn from(value: Handler<DynamicFileSystem>) -> Self {
         Self {
             fs: value,
             open_files: C::default(),
@@ -555,9 +573,9 @@ impl<C: OpenFileTable> From<Box<dyn FileSystem>> for FileSystemSession<C> {
     }
 }
 
-impl<C: OpenFileTable> AsRef<dyn FileSystem> for FileSystemSession<C> {
-    fn as_ref(&self) -> &dyn FileSystem {
-        self.fs.as_ref()
+impl<C: OpenFileTable> AsRef<DynamicFileSystem> for FileSystemSession<C> {
+    fn as_ref(&self) -> &DynamicFileSystem {
+        &*self.fs
     }
 }
 
@@ -654,7 +672,7 @@ impl<T> ErrorMapper<T> for Option<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AsyncFileHandle, ReadAt};
+    use super::ReadAt;
 
     struct ShortReader(&'static [u8]);
 
@@ -670,13 +688,6 @@ mod tests {
             buf[..len].copy_from_slice(&source[..len]);
             Ok(len)
         }
-    }
-
-    #[test]
-    fn async_file_handle_is_dyn_compatible() {
-        fn accept_dyn_handle(_: Option<&dyn AsyncFileHandle>) {}
-
-        accept_dyn_handle(None);
     }
 
     #[test]

@@ -1,10 +1,13 @@
 use super::GoCryptFs;
 use crate::core::{
-    BackendProvider, CleartextFileSystem, ConfigFileSystem, DirectoryLayout, EntryStorage,
-    EntryStorageBackend, FileBufferingPolicy, FileSystem, MasterKey, NativeFileSystem, Result,
-    StorageConfigFileSystem,
+    BackendProvider, CleartextFileSystem, ConfigFileSystem, DirectoryLayout, DynamicFileSystem,
+    EntryStorage, EntryStorageBackend, FileBufferingPolicy, Handler, MasterKey, NativeFileSystem,
+    Result, StorageConfigFileSystem,
 };
 use crate::{Utf8Path, register_provider};
+
+/// Concrete filesystem built over the supplied entry and directory layouts.
+type BuiltFileSystem<S, L> = CleartextFileSystem<GoCryptFs<EntryStorageBackend<S, L>>>;
 
 struct GoCryptFSMasterKey(Vec<u8>);
 impl MasterKey for GoCryptFSMasterKey {
@@ -29,7 +32,7 @@ impl GoCryptFsBuilder {
         config_fs: &C,
         password: &str,
         cache_policy: Box<dyn FileBufferingPolicy>,
-    ) -> Result<Box<dyn FileSystem>>
+    ) -> Result<Handler<BuiltFileSystem<S, L>>>
     where
         S: EntryStorage,
         L: DirectoryLayout + 'static,
@@ -40,7 +43,7 @@ impl GoCryptFsBuilder {
             cache_policy,
         )
             .into();
-        Ok(Box::new(cryptfs))
+        Ok(Handler::new(cryptfs))
     }
 
     /// Initializes a GoCryptFS crypto configuration over an entry representation.
@@ -48,14 +51,14 @@ impl GoCryptFsBuilder {
         backend: &EntryStorageBackend<S, L>,
         config_fs: &C,
         password: &str,
-    ) -> Result<Box<dyn MasterKey>>
+    ) -> Result<Handler<impl MasterKey + 'static + use<S, L, C>>>
     where
         S: EntryStorage,
         L: DirectoryLayout,
         C: ConfigFileSystem + ?Sized,
     {
         GoCryptFs::init_with_backend(backend, config_fs, password)
-            .map(|key| -> Box<dyn MasterKey> { Box::new(GoCryptFSMasterKey(key)) })
+            .map(|key| Handler::new(GoCryptFSMasterKey(key)))
     }
 }
 
@@ -72,17 +75,48 @@ impl BackendProvider for GoCryptFsBuilder {
         root: &Utf8Path,
         password: &str,
         cache_policy: Box<dyn FileBufferingPolicy>,
-    ) -> Result<Box<dyn FileSystem>> {
+    ) -> Result<Handler<DynamicFileSystem>> {
         let cryptfs: CleartextFileSystem<GoCryptFs> =
             (GoCryptFs::try_new(root, password)?, cache_policy).into();
-        Ok(Box::new(cryptfs))
+        Ok(Handler::<DynamicFileSystem>::from_repr(Box::new(cryptfs)))
     }
     fn init_with_default_params(
         &self,
         root: &Utf8Path,
         password: &str,
-    ) -> Result<Box<dyn MasterKey>> {
+    ) -> Result<Handler<dyn MasterKey>> {
         GoCryptFs::init_with_default_params(root, password)
-            .map(|key| -> Box<dyn MasterKey> { Box::new(GoCryptFSMasterKey(key)) })
+            .map(|key| Handler::<dyn MasterKey>::from_repr(Box::new(GoCryptFSMasterKey(key))))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::GoCryptFsBackend;
+    use crate::core::{FileSystemSession, LockedOpenFileTable, NoBuffering, VirtualPath};
+
+    #[test]
+    fn concrete_builders_return_owned_handles() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = Utf8Path::from_path(root.path()).unwrap();
+        let (key, fs) = {
+            let storage = NativeFileSystem::new(root_path.to_owned());
+            let config = StorageConfigFileSystem::new(&storage);
+            let backend = GoCryptFsBackend::from(root_path);
+            let key = GoCryptFsBuilder::init_with_backend(&backend, &config, "password").unwrap();
+            let fs = GoCryptFsBuilder::try_build_with_backend(
+                backend,
+                &config,
+                "password",
+                Box::new(NoBuffering),
+            )
+            .unwrap();
+            (key, fs)
+        };
+
+        assert_eq!(key.to_vec().len(), 32);
+        let session: FileSystemSession<LockedOpenFileTable> = fs.into();
+        assert!(session.as_ref().exists(VirtualPath::root()).unwrap());
     }
 }

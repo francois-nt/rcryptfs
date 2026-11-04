@@ -8,6 +8,7 @@ mod config_fs;
 mod crypto_backend;
 mod entry_storage;
 mod filesystem;
+mod handler;
 mod helpers;
 mod storage_fs;
 
@@ -23,6 +24,7 @@ pub use crypto_backend::*;
 pub(crate) use entry_storage::forward_storage_fs_operations;
 pub use entry_storage::{AsyncEntryStorage, EntryStorage, StorageDirEntry, StorageDirectory};
 pub use filesystem::*;
+pub use handler::{Handler, HandlerTarget};
 use helpers::{
     default_chown, default_create_symlink, default_list_dir_plain_names, default_metadata,
     default_mkdir, default_mknode, default_open_file_with, default_read_symlink, default_remove,

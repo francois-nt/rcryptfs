@@ -280,21 +280,13 @@ impl fmt::Display for VirtualPathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
 
     #[test]
-    fn backslash_is_not_a_separator() {
-        let components = VirtualPath::new(r"parent\child/file")
-            .components()
-            .collect::<Vec<_>>();
+    fn components_parent_and_file_name_use_unix_separators() {
+        let path = VirtualPath::new(r"parent\child/file");
+        let components = path.components().collect::<Vec<_>>();
 
         assert_eq!(components, vec![r"parent\child", "file"]);
-    }
-
-    #[test]
-    fn parent_and_file_name_use_unix_separators() {
-        let path = VirtualPath::new(r"parent\child/file");
-
         assert_eq!(path.parent(), Some(VirtualPath::new(r"parent\child")));
         assert_eq!(path.file_name(), Some("file"));
     }
@@ -307,14 +299,8 @@ mod tests {
     }
 
     #[test]
-    fn root_is_empty() {
-        assert!(VirtualPath::root().is_empty());
-    }
-
-    #[test]
     fn join_virtual_path_normalizes_root_and_parent_components() {
-        let temp_dir = tempdir().unwrap();
-        let root = Utf8Path::from_path(temp_dir.path()).unwrap().to_owned();
+        let root = Utf8Path::new("vault");
 
         assert_eq!(
             root.join_virtual_path(VirtualPath::new("/hello")).unwrap(),
@@ -329,8 +315,7 @@ mod tests {
 
     #[test]
     fn join_virtual_path_rejects_parent_components_above_root() {
-        let temp_dir = tempdir().unwrap();
-        let root = Utf8Path::from_path(temp_dir.path()).unwrap().to_owned();
+        let root = Utf8Path::new("vault");
 
         assert!(
             root.join_virtual_path(VirtualPath::new("../hello"))

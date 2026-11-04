@@ -445,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn init_creates_config_and_root_diriv() {
+    fn init_creates_config_and_root_diriv_and_reopens_with_same_password() {
         let temp_dir = tempdir().unwrap();
         let root = Utf8Path::from_path(temp_dir.path()).unwrap();
 
@@ -455,6 +455,13 @@ mod tests {
         assert_eq!(master_key.len(), 32);
         assert!(root.join("gocryptfs.conf").exists());
         assert!(root.join("gocryptfs.diriv").exists());
+
+        let reopened = GoCryptFs::<GoCryptFsBackend>::try_new(root, "password").unwrap();
+        let header = reopened.generate_cipher_header().unwrap();
+        let plain = b"roundtrip after init";
+        let cipher = reopened.plain_block_to_cipher(&header, 0, plain).unwrap();
+        let decrypted = reopened.cipher_block_to_plain(&header, 0, &cipher).unwrap();
+        assert_eq!(decrypted, plain);
     }
 
     #[test]
@@ -467,20 +474,5 @@ mod tests {
             GoCryptFs::<GoCryptFsBackend>::init_with_default_params(root, "password").unwrap_err();
 
         assert!(err.to_string().contains("must be empty"));
-    }
-
-    #[test]
-    fn try_new_after_init_accepts_same_password() {
-        let temp_dir = tempdir().unwrap();
-        let root = Utf8Path::from_path(temp_dir.path()).unwrap();
-
-        GoCryptFs::<GoCryptFsBackend>::init_with_default_params(root, "password").unwrap();
-        let reopened = GoCryptFs::<GoCryptFsBackend>::try_new(root, "password").unwrap();
-
-        let header = reopened.generate_cipher_header().unwrap();
-        let plain = b"roundtrip after init";
-        let cipher = reopened.plain_block_to_cipher(&header, 0, plain).unwrap();
-        let decrypted = reopened.cipher_block_to_plain(&header, 0, &cipher).unwrap();
-        assert_eq!(decrypted, plain);
     }
 }
