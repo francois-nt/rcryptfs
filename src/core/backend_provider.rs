@@ -39,7 +39,7 @@ pub trait BackendProvider: Send + Sync {
         &self,
         root: &Utf8Path,
         password: &str,
-        cache_policy: Box<dyn FileBufferingPolicy>,
+        cache_policy: Handler<dyn FileBufferingPolicy>,
     ) -> Result<Handler<DynamicFileSystem>>;
 }
 
@@ -66,7 +66,7 @@ pub fn build_filesystem(
 ) -> Result<Handler<DynamicFileSystem>> {
     for &provider in PROVIDERS {
         if provider.probe(root_path) {
-            return provider.try_build(root_path, password, Box::new(cache_policy));
+            return provider.try_build(root_path, password, Handler::new(cache_policy).into());
         }
     }
     anyhow::bail!("unknown filesystem!");

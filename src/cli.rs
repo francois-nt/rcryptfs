@@ -61,7 +61,7 @@ fn handle_cli_command<C: OpenFileTable>(
 
             match handler.as_ref().read_dir(VirtualPath::new(&target)) {
                 Ok(entries) => {
-                    for element in entries {
+                    for element in entries.into_repr() {
                         match element {
                             Ok(element) => println!("{}", format_entry(&element)),
                             Err(error) => {

@@ -553,6 +553,7 @@ fn readdir<T: ReadOnlyFileSystem<dyn FileHandle> + ?Sized>(
         .chain(
             fs.as_ref()
                 .read_dir(path)?
+                .into_repr()
                 .filter_map(|entry| match entry {
                     Err(error) => Some(Err(error)),
                     Ok(entry) => {

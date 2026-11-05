@@ -27,8 +27,8 @@ impl CryptoMatorBuilder {
         backend: EntryStorageBackend<S, L>,
         config_fs: &C,
         password: &str,
-        cache_policy: Box<dyn FileBufferingPolicy>,
-    ) -> Result<Handler<BuiltFileSystem<S, L>>>
+        cache_policy: impl FileBufferingPolicy,
+    ) -> Result<BuiltFileSystem<S, L>>
     where
         S: EntryStorage,
         L: DirectoryLayout + 'static,
@@ -39,7 +39,7 @@ impl CryptoMatorBuilder {
             cache_policy,
         )
             .into();
-        Ok(Handler::new(cryptfs))
+        Ok(cryptfs)
     }
 
     /// Initializes a Cryptomator crypto configuration over an entry representation.
@@ -47,13 +47,13 @@ impl CryptoMatorBuilder {
         backend: &EntryStorageBackend<S, L>,
         config_fs: &C,
         password: &str,
-    ) -> Result<Handler<impl MasterKey + 'static + use<S, L, C>>>
+    ) -> Result<impl MasterKey + 'static + use<S, L, C>>
     where
         S: EntryStorage,
         L: DirectoryLayout,
         C: ConfigFileSystem + ?Sized,
     {
-        CryptoMator::init_with_backend(backend, config_fs, password).map(Handler::new)
+        CryptoMator::init_with_backend(backend, config_fs, password)
     }
 }
 
@@ -69,18 +69,18 @@ impl BackendProvider for CryptoMatorBuilder {
         &self,
         root: &Utf8Path,
         password: &str,
-        cache_policy: Box<dyn FileBufferingPolicy>,
+        cache_policy: Handler<dyn FileBufferingPolicy>,
     ) -> Result<Handler<DynamicFileSystem>> {
         let cryptfs: CleartextFileSystem<CryptoMator> =
             (CryptoMator::try_new(root, password)?, cache_policy).into();
-        Ok(Handler::<DynamicFileSystem>::from_repr(Box::new(cryptfs)))
+
+        Ok(Handler::new(cryptfs).into())
     }
     fn init_with_default_params(
         &self,
         root: &Utf8Path,
         password: &str,
     ) -> Result<Handler<dyn MasterKey>> {
-        CryptoMator::init_with_default_params(root, password)
-            .map(|keys| Handler::<dyn MasterKey>::from_repr(Box::new(keys)))
+        CryptoMator::init_with_default_params(root, password).map(|keys| Handler::new(keys).into())
     }
 }

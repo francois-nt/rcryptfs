@@ -42,12 +42,6 @@ impl<T: HandlerTarget<Stored = T>> Handler<T> {
     }
 }
 
-impl<T: HandlerTarget<Stored = T>> From<T> for Handler<T> {
-    fn from(value: T) -> Self {
-        Self::new(value)
-    }
-}
-
 impl<T: HandlerTarget + ?Sized> Deref for Handler<T> {
     type Target = T;
 
@@ -69,6 +63,16 @@ macro_rules! impl_dyn_handler_target {
             impl<'a> HandlerTarget for dyn $tr + 'a {
                 type Stored = Box<dyn $tr + 'a>;
             }
+
+            impl<'a, T> From<Handler<T>> for Handler<dyn $tr + 'a>
+            where
+                T: $tr + 'a,
+            {
+                fn from(value: Handler<T>) -> Self {
+                    Handler::from_repr(Box::new(value.into_repr()) as Box<dyn $tr + 'a>)
+                }
+            }
+
         )+
     };
 }

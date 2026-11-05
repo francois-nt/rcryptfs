@@ -1,4 +1,4 @@
-use crate::core::XattrLayout;
+use crate::{core::XattrLayout, impl_dyn_handler_target};
 
 use super::{
     CleartextFile, CryptFsFile, EncryptionLayout, EntryStorage, FileHandle, FileOpenOptions,
@@ -13,6 +13,8 @@ pub trait FileBufferingPolicy: Send + Sync + 'static {
     fn cache_write(&self) -> bool;
     fn cache_read(&self) -> bool;
 }
+
+impl_dyn_handler_target!(FileBufferingPolicy);
 
 /// Enables buffering for selected file access patterns.
 #[derive(Clone, Copy, Default)]
@@ -66,8 +68,17 @@ pub struct CleartextFileSystem<T> {
     cache_policy: Arc<dyn FileBufferingPolicy>,
 }
 
-impl<T> From<(T, Box<dyn FileBufferingPolicy>)> for CleartextFileSystem<T> {
-    fn from(value: (T, Box<dyn FileBufferingPolicy>)) -> Self {
+impl<T> From<(T, Handler<dyn FileBufferingPolicy>)> for CleartextFileSystem<T> {
+    fn from(value: (T, Handler<dyn FileBufferingPolicy>)) -> Self {
+        Self {
+            fs: Arc::from(value.0),
+            cache_policy: Arc::from(value.1.into_repr()),
+        }
+    }
+}
+
+impl<T, U: FileBufferingPolicy> From<(T, U)> for CleartextFileSystem<T> {
+    fn from(value: (T, U)) -> Self {
         Self {
             fs: Arc::from(value.0),
             cache_policy: Arc::from(value.1),
@@ -105,13 +116,13 @@ impl<T, F> ReadOnlyFileSystem<F> for CleartextFileSystem<T>
 where
     T: EncryptionLayout + XattrLayout + Send + Sync + 'static,
     F: FileHandle + HandlerTarget + ?Sized,
-    Handler<F>: From<OpenCleartextFile<T>>,
+    Handler<F>: From<Handler<OpenCleartextFile<T>>>,
 {
     fn open_readonly(&self, path: &VirtualPath) -> std::io::Result<Handler<F>> {
         let mut options = FileOpenOptions::default();
         options.read(true);
         try_open_crypt_file(path, self.fs.clone(), options, self.cache_policy.as_ref())
-            .map(Handler::from)
+            .map(|file| Handler::new(file).into())
     }
     fn metadata(&self, path: &VirtualPath) -> std::io::Result<Metadata> {
         self.fs.metadata(path)
@@ -119,12 +130,12 @@ where
     fn read_dir(
         &self,
         path: &VirtualPath,
-    ) -> std::io::Result<Box<dyn Iterator<Item = std::io::Result<FsDirEntry>> + '_>> {
+    ) -> std::io::Result<Handler<dyn Iterator<Item = std::io::Result<FsDirEntry>> + '_>> {
         let it = self
             .fs
             .list_dir_plain_names(path)?
             .map(|it| it.map(|r| r.0));
-        Ok(Box::new(it))
+        Ok(Handler::new(it).into())
     }
     fn read_symlink(&self, path: &VirtualPath) -> std::io::Result<String> {
         self.fs.read_symlink(path)
@@ -141,7 +152,7 @@ impl<T, F> FileSystem<F> for CleartextFileSystem<T>
 where
     T: EncryptionLayout + XattrLayout + Send + Sync + 'static,
     F: FileHandle + HandlerTarget + ?Sized,
-    Handler<F>: From<OpenCleartextFile<T>>,
+    Handler<F>: From<Handler<OpenCleartextFile<T>>>,
 {
     /// Opens a file with the specified options.
     fn open_file_with(
@@ -150,7 +161,7 @@ where
         options: FileOpenOptions,
     ) -> std::io::Result<Handler<F>> {
         try_open_crypt_file(path, self.fs.clone(), options, self.cache_policy.as_ref())
-            .map(Handler::from)
+            .map(|file| Handler::new(file).into())
     }
     /// Creates a new directory with given permissions.
     fn mkdir(
@@ -232,8 +243,7 @@ mod tests {
             } else {
                 FileBuffering::default()
             };
-            let fs: CleartextFileSystem<Backend> =
-                (backend, Box::new(policy) as Box<dyn FileBufferingPolicy>).into();
+            let fs: CleartextFileSystem<Backend> = (backend, policy).into();
             let path = VirtualPath::new(if cache_write { "buffered" } else { "direct" });
             let mut options = FileOpenOptions::default();
             options.read(true).write(true).create(true);

@@ -415,6 +415,8 @@ pub trait OpenFileTable: Default {
     }
 }
 
+crate::impl_dyn_handler_target!(Iterator<Item = std::io::Result<FsDirEntry>>);
+
 /// Trait for read-only filesystem operations.
 /// The file target selects concrete storage or explicit dynamic dispatch.
 pub trait ReadOnlyFileSystem<F: FileHandle + HandlerTarget + ?Sized>:
@@ -426,7 +428,7 @@ pub trait ReadOnlyFileSystem<F: FileHandle + HandlerTarget + ?Sized>:
     fn read_dir(
         &self,
         path: &VirtualPath,
-    ) -> std::io::Result<Box<dyn Iterator<Item = std::io::Result<FsDirEntry>> + '_>>;
+    ) -> std::io::Result<Handler<dyn Iterator<Item = std::io::Result<FsDirEntry>> + '_>>;
     /// Retrieves metadata for a path.
     fn metadata(&self, path: &VirtualPath) -> std::io::Result<Metadata>;
     /// Checks if a path exists.
@@ -476,7 +478,10 @@ pub trait FileSystem<F: HandlerTarget + FileHandle + ?Sized>: ReadOnlyFileSystem
             return Err(std::io::Error::from_raw_os_error(libc::ENOTEMPTY));
         }
 
-        let entries = self.read_dir(path)?.collect::<std::io::Result<Vec<_>>>()?;
+        let entries = self
+            .read_dir(path)?
+            .into_repr()
+            .collect::<std::io::Result<Vec<_>>>()?;
         for entry in entries {
             let child_path = path.join(entry.file_name);
             if entry.metadata.file_type == FileType::Directory {
@@ -550,7 +555,7 @@ impl<C: OpenFileTable> FileSystemSession<C> {
 impl<T: FileSystem<dyn FileHandle>, C: OpenFileTable> From<T> for FileSystemSession<C> {
     fn from(value: T) -> Self {
         Self {
-            fs: Handler::<DynamicFileSystem>::from_repr(Box::new(value)),
+            fs: Handler::new(value).into(),
             open_files: C::default(),
             is_background_child: false,
         }

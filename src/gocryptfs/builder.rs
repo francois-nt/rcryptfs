@@ -31,8 +31,8 @@ impl GoCryptFsBuilder {
         backend: EntryStorageBackend<S, L>,
         config_fs: &C,
         password: &str,
-        cache_policy: Box<dyn FileBufferingPolicy>,
-    ) -> Result<Handler<BuiltFileSystem<S, L>>>
+        cache_policy: impl FileBufferingPolicy,
+    ) -> Result<BuiltFileSystem<S, L>>
     where
         S: EntryStorage,
         L: DirectoryLayout + 'static,
@@ -43,7 +43,7 @@ impl GoCryptFsBuilder {
             cache_policy,
         )
             .into();
-        Ok(Handler::new(cryptfs))
+        Ok(cryptfs)
     }
 
     /// Initializes a GoCryptFS crypto configuration over an entry representation.
@@ -51,14 +51,13 @@ impl GoCryptFsBuilder {
         backend: &EntryStorageBackend<S, L>,
         config_fs: &C,
         password: &str,
-    ) -> Result<Handler<impl MasterKey + 'static + use<S, L, C>>>
+    ) -> Result<impl MasterKey + 'static + use<S, L, C>>
     where
         S: EntryStorage,
         L: DirectoryLayout,
         C: ConfigFileSystem + ?Sized,
     {
-        GoCryptFs::init_with_backend(backend, config_fs, password)
-            .map(|key| Handler::new(GoCryptFSMasterKey(key)))
+        GoCryptFs::init_with_backend(backend, config_fs, password).map(GoCryptFSMasterKey)
     }
 }
 
@@ -74,11 +73,11 @@ impl BackendProvider for GoCryptFsBuilder {
         &self,
         root: &Utf8Path,
         password: &str,
-        cache_policy: Box<dyn FileBufferingPolicy>,
+        cache_policy: Handler<dyn FileBufferingPolicy>,
     ) -> Result<Handler<DynamicFileSystem>> {
         let cryptfs: CleartextFileSystem<GoCryptFs> =
             (GoCryptFs::try_new(root, password)?, cache_policy).into();
-        Ok(Handler::<DynamicFileSystem>::from_repr(Box::new(cryptfs)))
+        Ok(Handler::new(cryptfs).into())
     }
     fn init_with_default_params(
         &self,
@@ -86,7 +85,7 @@ impl BackendProvider for GoCryptFsBuilder {
         password: &str,
     ) -> Result<Handler<dyn MasterKey>> {
         GoCryptFs::init_with_default_params(root, password)
-            .map(|key| Handler::<dyn MasterKey>::from_repr(Box::new(GoCryptFSMasterKey(key))))
+            .map(|key| Handler::new(GoCryptFSMasterKey(key)).into())
     }
 }
 
@@ -105,13 +104,9 @@ mod tests {
             let config = StorageConfigFileSystem::new(&storage);
             let backend = GoCryptFsBackend::from(root_path);
             let key = GoCryptFsBuilder::init_with_backend(&backend, &config, "password").unwrap();
-            let fs = GoCryptFsBuilder::try_build_with_backend(
-                backend,
-                &config,
-                "password",
-                Box::new(NoBuffering),
-            )
-            .unwrap();
+            let fs =
+                GoCryptFsBuilder::try_build_with_backend(backend, &config, "password", NoBuffering)
+                    .unwrap();
             (key, fs)
         };
 

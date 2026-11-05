@@ -358,11 +358,12 @@ mod tests {
         flushes: &Arc<AtomicUsize>,
         drops: &Arc<AtomicUsize>,
     ) -> Handler<dyn FileHandle> {
-        Handler::<dyn FileHandle>::from_repr(Box::new(TestFile {
+        Handler::new(TestFile {
             identity,
             flushes: flushes.clone(),
             drops: drops.clone(),
-        }))
+        })
+        .into()
     }
 
     #[test]

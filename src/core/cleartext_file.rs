@@ -25,7 +25,7 @@ impl<F> CleartextFile<F> {
 
 impl<F: FileHandle> From<CleartextFile<F>> for Handler<dyn FileHandle> {
     fn from(file: CleartextFile<F>) -> Self {
-        Self::from_repr(Box::new(file))
+        Handler::new(file).into()
     }
 }
 
