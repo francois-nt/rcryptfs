@@ -7,7 +7,7 @@ use crate::core::{
 use crate::{Utf8Path, register_provider};
 
 /// Concrete filesystem built over the supplied entry and directory layouts.
-type BuiltFileSystem<S, L> = CleartextFileSystem<CryptoMator<EntryStorageBackend<S, L>>>;
+type BuiltFileSystem<S, L, C> = CleartextFileSystem<CryptoMator<EntryStorageBackend<S, L>>, C>;
 
 /// Backend provider for Cryptomator repositories.
 pub struct CryptoMatorBuilder;
@@ -23,18 +23,19 @@ impl CryptoMatorBuilder {
     }
 
     /// Builds a Cryptomator crypto layer over an arbitrary entry representation.
-    pub fn try_build_with_backend<S, L, C>(
+    pub fn try_build_with_backend<S, L, C, P>(
         backend: EntryStorageBackend<S, L>,
         config_fs: &C,
         password: &str,
-        cache_policy: impl FileBufferingPolicy,
-    ) -> Result<BuiltFileSystem<S, L>>
+        cache_policy: P,
+    ) -> Result<BuiltFileSystem<S, L, P>>
     where
         S: EntryStorage,
         L: DirectoryLayout + 'static,
         C: ConfigFileSystem + ?Sized,
+        P: FileBufferingPolicy,
     {
-        let cryptfs: CleartextFileSystem<CryptoMator<EntryStorageBackend<S, L>>> = (
+        let cryptfs: CleartextFileSystem<CryptoMator<EntryStorageBackend<S, L>>, _> = (
             CryptoMator::try_new_with_backend(backend, config_fs, password)?,
             cache_policy,
         )
@@ -71,7 +72,7 @@ impl BackendProvider for CryptoMatorBuilder {
         password: &str,
         cache_policy: Handler<dyn FileBufferingPolicy>,
     ) -> Result<Handler<DynamicFileSystem>> {
-        let cryptfs: CleartextFileSystem<CryptoMator> =
+        let cryptfs: CleartextFileSystem<CryptoMator, dyn FileBufferingPolicy> =
             (CryptoMator::try_new(root, password)?, cache_policy).into();
 
         Ok(Handler::new(cryptfs).into())

@@ -7,7 +7,7 @@ use crate::core::{
 use crate::{Utf8Path, register_provider};
 
 /// Concrete filesystem built over the supplied entry and directory layouts.
-type BuiltFileSystem<S, L> = CleartextFileSystem<GoCryptFs<EntryStorageBackend<S, L>>>;
+type BuiltFileSystem<S, L, C> = CleartextFileSystem<GoCryptFs<EntryStorageBackend<S, L>>, C>;
 
 struct GoCryptFSMasterKey(Vec<u8>);
 impl MasterKey for GoCryptFSMasterKey {
@@ -27,18 +27,19 @@ impl GoCryptFsBuilder {
     }
 
     /// Builds a GoCryptFS crypto layer over an arbitrary entry representation.
-    pub fn try_build_with_backend<S, L, C>(
+    pub fn try_build_with_backend<S, L, C, P>(
         backend: EntryStorageBackend<S, L>,
         config_fs: &C,
         password: &str,
-        cache_policy: impl FileBufferingPolicy,
-    ) -> Result<BuiltFileSystem<S, L>>
+        cache_policy: P,
+    ) -> Result<BuiltFileSystem<S, L, P>>
     where
         S: EntryStorage,
         L: DirectoryLayout + 'static,
         C: ConfigFileSystem + ?Sized,
+        P: FileBufferingPolicy,
     {
-        let cryptfs: CleartextFileSystem<GoCryptFs<EntryStorageBackend<S, L>>> = (
+        let cryptfs: CleartextFileSystem<GoCryptFs<EntryStorageBackend<S, L>>, _> = (
             GoCryptFs::try_new_with_backend(backend, config_fs, password)?,
             cache_policy,
         )
@@ -75,7 +76,7 @@ impl BackendProvider for GoCryptFsBuilder {
         password: &str,
         cache_policy: Handler<dyn FileBufferingPolicy>,
     ) -> Result<Handler<DynamicFileSystem>> {
-        let cryptfs: CleartextFileSystem<GoCryptFs> =
+        let cryptfs: CleartextFileSystem<GoCryptFs, _> =
             (GoCryptFs::try_new(root, password)?, cache_policy).into();
         Ok(Handler::new(cryptfs).into())
     }

@@ -139,17 +139,16 @@ mod tests {
     use super::*;
     use std::{
         sync::{Arc, mpsc},
-        time::Duration,
+        time::{Duration, Instant},
     };
 
+    /// Waits for queued scopes with a wall-clock timeout for worker scheduling.
     fn wait_for_waiters(manager: &NamespaceLockManager, count: usize) {
-        for _ in 0..10_000 {
-            if manager.state.lock().waiting.len() == count {
-                return;
-            }
-            std::thread::yield_now();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while manager.state.lock().waiting.len() != count {
+            assert!(Instant::now() < deadline, "namespace scope was not queued");
+            std::thread::sleep(Duration::from_millis(1));
         }
-        panic!("namespace scope was not queued");
     }
 
     #[test]

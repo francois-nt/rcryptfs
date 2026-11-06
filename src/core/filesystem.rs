@@ -63,22 +63,30 @@ impl FileBufferingPolicy for NoBuffering {
 
 /// Exposes an encrypted layout through the public filesystem traits.
 #[derive(Clone)]
-pub struct CleartextFileSystem<T> {
+pub struct CleartextFileSystem<T, P>
+where
+    T: ?Sized,
+    P: ?Sized,
+{
     fs: Arc<T>,
-    cache_policy: Arc<dyn FileBufferingPolicy>,
+    cache_policy: Arc<P>,
 }
 
-impl<T> From<(T, Handler<dyn FileBufferingPolicy>)> for CleartextFileSystem<T> {
-    fn from(value: (T, Handler<dyn FileBufferingPolicy>)) -> Self {
+impl<T, P> From<(T, Handler<P>)> for CleartextFileSystem<T, P>
+where
+    P: HandlerTarget + ?Sized + FileBufferingPolicy,
+    Arc<P>: From<P::Stored>,
+{
+    fn from(value: (T, Handler<P>)) -> Self {
         Self {
-            fs: Arc::from(value.0),
+            fs: Arc::new(value.0),
             cache_policy: Arc::from(value.1.into_repr()),
         }
     }
 }
 
-impl<T, U: FileBufferingPolicy> From<(T, U)> for CleartextFileSystem<T> {
-    fn from(value: (T, U)) -> Self {
+impl<T, P: FileBufferingPolicy> From<(T, P)> for CleartextFileSystem<T, P> {
+    fn from(value: (T, P)) -> Self {
         Self {
             fs: Arc::from(value.0),
             cache_policy: Arc::from(value.1),
@@ -92,14 +100,15 @@ type OpenCleartextFile<T> = CleartextFile<
 >;
 
 /// Opens an encrypted file and wraps it with the requested cache policy.
-fn try_open_crypt_file<T>(
+fn try_open_crypt_file<T, P>(
     path: &VirtualPath,
     backend: Arc<T>,
     options: FileOpenOptions,
-    cache_policy: &dyn FileBufferingPolicy,
+    cache_policy: &P,
 ) -> std::io::Result<OpenCleartextFile<T>>
 where
     T: EncryptionLayout + Send + Sync + 'static,
+    P: FileBufferingPolicy + ?Sized,
 {
     let readonly = options.is_readonly();
     let cipher_file = backend.open_file_with(path, options)?;
@@ -112,10 +121,11 @@ where
     ))
 }
 
-impl<T, F> ReadOnlyFileSystem<F> for CleartextFileSystem<T>
+impl<T, F, P> ReadOnlyFileSystem<F> for CleartextFileSystem<T, P>
 where
     T: EncryptionLayout + XattrLayout + Send + Sync + 'static,
     F: FileHandle + HandlerTarget + ?Sized,
+    P: FileBufferingPolicy + ?Sized,
     Handler<F>: From<Handler<OpenCleartextFile<T>>>,
 {
     fn open_readonly(&self, path: &VirtualPath) -> std::io::Result<Handler<F>> {
@@ -148,10 +158,11 @@ where
     }
 }
 
-impl<T, F> FileSystem<F> for CleartextFileSystem<T>
+impl<T, F, P> FileSystem<F> for CleartextFileSystem<T, P>
 where
     T: EncryptionLayout + XattrLayout + Send + Sync + 'static,
     F: FileHandle + HandlerTarget + ?Sized,
+    P: FileBufferingPolicy + ?Sized,
     Handler<F>: From<Handler<OpenCleartextFile<T>>>,
 {
     /// Opens a file with the specified options.
@@ -243,7 +254,8 @@ mod tests {
             } else {
                 FileBuffering::default()
             };
-            let fs: CleartextFileSystem<Backend> = (backend, policy).into();
+            let h: Handler<dyn FileBufferingPolicy> = Handler::new(policy).into();
+            let fs: CleartextFileSystem<_, _> = (backend, h).into();
             let path = VirtualPath::new(if cache_write { "buffered" } else { "direct" });
             let mut options = FileOpenOptions::default();
             options.read(true).write(true).create(true);
@@ -269,7 +281,7 @@ mod tests {
             file.read_exact_at(0, &mut data).unwrap();
             assert_eq!(&data, b"abcdef");
 
-            let fs: Box<DynamicFileSystem> = Box::new(fs);
+            let fs: Handler<DynamicFileSystem> = Handler::new(fs).into();
             let file = fs.open_file_with(path, options).unwrap();
             file.write_all_at(2, b"XY").unwrap();
             file.set_len(5).unwrap();
