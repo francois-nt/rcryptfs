@@ -443,12 +443,13 @@ fn rename_noreplace(old_path: &Utf8Path, new_path: &Utf8Path) -> std::io::Result
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     // SAFETY: both paths are valid NUL-terminated strings for the duration of the call.
     let result = unsafe {
-        libc::renameat2(
+        libc::syscall(
+            libc::SYS_renameat2,
             libc::AT_FDCWD,
             old_path.as_ptr(),
             libc::AT_FDCWD,
             new_path.as_ptr(),
-            libc::RENAME_NOREPLACE as _,
+            libc::RENAME_NOREPLACE,
         )
     };
     if result == 0 {
