@@ -23,7 +23,7 @@ encrypted filesystem access, rather than a single encrypted format.
 
 Requirements:
 
-- Rust **1.91 or newer** and Cargo.
+- Rust **1.95 or newer** and Cargo.
 - Git to clone the repository.
 - For the Linux mounting example below: access to `/dev/fuse` and the
   `fusermount3` helper. On Debian/Ubuntu, install the `fuse3` package.
